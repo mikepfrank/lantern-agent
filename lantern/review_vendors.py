@@ -17,7 +17,7 @@ from .luna import MODEL as LUNA_MODEL, MAX_OUTPUT_TOKENS as LUNA_OUTPUT
 from .opus import OPUS_MODEL, MAX_OUTPUT_TOKENS as OPUS_OUTPUT
 
 
-DEFAULT_DAILY_USD = Decimal("2")
+DEFAULT_DAILY_USD = Decimal("5")
 MILLION = Decimal(1_000_000)
 
 
