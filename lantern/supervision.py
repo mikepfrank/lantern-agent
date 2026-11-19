@@ -11,7 +11,7 @@ from typing import NamedTuple
 
 
 CONSULT = "consult_opus"
-TOOLS = {"chess_analyze", "message_operator", CONSULT}
+TOOLS = {"chess_analyze", "message_operator", "read_heritage", CONSULT}
 RATIONALE_LIMIT = 1200
 DATABASE = "supervision.sqlite"
 

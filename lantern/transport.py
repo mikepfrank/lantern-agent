@@ -85,10 +85,10 @@ def _prepare(payload, route, tools, *, resuming=False):
     if not isinstance(incoming, list) or any(not isinstance(tool, dict) for tool in incoming):
         raise ProtocolError("invalid tool declarations")
     declared = {t.get("name") for t in incoming if t.get("type") == "function"}
-    # Codex persists dynamic tool names at thread/start. Original chess-only
-    # threads can still run their tool under the current review schema.
-    if resuming and "chess_analyze" in declared and names - declared == {"consult_opus"}:
-        tools = [tool for tool in tools if tool["name"] != "consult_opus"]
+    # Old Codex threads retain their original tool registrations. Keep the
+    # optional additions out of requests for threads that predate them.
+    if resuming and "chess_analyze" in declared and (names - declared) <= {"consult_opus", "read_heritage"}:
+        tools = [tool for tool in tools if tool["name"] in declared]
         names = {tool["name"] for tool in tools}
     if incoming and not names.issubset(declared):
         raise ProtocolError("Codex did not advertise all configured Lantern tools")

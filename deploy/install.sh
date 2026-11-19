@@ -32,6 +32,12 @@ trap 'rm -rf -- "$stage"' EXIT
 sudo -n -u lantern install -d -m 0700 "$state"
 [[ "$(realpath -e -- "$state")" == "$state" ]]
 [[ "$(stat -c '%U' -- "$state")" == lantern ]]
+for file in Lantern.md lmstudio-chat.md lmstudio-chat.txt lmstudio-chat.pdf lmstudio-chat.pdf-pages.json; do
+    sudo -n -u lantern test -r "$state/heritage/$file" || {
+        echo "Missing private heritage file: $file" >&2
+        exit 1
+    }
+done
 
 if [[ ! -d $runtime ]]; then
     install -m 0600 -- "$archive" "$stage/codex.tar.gz"

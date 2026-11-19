@@ -16,6 +16,14 @@ The Lightsail launcher selects `--private-lightsail-cli`. On each model request 
 
 The pilot uses the host account's persistent state at `~lantern/.local/state/lantern`. A full writable Git checkout lives in `~lantern/src/lantern` outside the worker's filesystem view. Its fetch source is the operator-owned `/opt/lantern/source/lantern.bundle`. The writable in-container checkout, GitHub remote and PR workflow are future work. The chess and GPT-2 services run independently of the Lantern deployment.
 
+### Private persona and heritage archive
+
+Mike supplied a revised `Lantern.md` and three exports of the founding LM Studio conversation between Mike and Qwen on his MacBook. The local project keeps them under the ignored `heritage/` directory. The private Lightsail launcher uses `~lantern/.local/state/lantern/heritage/`, outside both Git checkouts and the installed application bundle. Provision or restore these files over a private channel. Keep the originals, extracts, screenshots and quotations out of GitHub issues, PRs, commits and public research queries.
+
+The private CLI uses `Lantern.md` as the default persona for new threads. The active operator room also uses that revision. Other saved threads retain their pinned personas.
+
+Lantern can call the supervised `read_heritage` tool to read passages on demand. The portable edition is `lmstudio-chat.md`. The verbatim export `lmstudio-chat.txt` preserves LM Studio's role markers on disk and the reader escapes their delimiters. The illustrated original is `lmstudio-chat.pdf`. A private, digest-matched `lmstudio-chat.pdf-pages.json` provides text by page. The current reader returns quotations to the text model; the images remain in the original PDF.
+
 The commissioning exchanges remain visible in `/history`. The first delivered an interim greeting, then Opus objected to disclosing a test receipt identifier and the Qwen response hit its old 4,096-token limit. In the second exchange, both test clients disconnected after changing a candle question to ask about an LED. The final answer used the new example. Codex had already received the replacement answer while the obsolete generation was still reporting costs. The current worker releases the validated answer and continues settling the specific superseded request in the background. An acknowledged steer alone never releases a budget reservation.
 
 After restarting the final release, the private room retained its thread ID. A live question asking for any planet was steered to ask for the largest one. Both operator messages belonged to the same native turn, and a separate client read the answer “Jupiter” after 20.9 seconds. All seven OpenRouter charges across the three tests settled for a total of $0.024306155. Three Luna calls and one Opus call added an estimated $0.02074115. Use ordinary operator traffic to estimate typical review rates and latency. All 65 automated tests passed on Amazon Linux, including native Codex steering, POSIX terminal behavior, process-kill recovery and separate validation of billing after reply publication.
@@ -23,7 +31,8 @@ After restarting the final release, the private room retained its thread ID. A l
 ## TODO
 
 - Polish the SSH terminal as a fallback for times when the web UI is unavailable. Revisit the interaction in a real tmux session when working on the web interface.
-- Mike plans to provide the original local Qwen design conversation for Lantern to read and to add his name to Lantern's persona. When the transcript arrives, preserve its speaker attributions. Persona revisions apply to new threads under the current pinning rules.
+- Once the web interface is available, let Mike attach images and let Lantern inspect them natively. Verify that the selected Qwen endpoint receives the image alongside Mike's accompanying text.
+- Give Lantern a supervised PDF workflow in the live agent, including on-demand text extraction and rendering a selected page for visual inspection of diagrams and illustrations through the same image-input path.
 
 ## Milestone 2
 

@@ -26,6 +26,7 @@ ProtectSystem=strict
 ProtectHome=tmpfs
 BindPaths=/home/lantern/.local/state/lantern
 ReadWritePaths=/home/lantern/.local/state/lantern
+ReadOnlyPaths=-/home/lantern/.local/state/lantern/heritage
 ProtectProc=invisible
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

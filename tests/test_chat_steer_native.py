@@ -105,7 +105,7 @@ class NativeSteering(unittest.TestCase):
             usage = Budget(state / "usage.sqlite", Decimal("1"))
             store.submit(prompt)
             args = SimpleNamespace(command="worker", state=state, codex=binary, persona=None, route="fastest",
-                                   private_lightsail_cli=True)
+                                   private_lightsail_cli=True, heritage_dir=None)
             worker = asyncio.create_task(main(args))
             try:
                 async with asyncio.timeout(12):

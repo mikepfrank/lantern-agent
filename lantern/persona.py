@@ -1,6 +1,7 @@
 """Pin the operator-supplied persona text to its Codex thread."""
 
 from contextlib import closing
+import hashlib
 from importlib.resources import files
 from pathlib import Path
 import sqlite3
@@ -11,12 +12,15 @@ def default_persona() -> str:
 
 
 class ThreadPersonas:
-    def __init__(self, state: Path):
+    def __init__(self, state: Path, *, default_path: Path | None = None):
+        self.default_path = default_path
         self.path = state / "threads.sqlite"
         with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("CREATE TABLE IF NOT EXISTS personas (thread TEXT PRIMARY KEY, text TEXT NOT NULL)")
 
     def select(self, thread: str | None, supplied: str | None) -> str:
+        if not thread and supplied is None and self.default_path is not None:
+            supplied = self.default_path.read_text(encoding="utf-8-sig")
         if supplied is not None and not supplied.strip():
             raise ValueError("The persona file is empty")
         if thread:
@@ -35,3 +39,19 @@ class ThreadPersonas:
             db.execute("INSERT OR IGNORE INTO personas VALUES (?, ?)", (thread, persona))
             if db.execute("SELECT text FROM personas WHERE thread=?", (thread,)).fetchone() != (persona,):
                 raise ValueError("A different persona is already bound to the thread")
+
+    def replace_pin(self, thread: str, expected_sha256: str, replacement_text: str) -> bool:
+        """Update one known pin. The digest covers the pinned text encoded as UTF-8."""
+        if not replacement_text.strip():
+            raise ValueError("The replacement persona is empty")
+        with closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT text FROM personas WHERE thread=?", (thread,)).fetchone()
+            if row is None:
+                raise ValueError("No persona is recorded for that thread")
+            if row[0] == replacement_text:
+                return False
+            if hashlib.sha256(row[0].encode("utf-8")).hexdigest() != expected_sha256:
+                raise ValueError("The saved persona differs from the expected revision")
+            db.execute("UPDATE personas SET text=? WHERE thread=?", (replacement_text, thread))
+            return True
