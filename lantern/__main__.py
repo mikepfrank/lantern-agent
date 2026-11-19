@@ -14,7 +14,7 @@ import sys
 from .budget import Budget, MODEL_CONTEXT_TOKENS
 from .chess_tool import CHESS_TOOL, analyze_position
 from .codex_session import run_turn
-from .persona import PROTOTYPE_PERSONA, ThreadPersonas
+from .persona import ThreadPersonas
 from .transport import (
     MAX_COMPLETION_PRICE, MAX_OUTPUT_TOKENS, MAX_PROMPT_PRICE, MODEL, ROUTES, OpenRouterGateway,
 )
@@ -32,7 +32,7 @@ def default_state() -> Path:
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", type=Path, default=default_state(), help="Private operator state directory")
-    parser.add_argument("--persona", type=Path, help="Lantern's UTF-8 persona statement")
+    parser.add_argument("--persona", type=Path, help="Use a custom UTF-8 persona for a new thread")
     parser.add_argument("--codex", default=shutil.which("codex"), help="Path to the Codex executable")
     commands = parser.add_subparsers(dest="command", required=True)
     turn = commands.add_parser("say", help="Send one message; optionally resume a previous thread")
@@ -61,8 +61,6 @@ async def main(args):
     personas = ThreadPersonas(state)
     supplied = args.persona.read_text(encoding="utf-8-sig") if args.persona else None
     persona = personas.select(getattr(args, "thread", None), supplied)
-    if persona == PROTOTYPE_PERSONA:
-        print("Using the temporary prototype persona.", file=sys.stderr)
     codex_home = state / "codex"
     workspace = state / "workspace"
     for directory in (codex_home, workspace):

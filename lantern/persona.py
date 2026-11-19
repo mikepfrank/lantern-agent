@@ -1,11 +1,13 @@
 """Pin the operator-supplied persona text to its Codex thread."""
 
 from contextlib import closing
+from importlib.resources import files
 from pathlib import Path
 import sqlite3
 
 
-PROTOTYPE_PERSONA = "Your name is Lantern. This is a temporary identity for a technical test."
+def default_persona() -> str:
+    return files("lantern").joinpath("personas", "lantern-v1.md").read_text(encoding="utf-8")
 
 
 class ThreadPersonas:
@@ -26,7 +28,7 @@ class ThreadPersonas:
                 return row[0]
             if supplied is None:
                 raise ValueError("No persona is recorded for that thread. Supply its original --persona file.")
-        return supplied if supplied is not None else PROTOTYPE_PERSONA
+        return supplied if supplied is not None else default_persona()
 
     def bind(self, thread: str, persona: str) -> None:
         with closing(sqlite3.connect(self.path)) as db, db:

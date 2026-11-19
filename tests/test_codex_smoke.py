@@ -52,7 +52,8 @@ class NativeCodexSmoke(unittest.TestCase):
     def test_native_thread_tool_roundtrip_and_resume(self):
         binary = os.environ.get("LANTERN_CODEX_BIN") or shutil.which("codex")
         self.assertTrue(binary, "Cannot find the native codex executable")
-        persona = "Lantern fixture persona: inspect the position carefully."
+        persona_file = Path(__file__).resolve().parents[1] / "lantern" / "personas" / "lantern-v1.md"
+        persona = persona_file.read_text(encoding="utf-8")
         routes = []
         errors = []
         child_pids = []
@@ -70,10 +71,16 @@ class NativeCodexSmoke(unittest.TestCase):
                 self.assertEqual(request["model"], MODEL)
                 self.assertEqual([t["name"] for t in request["tools"]], ["chess_analyze"])
                 self.assertEqual(headers["Authorization"], "Bearer offline-test-value")
-                self.assertIn(persona, json.dumps(request))
                 routes.append(request["provider"]["sort"])
                 serial = len(routes)
                 history = request["input"]
+                first_user = next(index for index, item in enumerate(history) if item.get("role") == "user")
+                developer_texts = [
+                    part["text"] for message in history[:first_user] if message.get("role") == "developer"
+                    for part in message["content"] if part["type"] == "input_text"
+                ]
+                self.assertTrue(any(persona in text for text in developer_texts),
+                                f"Request {serial} is missing the full persona before its first user message")
                 users = [json.dumps(i["content"]) for i in history if i.get("role") == "user"]
                 ticket = re.search(r"Beacon-[0-9a-f]+", " ".join(users))
                 self.assertIsNotNone(ticket, "operator ticket missing from the actual native thread")
@@ -104,9 +111,7 @@ class NativeCodexSmoke(unittest.TestCase):
 
         with TemporaryDirectory(prefix="lantern-smoke-") as tmp:
             state = Path(tmp)
-            persona_file = state / "persona.md"
-            persona_file.write_text(persona, encoding="utf-8")
-            args = argparse.Namespace(state=state, persona=persona_file, codex=binary, command="smoke")
+            args = argparse.Namespace(state=state, persona=None, codex=binary, command="smoke")
             with patch.dict(os.environ, OPENROUTER_API_KEY="offline-test-value"), \
                  patch("lantern.transport._open_upstream", fake_provider), \
                  patch("asyncio.create_subprocess_exec", record_process), redirect_stdout(StringIO()) as output:
