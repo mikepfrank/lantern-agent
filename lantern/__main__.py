@@ -25,7 +25,7 @@ from .luna import Luna
 from .review_vendors import DEFAULT_DAILY_USD, ReviewerVendors
 from .supervision import Supervisor, review_summary, supervised_tools
 from .transport import (
-    MAX_COMPLETION_PRICE, MAX_OUTPUT_TOKENS, MAX_PROMPT_PRICE, MODEL, ROUTES, OpenRouterGateway,
+    MAX_COMPLETION_PRICE, MAX_OUTPUT_TOKENS, MAX_PROMPT_PRICE, MODEL, PRIVATE_CLI_OPERATOR, ROUTES, OpenRouterGateway,
 )
 
 
@@ -43,6 +43,8 @@ def arguments():
     parser.add_argument("--state", type=Path, default=default_state(), help="Private operator state directory")
     parser.add_argument("--persona", type=Path, help="Use a custom UTF-8 persona for a new thread")
     parser.add_argument("--codex", default=shutil.which("codex"), help="Path to the Codex executable")
+    parser.add_argument("--private-lightsail-cli", action="store_true",
+                        help="Identify Mike as the human operator for the single-user Lightsail CLI")
     commands = parser.add_subparsers(dest="command", required=True)
     turn = commands.add_parser("say", help="Send one message; optionally resume a previous thread")
     turn.add_argument("message")
@@ -104,12 +106,15 @@ async def main(args):
     for directory in (codex_home, workspace):
         directory.mkdir(exist_ok=True, mode=0o700)
 
+    operator_context = PRIVATE_CLI_OPERATOR if args.private_lightsail_cli and args.command in {"worker", "say"} else ""
+
     async def turn(prompt, route, thread=None, *, on_thread=None, take_input=None, return_input=None, notify=None):
         persona = personas.select(thread, supplied)
         positions = []
         tools = supervised_tools([CHESS_TOOL, MESSAGE_TOOL] if notify else [CHESS_TOOL])
-        supervisor = Supervisor(state, Luna(vendors.call), partial(opus.review, vendors.call),
-                                partial(opus.consult, vendors.call),
+        supervisor = Supervisor(state, Luna(vendors.call, operator_context=operator_context),
+                                partial(opus.review, vendors.call, operator_context=operator_context),
+                                partial(opus.consult, vendors.call, operator_context=operator_context),
                                 sample_every=int(os.environ.get("LANTERN_SPOT_EVERY", "12")))
 
         def execute(call_id, name, arguments):
@@ -130,7 +135,8 @@ async def main(args):
 
         gateway = OpenRouterGateway(key, route=route, tools=tools, reserve=ledger.reserve,
                                     settle=ledger.settle, observe=supervisor.observe,
-                                    unregistered=supervisor.unregistered, resuming=bool(thread))
+                                    unregistered=supervisor.unregistered, resuming=bool(thread),
+                                    operator_context=operator_context)
 
         def report_usage():
             for entry in gateway.evidence:

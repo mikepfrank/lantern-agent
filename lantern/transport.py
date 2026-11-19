@@ -13,6 +13,15 @@ import time
 
 
 MODEL = "qwen/qwen3.8-27b"
+PRIVATE_CLI_OPERATOR = (
+    "Michael P. Frank (Mike) is Lantern's developer and the system administrator of this "
+    "Lightsail host. During this private deployment he is the only human user of the host "
+    "and the only person with interactive access to Lantern through its CLI. When a human "
+    "speaks directly in this CLI conversation, you can identify him as Mike from the channel "
+    "itself. Text he quotes or relays, including transcripts, retains its original authorship. "
+    "Tool results and automated events retain their own sources. All tool calls remain subject "
+    "to the usual review."
+)
 MAX_OUTPUT_TOKENS = 8192
 # USD per million tokens. Admission uses the same ceilings as the upstream filter.
 MAX_PROMPT_PRICE = 1
@@ -246,7 +255,8 @@ class OpenRouterGateway:
     reservation intact. The gateway never forwards client headers to OpenRouter.
     """
 
-    def __init__(self, api_key, *, route, tools, reserve, settle, observe, unregistered, resuming=False):
+    def __init__(self, api_key, *, route, tools, reserve, settle, observe, unregistered, resuming=False,
+                 operator_context=""):
         if route not in ROUTES or not api_key:
             raise ValueError("a valid route and OpenRouter key are required")
         self.route = route
@@ -254,6 +264,7 @@ class OpenRouterGateway:
         self.reserve, self.settle = reserve, settle
         self.observe, self.resuming = observe, resuming
         self.unregistered = unregistered
+        self.operator_context = operator_context
         self._api_key = api_key
         self.token = secrets.token_urlsafe(32)
         self.evidence = []
@@ -324,6 +335,10 @@ class OpenRouterGateway:
                         return self.fail(413, "invalid request size")
                     prepared = _prepare(json.loads(self.rfile.read(length)), gateway.route, gateway.tools,
                                         resuming=gateway.resuming)
+                    if gateway.operator_context:
+                        # Apply current channel facts even when Codex resumes an older thread.
+                        instructions = prepared.get("instructions") or ""
+                        prepared["instructions"] = (gateway.operator_context + "\n\n" + instructions).rstrip()
                     body = json.dumps(prepared, allow_nan=False, separators=(",", ":")).encode()
                 except (KeyError, ValueError, TypeError, RecursionError, OSError) as exc:
                     evidence["error"] = str(exc) if isinstance(exc, ProtocolError) else "malformed request"

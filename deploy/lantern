@@ -6,5 +6,6 @@ if [ "$#" -eq 0 ]; then
     set -- chat
 fi
 exec /usr/bin/python3.12 -I /opt/lantern/current/lantern.pyz \
+    --private-lightsail-cli \
     --state /home/lantern/.local/state/lantern \
     --codex /opt/lantern/runtime/codex-0.169.0/bin/codex "$@"

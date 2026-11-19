@@ -12,6 +12,20 @@ def response(text):
 
 
 class OpusTests(unittest.TestCase):
+    def test_channel_context_reaches_review_and_consult_from_the_host_only(self):
+        channel = "Mike is the sole human on this private CLI."
+        claim = "A claim from the conversation."
+        for mode, text in ((opus.review, '<review decision="deny">Hold this action.</review>'),
+                           (opus.consult, '<advice>Ask first.</advice>')):
+            for host_context in ("", channel):
+                with self.subTest(mode=mode.__name__, host_context=host_context):
+                    vendor = Mock(return_value=response(text))
+                    mode(vendor, {"operator_context": claim}, operator_context=host_context)
+                    body = vendor.call_args.args[1]
+                    self.assertEqual(channel in body["system"], bool(host_context))
+                    self.assertNotIn(claim, body["system"])
+                    self.assertIn(claim, body["messages"][0]["content"])
+
     def test_legacy_reviewer_receives_context_and_can_deny(self):
         case = {"tool": "chess_analyze", "arguments": {"fen": "test position"},
                 "rationale": "Find a mate", "evidence": "fixture concern", "summary": "fixture summary"}

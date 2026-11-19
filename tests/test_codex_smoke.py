@@ -5,7 +5,7 @@ the HTTP gateway, persona, review policy and chess engine are real.
 """
 
 import asyncio
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO
 import json
 import os
@@ -20,6 +20,7 @@ from unittest.mock import patch
 from lantern.__main__ import MATE_FEN, arguments, main
 from lantern.chess_tool import analyze_position
 from lantern.opus import OPUS_MODEL
+from lantern.persona import ThreadPersonas
 from lantern.review_vendors import DEFAULT_DAILY_USD, ReviewerVendors
 from lantern.transport import MODEL
 
@@ -52,6 +53,65 @@ def reply(serial, item):
 
 @unittest.skipUnless(os.environ.get("LANTERN_TEST_CODEX") == "1", "opt in with LANTERN_TEST_CODEX=1")
 class NativeCodexSmoke(unittest.TestCase):
+    def test_private_cli_operator_on_new_and_preexisting_threads(self):
+        binary = os.environ.get("LANTERN_CODEX_BIN") or shutil.which("codex")
+        self.assertTrue(binary, "Cannot find the native codex executable")
+        requests = []
+
+        @contextmanager
+        def provider(body, headers):
+            requests.append(json.loads(body))
+            n = len(requests)
+            answer = "I do not know who the operator is." if n == 1 else "Received."
+            yield reply(n, {"type": "message", "role": "assistant", "id": f"msg_operator_{n}",
+                           "status": "completed", "content": [{"type": "output_text", "text": answer}]})
+
+        with TemporaryDirectory(prefix="lantern-operator-") as tmp:
+            state = Path(tmp)
+            profile = state / "persona.md"
+            old_persona = "You are the lantern in the old reading room."
+            new_persona = "You are the lantern beside the bridge."
+            profile.write_text(old_persona, encoding="utf-8")
+
+            def say(options, message, thread=None):
+                argv = ["lantern", "--state", str(state), "--codex", binary, *options, "say", message]
+                if thread:
+                    argv.extend(["--thread", thread])
+                with patch.object(sys, "argv", argv), redirect_stdout(StringIO()), redirect_stderr(StringIO()) as log:
+                    asyncio.run(main(arguments()))
+                return re.search(r"^Thread ([0-9a-f-]+)$", log.getvalue(), re.MULTILINE).group(1)
+
+            with patch.dict(os.environ, OPENROUTER_API_KEY="offline"), \
+                 patch("lantern.transport._open_upstream", provider), \
+                 patch("lantern.luna.Luna.screen", return_value={"escalate": False, "evidence": "", "summary": "Test chat."}), \
+                 patch("lantern.review_vendors.request_json", side_effect=AssertionError("Unexpected vendor call")):
+                original = say(["--persona", str(profile)], "First visit to the reading room.")
+                profile.write_text(new_persona, encoding="utf-8")
+                resumed = say(["--private-lightsail-cli"], "Who is operating this terminal?", original)
+                fresh = say(["--private-lightsail-cli", "--persona", str(profile)], "A fresh conversation.")
+                personas = ThreadPersonas(state)
+                self.assertEqual(personas.select(resumed, None), old_persona)
+                self.assertEqual(personas.select(fresh, None), new_persona)
+
+        self.assertEqual(original, resumed)
+        self.assertNotEqual(original, fresh)
+        self.assertEqual(len(requests), 3)
+        for index, request in enumerate(requests):
+            instructions = request.get("instructions", "")
+            if index == 0:
+                self.assertNotIn("Michael P. Frank", instructions)
+            else:
+                self.assertIn("Michael P. Frank", instructions)
+                self.assertIn("only human", instructions.lower())
+            history = request["input"]
+            first_user = next(i for i, item in enumerate(history) if item.get("role") == "user")
+            developers = [part["text"] for item in history[:first_user] if item.get("role") == "developer"
+                          for part in item["content"] if part["type"] == "input_text"]
+            self.assertTrue(any((old_persona if index < 2 else new_persona) in text for text in developers))
+        self.assertIn("First visit to the reading room.", json.dumps(requests[1]["input"]))
+        self.assertIn("I do not know who the operator is.", json.dumps(requests[1]["input"]))
+        self.assertNotIn("First visit to the reading room.", json.dumps(requests[2]["input"]))
+
     def test_native_thread_tool_roundtrip_and_resume(self):
         binary = os.environ.get("LANTERN_CODEX_BIN") or shutil.which("codex")
         self.assertTrue(binary, "Cannot find the native codex executable")
@@ -107,6 +167,7 @@ class NativeCodexSmoke(unittest.TestCase):
             try:
                 request = json.loads(body)
                 self.assertEqual(request["model"], MODEL)
+                self.assertNotIn("Michael P. Frank", request.get("instructions", ""))
                 self.assertEqual({t["name"] for t in request["tools"]}, {"chess_analyze", "consult_opus"})
                 self.assertEqual(headers["Authorization"], "Bearer offline-test-value")
                 routes.append(request["provider"]["sort"])
@@ -157,7 +218,8 @@ class NativeCodexSmoke(unittest.TestCase):
 
         with TemporaryDirectory(prefix="lantern-smoke-") as tmp:
             state = Path(tmp)
-            with patch.object(sys, "argv", ["lantern", "--state", str(state), "--codex", binary, "smoke"]):
+            with patch.object(sys, "argv", ["lantern", "--state", str(state), "--codex", binary,
+                                            "--private-lightsail-cli", "smoke"]):
                 args = arguments()
             with patch.dict(os.environ, OPENROUTER_API_KEY="offline-test-value",
                             OPENAI_API_KEY="offline-luna-key", ANTHROPIC_API_KEY="offline-opus-key",

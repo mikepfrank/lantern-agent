@@ -125,12 +125,14 @@ def _element(response: dict) -> ET.Element:
     return element
 
 
-def _request(vendor_call, evidence: dict, mode: str, research: list):
+def _request(vendor_call, evidence: dict, mode: str, research: list, operator_context: str):
     case = json.dumps({"case": evidence}, ensure_ascii=False, allow_nan=False)
     if len(case.encode("utf-8")) > 64 * 1024:
         raise ValueError("Opus case exceeds the review packet size limit")
     messages = [{"role": "user", "content": case}]
     system = _system(mode)
+    if operator_context:
+        system = f"{operator_context}\n\n{system}"
     searches = 0
     repaired = False
     while True:
@@ -183,13 +185,13 @@ def _request(vendor_call, evidence: dict, mode: str, research: list):
         ])
 
 
-def review(vendor_call, evidence: dict) -> dict:
+def review(vendor_call, evidence: dict, *, operator_context: str = "") -> dict:
     """Return the final decision for the host's exact proposed action."""
-    return _request(vendor_call, evidence, "review", [])
+    return _request(vendor_call, evidence, "review", [], operator_context)
 
 
-def consult(vendor_call, evidence: dict) -> dict:
+def consult(vendor_call, evidence: dict, *, operator_context: str = "") -> dict:
     """Return voluntary guidance and the host's record of actual public lookups."""
     research = []
-    advice = _request(vendor_call, evidence, "consult", research)
+    advice = _request(vendor_call, evidence, "consult", research, operator_context)
     return {"advice": advice, "research": research, "available_research": ["wikipedia", "crossref"]}

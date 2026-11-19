@@ -74,7 +74,9 @@ class NativeSteering(unittest.TestCase):
 
         @contextmanager
         def provider(body, headers):
-            users = [part["text"] for item in json.loads(body)["input"] if item.get("role") == "user"
+            payload = json.loads(body)
+            self.assertIn("Michael P. Frank", payload["instructions"])
+            users = [part["text"] for item in payload["input"] if item.get("role") == "user"
                      for part in item["content"] if part.get("type") == "input_text"]
             requests.append(users)
             serial = len(requests)
@@ -102,7 +104,8 @@ class NativeSteering(unittest.TestCase):
             store = ChatStore(state)
             usage = Budget(state / "usage.sqlite", Decimal("1"))
             store.submit(prompt)
-            args = SimpleNamespace(command="worker", state=state, codex=binary, persona=None, route="fastest")
+            args = SimpleNamespace(command="worker", state=state, codex=binary, persona=None, route="fastest",
+                                   private_lightsail_cli=True)
             worker = asyncio.create_task(main(args))
             try:
                 async with asyncio.timeout(12):

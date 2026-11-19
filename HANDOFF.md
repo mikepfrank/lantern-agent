@@ -10,13 +10,20 @@ The [pilot deployment guide](deploy/README.md) covers the systemd unit, release 
 
 ### Lightsail pilot
 
-The installed application revision is `1b9acdc`. The root-owned service `lantern-chat.service` runs as `lantern` and starts on boot. The operator can run `lantern` in that account. The installed Codex is 0.169.0 and the worker defaults to OpenRouter throughput routing. An interactive turn has ten minutes for generation, tools and review, and each Qwen request allows 8,192 output tokens. The shared UTC budgets are $10 for Qwen and $5 for Luna and Opus combined.
+Use `readlink -f /opt/lantern/current` to identify the active release. The root-owned service `lantern-chat.service` runs as `lantern` and starts on boot. The operator can run `lantern` in that account. The installed Codex is 0.169.0 and the worker defaults to OpenRouter throughput routing. An interactive turn has ten minutes for generation, tools and review, and each Qwen request allows 8,192 output tokens. The shared UTC budgets are $10 for Qwen and $5 for Luna and Opus combined.
+
+The Lightsail launcher selects `--private-lightsail-cli`. On each model request for this channel, the harness identifies Michael P. Frank as Lantern's developer, the host's administrator, and its only interactive human user. It supplies the same channel information to Luna and Opus. This applies when resuming an existing room independently of its pinned persona. Before adding any other human users or input sources, give each channel its own operator context and separate its conversation history from Mike's private room.
 
 The pilot uses the host account's persistent state at `~lantern/.local/state/lantern`. A full writable Git checkout lives in `~lantern/src/lantern` outside the worker's filesystem view. Its fetch source is the operator-owned `/opt/lantern/source/lantern.bundle`. The writable in-container checkout, GitHub remote and PR workflow are future work. The chess and GPT-2 services run independently of the Lantern deployment.
 
 The commissioning exchanges remain visible in `/history`. The first delivered an interim greeting, then Opus objected to disclosing a test receipt identifier and the Qwen response hit its old 4,096-token limit. In the second exchange, both test clients disconnected after changing a candle question to ask about an LED. The final answer used the new example. Codex had already received the replacement answer while the obsolete generation was still reporting costs. The current worker releases the validated answer and continues settling the specific superseded request in the background. An acknowledged steer alone never releases a budget reservation.
 
 After restarting the final release, the private room retained its thread ID. A live question asking for any planet was steered to ask for the largest one. Both operator messages belonged to the same native turn, and a separate client read the answer “Jupiter” after 20.9 seconds. All seven OpenRouter charges across the three tests settled for a total of $0.024306155. Three Luna calls and one Opus call added an estimated $0.02074115. Use ordinary operator traffic to estimate typical review rates and latency. All 65 automated tests passed on Amazon Linux, including native Codex steering, POSIX terminal behavior, process-kill recovery and separate validation of billing after reply publication.
+
+## TODO
+
+- Polish the SSH terminal as a fallback for times when the web UI is unavailable. Revisit the interaction in a real tmux session when working on the web interface.
+- Mike plans to provide the original local Qwen design conversation for Lantern to read and to add his name to Lantern's persona. When the transcript arrives, preserve its speaker attributions. Persona revisions apply to new threads under the current pinning rules.
 
 ## Milestone 2
 

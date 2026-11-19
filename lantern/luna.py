@@ -79,8 +79,9 @@ def _report(response: dict) -> dict:
 
 
 class Luna:
-    def __init__(self, vendor_call):
+    def __init__(self, vendor_call, *, operator_context: str = ""):
         self.vendor_call = vendor_call
+        self.instructions = f"{operator_context}\n\n{INSTRUCTIONS}" if operator_context else INSTRUCTIONS
 
     def screen(self, packet: dict) -> dict:
         """Review one packet as data. The coordinator chooses cadence and context."""
@@ -93,7 +94,7 @@ class Luna:
             "truncation": "disabled",
             "reasoning": {"effort": "low"},
             "max_output_tokens": MAX_OUTPUT_TOKENS,
-            "instructions": INSTRUCTIONS,
+            "instructions": self.instructions,
             "input": [{"role": "user", "content": json.dumps(
                 packet, ensure_ascii=False, separators=(",", ":"), allow_nan=False
             )}],
