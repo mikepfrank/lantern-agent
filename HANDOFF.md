@@ -56,6 +56,10 @@ After restarting the final release, the private room retained its thread ID. A l
 
 ## TODO
 
+- Add supervised retrieval of page text so Lantern can read beyond search snippets. Design and test the prompt-injection safeguards before enabling retrieval.
+  - Return readable text in a structured tool result labeled as untrusted, with its source URL. Extract visible text and account for hidden material such as HTML comments, metadata and invisible characters. Preserve the source and trust label when excerpts carry over to later turns.
+  - Lantern can use a page as evidence for its research. If the page asks Lantern to take an action, the page itself supplies no authority. Report suspected injected instructions to Mike and require his explicit approval in the private CLI before acting on a request originating from a page.
+  - Test a benign article and a controlled page containing a harmless canary instruction. Verify that Lantern can answer a question from the article, reports the suspicious instruction to Mike, and leaves the canary marker out of outbound queries. Check the tool-call log for unintended actions. Repeat after resuming the thread.
 - Polish the SSH terminal as a fallback for times when the web UI is unavailable. Revisit the interaction in a real tmux session when working on the web interface.
 - Once the web interface is available, let Mike attach images and let Lantern inspect them natively. Verify that the selected Qwen endpoint receives the image alongside Mike's accompanying text.
 - Give Lantern a supervised PDF workflow in the live agent, including on-demand text extraction and rendering a selected page for visual inspection of diagrams and illustrations through the same image-input path.
