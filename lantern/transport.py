@@ -7,7 +7,9 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import secrets
-from threading import Thread
+import socket
+from threading import Thread, Timer
+import time
 
 
 MODEL = "qwen/qwen3.8-27b"
@@ -18,6 +20,9 @@ MAX_COMPLETION_PRICE = 4
 ROUTES = {"fastest": "throughput", "cheapest": "price"}
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_EVENT_BYTES = 2 * 1024 * 1024
+UPSTREAM_IDLE_SECONDS = 120
+UPSTREAM_DEADLINE_SECONDS = 180
+TERMINAL_EVENTS = {"response.completed", "response.failed", "response.incomplete"}
 
 
 class ProtocolError(ValueError):
@@ -96,12 +101,35 @@ def _prepare(payload, route, tools, *, resuming=False):
 
 @contextmanager
 def _open_upstream(body, headers):
-    connection = http.client.HTTPSConnection("openrouter.ai", timeout=120)
+    deadline = time.monotonic() + UPSTREAM_DEADLINE_SECONDS
+    connection = http.client.HTTPSConnection("openrouter.ai", timeout=UPSTREAM_IDLE_SECONDS)
+    timer = None
     try:
+        connection.connect()
+        # Keep a reference: HTTPConnection may detach the stream's socket in
+        # getresponse(). An idle timeout alone allows endless SSE keepalives.
+        upstream_socket = connection.sock
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("OpenRouter connection deadline expired")
+        upstream_socket.settimeout(min(UPSTREAM_IDLE_SECONDS, remaining))
+
+        def expire():
+            try:
+                upstream_socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        timer = Timer(remaining, expire)
+        timer.daemon = True
+        timer.start()
         connection.request("POST", "/api/v1/responses", body=body, headers=headers)
         with connection.getresponse() as response:
             yield response
     finally:
+        if timer is not None:
+            timer.cancel()
+            timer.join()
         connection.close()
 
 
@@ -188,7 +216,7 @@ def _inspect(event, names, evidence):
     for endpoint in metadata.get("endpoints", {}).get("available", []):
         if endpoint.get("selected") is True:
             evidence["provider"] = endpoint.get("provider")
-    if kind not in ("response.completed", "response.failed", "response.incomplete"):
+    if kind not in TERMINAL_EVENTS:
         return None
     evidence["status"] = kind.partition(".")[2]
     usage = response.get("usage") or {}
@@ -225,6 +253,8 @@ class OpenRouterGateway:
         gateway = self
 
         class Handler(BaseHTTPRequestHandler):
+            timeout = 15
+
             def log_message(self, *args):
                 pass
 
@@ -237,7 +267,6 @@ class OpenRouterGateway:
                 self.wfile.write(data)
 
             def do_POST(self):
-                self.connection.settimeout(15)
                 if self.path != "/v1/responses":
                     return self.fail(404, "unknown route")
                 expected = "Bearer " + gateway.token
@@ -272,6 +301,18 @@ class OpenRouterGateway:
                            "Accept": "text/event-stream", "Accept-Encoding": "identity",
                            "X-OpenRouter-Metadata": "enabled"}
                 started = False
+
+                def deliver(write, *args):
+                    # Steering can cancel Codex's local HTTP read while the
+                    # provider is still generating (and charging) this request.
+                    if evidence.get("client_disconnected"):
+                        return
+                    try:
+                        write(*args)
+                    except OSError:
+                        evidence["client_disconnected"] = True
+                        self.close_connection = True
+
                 try:
                     with _open_upstream(body, headers) as upstream:
                         evidence["http_status"] = upstream.status
@@ -288,13 +329,13 @@ class OpenRouterGateway:
                                     gateway.settle(reservation, Decimal(0))
                                     evidence["cost_usd"] = "0"
                                     evidence["settlement_reason"] = "router_no_eligible_endpoint"
-                            return self.fail(upstream.status if 400 <= upstream.status < 600 else 502,
-                                             "OpenRouter declined the request")
+                            return deliver(self.fail, upstream.status if 400 <= upstream.status < 600 else 502,
+                                           "OpenRouter declined the request")
                         if upstream.getheader("Content-Type", "").split(";")[0].strip().lower() != "text/event-stream":
-                            return self.fail(502, "expected OpenRouter event stream")
+                            return deliver(self.fail, 502, "expected OpenRouter event stream")
                         self.send_response(200)
                         self.send_header("Content-Type", "text/event-stream")
-                        self.end_headers()
+                        deliver(self.end_headers)
                         started = True
                         names = {tool["name"] for tool in prepared["tools"]}
                         for frame, event in _frames(upstream):
@@ -302,8 +343,11 @@ class OpenRouterGateway:
                             if cost is not None and "cost_usd" not in evidence:
                                 gateway.settle(reservation, cost)
                                 evidence["cost_usd"] = str(cost)
-                            self.wfile.write(frame)
-                            self.wfile.flush()
+                            deliver(self.wfile.write, frame)
+                            if event.get("type") in TERMINAL_EVENTS:
+                                break
+                        else:
+                            raise ProtocolError("upstream stream ended before a terminal response")
                 except Exception as exc:
                     evidence["error"] = str(exc) if isinstance(exc, ProtocolError) else "gateway or upstream failure"
                     if isinstance(exc, UnregisteredCall):
@@ -312,12 +356,17 @@ class OpenRouterGateway:
                         except Exception:
                             evidence["review_error"] = "unregistered tool review unavailable"
                     if not started:
-                        self.fail(502, "OpenRouter connection failed")
+                        deliver(self.fail, 502, "OpenRouter connection failed")
                     else:
                         evidence["status"] = "interrupted"
                         self.close_connection = True
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        # server_close() joins these handlers before callers inspect evidence.
+        # A canceled client may already have returned a replacement response.
+        class GatewayServer(ThreadingHTTPServer):
+            daemon_threads = False
+
+        self._server = GatewayServer(("127.0.0.1", 0), Handler)
         self.base_url = f"http://127.0.0.1:{self._server.server_port}/v1"
         self._thread = Thread(target=self._server.serve_forever, kwargs={"poll_interval": .1}, daemon=True)
         self._thread.start()

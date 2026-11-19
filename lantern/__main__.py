@@ -1,4 +1,4 @@
-"""Run a single local Lantern turn or the two-process milestone check."""
+"""Chat with Lantern, run individual supervised turns, or inspect usage."""
 
 import argparse
 import asyncio
@@ -15,6 +15,8 @@ import sys
 from .budget import Budget, MODEL_CONTEXT_TOKENS
 from .chess_tool import CHESS_TOOL, analyze_position
 from .codex_session import run_turn
+from .chat_store import ChatStore
+from .chat_worker import MESSAGE_TOOL, serve, worker_online
 from .persona import ThreadPersonas
 from . import opus
 from .luna import Luna
@@ -46,12 +48,36 @@ def arguments():
     turn.add_argument("--route", choices=ROUTES, default="fastest")
     commands.add_parser("smoke", help="Test both routes, a real chess tool call and cross-process recall")
     commands.add_parser("usage", help="Read this state directory's UTC-day spending and holds")
+    commands.add_parser("chat", help="Attach to the persistent operator conversation")
+    send = commands.add_parser("send", help="Queue a message without attaching to chat")
+    send.add_argument("message")
+    send.add_argument("--id", help="Optional stable ID for retrying the same submission")
+    history = commands.add_parser("history", help="Print recent conversation events as JSON")
+    history.add_argument("--limit", type=int, default=30)
+    commands.add_parser("status", help="Read worker, queue, and active turn status")
+    worker = commands.add_parser("worker", help="Serve the durable chat until stopped")
+    worker.add_argument("--route", choices=ROUTES, default="cheapest")
     return parser.parse_args()
 
 
 async def main(args):
     state = args.state.resolve()
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if args.command in {"chat", "send", "history", "status"}:
+        store = ChatStore(state)
+        if args.command == "chat":
+            from .chat_cli import attach
+            if not worker_online(state):
+                print("Worker offline. Messages will wait in the queue.", file=sys.stderr)
+            attach(store)
+        elif args.command == "send":
+            print(store.submit(args.message, client_id=args.id))
+        elif args.command == "history":
+            print(json.dumps([{"id": e.id, "at": e.at, "role": e.role, "text": e.text}
+                              for e in store.recent(args.limit)], ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps({**store.status(), "worker_online": worker_online(state)}, indent=2))
+        return
     reservation = Decimal(MODEL_CONTEXT_TOKENS * MAX_PROMPT_PRICE +
                           MAX_OUTPUT_TOKENS * MAX_COMPLETION_PRICE) / 1_000_000
     ledger = Budget(state / "usage.sqlite", reservation)
@@ -71,20 +97,22 @@ async def main(args):
         raise ValueError("Set --codex to the Codex executable")
     personas = ThreadPersonas(state)
     supplied = args.persona.read_text(encoding="utf-8-sig") if args.persona else None
-    persona = personas.select(getattr(args, "thread", None), supplied)
     codex_home = state / "codex"
     workspace = state / "workspace"
     for directory in (codex_home, workspace):
         directory.mkdir(exist_ok=True, mode=0o700)
 
-    async def turn(prompt, route, thread=None):
+    async def turn(prompt, route, thread=None, *, on_thread=None, take_input=None, return_input=None, notify=None):
+        persona = personas.select(thread, supplied)
         positions = []
-        tools = supervised_tools([CHESS_TOOL])
+        tools = supervised_tools([CHESS_TOOL, MESSAGE_TOOL] if notify else [CHESS_TOOL])
         supervisor = Supervisor(state, Luna(vendors.call), partial(opus.review, vendors.call),
                                 partial(opus.consult, vendors.call),
                                 sample_every=int(os.environ.get("LANTERN_SPOT_EVERY", "12")))
 
-        def dispatch(name, arguments):
+        def execute(call_id, name, arguments):
+            if name == MESSAGE_TOOL["name"] and notify is not None:
+                return notify(call_id, arguments)
             if name != CHESS_TOOL["name"]:
                 raise ValueError("Tool is not registered")
             result = analyze_position(arguments)
@@ -94,27 +122,33 @@ async def main(args):
         def record_thread(tid):
             personas.bind(tid, persona)
             supervisor.bind(tid)
+            if on_thread is not None:
+                on_thread(tid)
             print(f"Thread {tid}", file=sys.stderr, flush=True)
 
-        with OpenRouterGateway(key, route=route, tools=tools, reserve=ledger.reserve,
-                               settle=ledger.settle, observe=supervisor.observe, unregistered=supervisor.unregistered,
-                               resuming=bool(thread)) as gateway:
-            try:
+        gateway = OpenRouterGateway(key, route=route, tools=tools, reserve=ledger.reserve,
+                                    settle=ledger.settle, observe=supervisor.observe,
+                                    unregistered=supervisor.unregistered, resuming=bool(thread))
+        try:
+            with gateway:
                 result = await run_turn(
                     codex_bin=args.codex, codex_home=codex_home, workspace=workspace, model=MODEL,
                     provider="lantern", base_url=gateway.base_url, persona=persona, prompt=prompt,
-                    tools=tools, dispatch=lambda cid, name, args: supervisor.dispatch(cid, name, args, dispatch),
+                    tools=tools, dispatch=lambda cid, name, args: supervisor.dispatch(cid, name, args, partial(execute, cid)),
                     thread_id=thread,
-                    on_thread=record_thread,
+                    on_thread=record_thread, take_input=take_input, return_input=return_input,
                     env={"LANTERN_GATEWAY_TOKEN": gateway.token},
                 )
-            finally:
-                for entry in gateway.evidence:
-                    print(json.dumps(entry), file=sys.stderr)
+        finally:
+            for entry in gateway.evidence:
+                print(json.dumps(entry), file=sys.stderr, flush=True)
         if not gateway.evidence or any(e.get("status") != "completed" for e in gateway.evidence):
             raise RuntimeError("The gateway did not observe a completed response for every request")
         return result, positions
 
+    if args.command == "worker":
+        await serve(state, ChatStore(state), turn, args.route)
+        return
     if args.command == "say":
         result, _ = await turn(args.message, args.route, args.thread)
         print(result.text)
@@ -137,7 +171,7 @@ async def main(args):
     if recalled.thread_id != result.thread_id or marker not in recalled.text or "Qg7#" not in recalled.text:
         raise RuntimeError("The resumed process did not recall the unique ticket and move")
     print(json.dumps({"smoke": "passed", "thread": result.thread_id,
-                      "persona_sha256": hashlib.sha256(persona.encode()).hexdigest(),
+                      "persona_sha256": hashlib.sha256(personas.select(result.thread_id, supplied).encode()).hexdigest(),
                       "budget": ledger.today()}, indent=2))
 
 

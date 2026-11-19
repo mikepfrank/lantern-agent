@@ -1,2 +1,5 @@
 # Preserve the exact UTF-8 attachment and its original line endings.
 lantern/personas/lantern-v1.md -text whitespace=cr-at-eol
+deploy/*.sh text eol=lf
+deploy/lantern text eol=lf
+deploy/*.service text eol=lf

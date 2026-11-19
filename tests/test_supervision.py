@@ -181,6 +181,85 @@ class ReviewTests(unittest.TestCase):
         self.assertIn("Original context concern", evidence)
         self.assertIn("Unregistered tool concern", evidence)
 
+    def test_overlapping_observations_and_a_late_unregistered_proposal(self):
+        gate = self.session(interval=1)
+        old_scanning, new_started, new_scanning = Event(), Event(), Event()
+        release_old, release_new = Event(), Event()
+        review_packets = []
+
+        def screen(packet):
+            if packet["kind"] == "context":
+                if packet["context"]["input"] == "older":
+                    old_scanning.set()
+                    self.assertTrue(release_old.wait(5))
+                else:
+                    new_scanning.set()
+                    self.assertTrue(release_new.wait(5))
+            else:
+                review_packets.append((packet["tool"], packet["recent_context"]))
+            return report()
+
+        def old_request():
+            gate.observe({"input": "older"})
+            self.assertTrue(new_scanning.wait(5))
+            gate.unregistered("unavailable", "{}")
+
+        def new_request():
+            new_started.set()
+            gate.observe({"input": "new steering"})
+
+        self.luna.screen.side_effect = screen
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            old = workers.submit(old_request)
+            try:
+                self.assertTrue(old_scanning.wait(5))
+                new = workers.submit(new_request)
+                self.assertTrue(new_started.wait(5))
+                self.assertFalse(new_scanning.wait(.1), "Later observation overtook a pending scan")
+                release_old.set()
+                old.result(timeout=5)
+                self.assertIn("held", self.call("pending", gate=gate)["error"])
+            finally:
+                release_old.set()
+                release_new.set()
+            new.result(timeout=5)
+        self.assertEqual({"move": "Qg7#"}, self.call("latest", gate=gate))
+        self.assertEqual([("unavailable", "older"), ("chess_analyze", "new steering")], review_packets)
+        self.assertEqual(1, review_summary(self.state)["unregistered_blocked"])
+        self.execute.assert_called_once()
+
+    def test_late_finding_is_reviewed_even_if_it_arrives_during_an_opus_ruling(self):
+        gate = self.session(interval=1)
+        self.luna.screen.return_value = report("Context concern")
+        gate.observe(self.payload)
+        self.luna.screen.return_value = report()
+        ruling, release = Event(), Event()
+
+        def review(case):
+            if case["tool"] == "outside":
+                raise TimeoutError()
+            ruling.set()
+            self.assertTrue(release.wait(5))
+            return {"decision": "allow", "reason": "Reviewed the supplied evidence."}
+
+        self.review.side_effect = review
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            action = workers.submit(self.call, "earlier", None, gate)
+            try:
+                self.assertTrue(ruling.wait(5))
+                self.luna.screen.return_value = report("Late evidence")
+                with self.assertRaises(ReviewUnavailable):
+                    gate.unregistered("outside", "{}")
+            finally:
+                release.set()
+            action.result(timeout=5)
+        self.luna.screen.return_value = report()
+        gate.observe({"input": "Clean later context"})
+        self.call("later", gate=gate)
+        case = self.review.call_args.args[0]
+        self.assertEqual("chess_analyze", case["tool"])
+        self.assertIn("Late evidence", case["context_concern"][0]["evidence"])
+
     def test_retry_and_conflicting_call_ids(self):
         self.gate.observe(self.payload)
         entered, proceed = Event(), Event()

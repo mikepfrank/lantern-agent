@@ -1,13 +1,18 @@
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from decimal import Decimal
 from http.client import HTTPConnection
 from io import BytesIO
 import json
+import socket
+from socketserver import _SocketWriter
+from threading import Event
+import time
 import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
-from lantern.transport import MODEL, OpenRouterGateway
+from lantern.transport import MODEL, OpenRouterGateway, _open_upstream
 
 
 CHESS = {"name": "chess", "description": "Inspect a position", "inputSchema": {"type": "object"}}
@@ -114,6 +119,64 @@ class TransportTests(unittest.TestCase):
             self.reserve.assert_called_once()
             self.settle.assert_not_called()
 
+    def test_disconnected_client_cannot_hide_upstream_errors(self):
+        write = _SocketWriter.write
+
+        def disconnected(writer, data):
+            if data.startswith(b"data:"):
+                raise BrokenPipeError()
+            return write(writer, data)
+
+        first = event("response.created", response={"id": "r3"})
+        denied = event("response.output_item.added", item={"type": "function_call", "name": "outside"})
+        failed = event("response.failed", response={"error": {"code": "provider_error"}})
+        with patch.object(_SocketWriter, "write", disconnected), self.gateway("cheapest") as gate:
+            for ending, expected_status in [(b"", "interrupted"), (denied, "interrupted"), (failed, "failed")]:
+                with self.subTest(ending=ending):
+                    self.stream = first + ending
+                    self.assertEqual(self.request(gate), (200, b""))
+                    self.assertEqual(gate.evidence[-1]["status"], expected_status)
+                    self.assertTrue(gate.evidence[-1]["client_disconnected"])
+        self.unregistered.assert_called_once_with("outside", None)
+        self.settle.assert_not_called()
+        self.assertEqual(len(self.wire), 3)
+
+    def test_gateway_exit_waits_for_pending_cost(self):
+        release, waiting, closing = Event(), Event(), Event()
+
+        class Delayed(Stream):
+            def readline(self, *args):
+                waiting.set()
+                if not release.wait(5):
+                    raise TimeoutError("Test did not release provider")
+                return super().readline(*args)
+
+        @contextmanager
+        def upstream(body, headers):
+            yield Delayed(self.stream)
+
+        with patch("lantern.transport._open_upstream", upstream), ThreadPoolExecutor() as pool:
+            gate = self.gateway("cheapest").__enter__()
+            client = pool.submit(self.request, gate)
+            self.assertTrue(waiting.wait(3))
+            close_socket = gate._server.server_close
+
+            def close():
+                closing.set()
+                close_socket()
+
+            with patch.object(gate._server, "server_close", close):
+                shutdown = pool.submit(gate.__exit__, None, None, None)
+                try:
+                    self.assertTrue(closing.wait(3))
+                    with self.assertRaises(FutureTimeout):
+                        shutdown.result(timeout=.1)
+                finally:
+                    release.set()
+                shutdown.result(timeout=3)
+            self.assertEqual(client.result(), (200, self.stream))
+            self.settle.assert_called_once_with(31, Decimal("0.000041"))
+
     def test_only_router_parameter_rejection_releases_hold(self):
         self.http_status = 404
         message = ("No endpoints found that can handle the requested parameters. "
@@ -132,3 +195,26 @@ class TransportTests(unittest.TestCase):
                 self.assertEqual(self.request(gate)[0], 404)
                 self.assertNotIn("private input", json.dumps(gate.evidence))
             self.settle.assert_not_called()
+
+
+class UpstreamDeadlineTests(unittest.TestCase):
+    def test_stalled_stream_is_closed_at_absolute_deadline(self):
+        upstream, peer = socket.socketpair()
+        with upstream, peer:
+            upstream.settimeout(3)
+            # Begin a valid, indefinite stream on a real socket. The peer
+            # deliberately leaves it open even after the initial event.
+            peer.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n: keepalive\n\n")
+            connection = HTTPConnection("offline")
+            with patch("lantern.transport.http.client.HTTPSConnection", return_value=connection), \
+                 patch.object(connection, "connect", lambda: setattr(connection, "sock", upstream)), \
+                 patch("lantern.transport.UPSTREAM_DEADLINE_SECONDS", .15):
+                with _open_upstream(b"{}", {}) as response:
+                    self.assertEqual(response.readline(), b": keepalive\n")
+                    self.assertEqual(response.readline(), b"\n")
+                    start = time.monotonic()
+                    try:
+                        self.assertEqual(response.readline(), b"")
+                    except OSError:
+                        pass  # Windows may report the timeout directly.
+                    self.assertLess(time.monotonic() - start, 2)

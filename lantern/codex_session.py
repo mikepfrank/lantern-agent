@@ -23,9 +23,15 @@ class TurnResult:
     tool_calls: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class SteeringInput:
+    ids: tuple[int, ...]
+    text: str
+
+
 BASE_INSTRUCTIONS = (
     "You are Lantern, an agent in a conversation with your operator. "
-    "Your persona follows in the developer instructions. In this on-demand prototype, "
+    "Your persona follows in the developer instructions. In this prototype, "
     "use the registered tools for chess analysis and ethical consultation. "
     "GPT-6 Luna screens each proposed tool call and periodically reviews your conversation. "
     "Give a brief public rationale for the exact action. Claude 3 Opus decides flagged cases. "
@@ -37,6 +43,8 @@ BASE_INSTRUCTIONS = (
     "session. Only report an external action as complete when a tool has confirmed it. "
     "Use the supplied chess tool "
     "when the operator requests an engine analysis, then interpret its actual result. "
+    "When message_operator is available, use it for a useful interim update. "
+    "The operator can add a message while you work. Take it into account when it arrives. "
     "Give the operator a final answer in ordinary text."
 )
 DISABLED_FEATURES = (
@@ -202,11 +210,58 @@ class _Peer:
         elif method == "model/rerouted" or (method == "error" and not p.get("willRetry", False)):
             raise CodexError("Codex reported a provider or turn error")
 
+    async def finish_turn(self, take_input, return_input):
+        if take_input is None:
+            while not self.finished:
+                await self.handle(await self.read())
+            return
+        # One reader owns the RPC stream. Polling the inbox must never cancel a
+        # partial JSON frame or lose the acknowledgement for an in-flight steer.
+        reader = asyncio.create_task(self.read())
+        steer = None
+        next_check = 0.0
+        try:
+            while not self.finished or steer is not None:
+                delay = None if steer is not None else max(0.0, next_check - time.monotonic())
+                ready, _ = await asyncio.wait((reader,), timeout=delay)
+                if ready:
+                    msg = reader.result()
+                    if "method" in msg:
+                        await self.handle(msg)
+                    elif steer is not None and msg.get("id") == self.seq:
+                        if "error" in msg:
+                            # A formal rejection means the additional user input
+                            # was not accepted. Leave it queued for a new turn.
+                            return_input(steer.ids)
+                            take_input = None
+                        elif (msg.get("result") or {}).get("turnId") != self.turn_id:
+                            raise CodexError("Codex did not confirm delivery to this turn")
+                        steer = None
+                    else:
+                        raise CodexError("Unexpected Codex response during an active turn")
+                    if self.finished and steer is None:
+                        break
+                    reader = asyncio.create_task(self.read())
+                if not self.finished and steer is None and time.monotonic() >= next_check:
+                    next_check = time.monotonic() + .25
+                    steer = take_input() if take_input else None
+                    if steer is not None:
+                        self.seq += 1
+                        await self.send({"id": self.seq, "method": "turn/steer", "params": {
+                            "threadId": self.thread_id, "expectedTurnId": self.turn_id,
+                            "input": [{"type": "text", "text": steer.text}],
+                        }})
+        finally:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+
 
 async def run_turn(*, codex_bin: str, codex_home: Path, workspace: Path, model: str,
                    provider: str, persona: str, prompt: str, tools: list[dict],
                    dispatch: Callable[[str, str, dict], dict], thread_id: str | None = None,
                    on_thread: Callable[[str], None] | None = None,
+                   take_input: Callable[[], SteeringInput | None] | None = None,
+                   return_input: Callable[[tuple[int, ...]], None] | None = None,
                    env: dict[str, str] | None = None, base_url: str | None = None,
                    timeout: float = 180.0) -> TurnResult:
     """Start or resume with a local gateway URL or the caller's isolated config.toml.
@@ -214,6 +269,8 @@ async def run_turn(*, codex_bin: str, codex_home: Path, workspace: Path, model: 
     on_thread runs before inference so the caller can durably record a new thread.
     Tool dispatch is synchronous; handlers must keep their own work bounded.
     """
+    if take_input is not None and return_input is None:
+        raise ValueError("Steering requires a way to return undelivered input")
     workspace = workspace.resolve(strict=True)
     home = codex_home.resolve(strict=True)
     if thread_id is not None:
@@ -262,8 +319,7 @@ async def run_turn(*, codex_bin: str, codex_home: Path, workspace: Path, model: 
                 "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
                 "input": [{"type": "text", "text": prompt}]})
             peer.set_turn(resp["turn"]["id"])
-            while not peer.finished:
-                await peer.handle(await peer.read())
+            await peer.finish_turn(take_input, return_input)
             return TurnResult(tid, peer.turn_id, "\n\n".join(peer.messages), tuple(peer.tool_calls))
     except TimeoutError as exc:
         raise CodexError("Codex timed out; do not replay a turn automatically") from exc

@@ -1,6 +1,20 @@
 # Lantern
 
-Lantern is an on-demand operator CLI for Qwen3.8 27B. Each turn runs the Codex CLI app-server with a private thread store. A loopback gateway forwards text requests to OpenRouter. New threads can use the Astra chess engine through `chess_analyze` and ask Claude 3 Opus for ethical guidance through `consult_opus`.
+Lantern is a private terminal chat with Qwen3.8 27B. Each turn runs the Codex CLI app-server with a persistent thread store. A loopback gateway forwards text requests to OpenRouter. Lantern can use the Astra chess engine through `chess_analyze` and ask Claude 3 Opus for ethical guidance through `consult_opus`.
+
+## Talk to Lantern on Lightsail
+
+From the laptop, run:
+
+```sh
+ssh -t lightsail "sudo -iu lantern lantern"
+```
+
+Press Enter to send. You can type again while Lantern works. The worker offers follow-ups to the active Codex turn. A follow-up arriving after that turn closes starts the next turn in the same conversation. Lantern can send an interim message with `message_operator`. Both those messages and final replies are saved while you are disconnected.
+
+Use `/status` for active and queued work, `/history` for recent messages, and `/quit` to detach. Run the same SSH command to return. In a `lantern` login shell, `lantern send "…"` queues a message without opening the terminal interface, and `lantern usage` shows both daily ledgers. A worker restart preserves the conversation and queued messages. If it stops mid-turn, check the interruption notice and any tool effects before resubmitting.
+
+The [pilot deployment guide](deploy/README.md) covers the private systemd service and operator commands.
 
 ## Run locally
 
@@ -11,6 +25,8 @@ python -m lantern say "Hello, Lantern."
 python -m lantern say --thread THREAD_ID --route cheapest "What were we discussing?"
 python -m lantern usage
 ```
+
+To run the persistent chat locally, start `python -m lantern worker` in one terminal and `python -m lantern chat` in another with the same state directory. Only the worker needs credentials. It waits locally when the inbox is empty. The pilot worker uses price routing by default and accepts `--route fastest` when started manually.
 
 New threads use [Lantern's own persona statement](lantern/personas/lantern-v1.md) by default. Codex receives it as developer instructions alongside the harness instructions. The first turn prints a thread ID and saves the selected persona text. A later process can resume the thread with the same state directory, including older threads created with the prototype persona. To try a different persona, start a new thread with `--persona path/to/file.md` before the subcommand.
 

@@ -1,0 +1,40 @@
+[Unit]
+Description=Lantern private terminal chat worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=lantern
+WorkingDirectory=/opt/lantern/current
+EnvironmentFile=/etc/lantern/worker.env
+Environment=HOME=/home/lantern/.local/state/lantern
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/lantern worker
+Restart=on-failure
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=180
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindPaths=/home/lantern/.local/state/lantern
+ReadWritePaths=/home/lantern/.local/state/lantern
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

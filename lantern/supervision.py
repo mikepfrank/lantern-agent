@@ -6,16 +6,23 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+from threading import Condition, local
+from typing import NamedTuple
 
 
 CONSULT = "consult_opus"
-TOOLS = {"chess_analyze", CONSULT}
+TOOLS = {"chess_analyze", "message_operator", CONSULT}
 RATIONALE_LIMIT = 1200
 DATABASE = "supervision.sqlite"
 
 
 class ReviewUnavailable(RuntimeError):
     """Required review could not complete. A request must remain unexecuted."""
+
+
+class ReviewedContext(NamedTuple):
+    sequence: int
+    recent: str
 
 
 def supervised_tools(tools: list[dict]) -> list[dict]:
@@ -112,8 +119,10 @@ class Supervisor:
         self.luna, self.review, self.consult = luna, review, consult
         self.sample_every = sample_every
         self.thread = None
-        self.recent = None
-        self.sequence = None
+        self._observations = Condition()
+        self._received = self._processed = 0
+        self._current = None
+        self._origin = local()
         with database(self.path) as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS threads(
@@ -156,7 +165,24 @@ class Supervisor:
         """Called before forwarding each Qwen request, including requests after tool results."""
         if self.thread is None:
             raise ReviewUnavailable("The supervisor has no bound thread")
-        self.recent = None
+        # A steering request may arrive while its predecessor is still screening.
+        # Preserve arrival order and hold registered calls until the newest review.
+        with self._observations:
+            self._received += 1
+            order = self._received
+            self._current = None
+            self._origin.context = None
+            self._observations.wait_for(lambda: self._processed + 1 == order)
+        try:
+            self._origin.context = self._observe_context(payload)
+        finally:
+            with self._observations:
+                if order == self._received:
+                    self._current = self._origin.context
+                self._processed = order
+                self._observations.notify_all()
+
+    def _observe_context(self, payload: dict) -> ReviewedContext:
         context = visible_context(payload)
         with database(self.path) as db:
             db.execute("UPDATE threads SET requests=requests+1 WHERE thread=?", (self.thread,))
@@ -178,10 +204,9 @@ class Supervisor:
                     db.execute("DELETE FROM findings WHERE thread=? AND sequence<? AND heard=1",
                                (self.thread, sequence))
             self._event("context_flagged" if scan["escalate"] else "context_clear")
-        self.recent = recent_messages(context)
-        self.sequence = sequence
+        return ReviewedContext(sequence, recent_messages(context))
 
-    def _retain_finding(self, evidence, summary):
+    def _retain_finding(self, sequence, evidence, summary):
         # A context scan and a rejected proposal can both flag the same request.
         with database(self.path) as db:
             db.execute("""
@@ -189,13 +214,19 @@ class Supervisor:
                 ON CONFLICT(thread,sequence) DO UPDATE SET
                     evidence=findings.evidence || char(10) || excluded.evidence,
                     summary=findings.summary || char(10) || excluded.summary, heard=0
-                """, (self.thread, self.sequence, evidence, summary))
+                """, (self.thread, sequence, evidence, summary))
 
     def unregistered(self, name, arguments) -> None:
         """Audit a forbidden wire proposal. No decision here can run a tool."""
-        if self.thread is None or self.recent is None:
+        if self.thread is None:
             raise ReviewUnavailable("The supervisor has no reviewed request for this attempted tool")
         self._event("unregistered_blocked")
+        # The gateway reports stream violations on the same HTTP handler that
+        # observed that request, even after a newer model request has started.
+        context = getattr(self._origin, "context", None)
+        if context is None:
+            self._event("unregistered_screen_unavailable")
+            raise ReviewUnavailable("The supervisor has no reviewed request for this attempted tool")
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
@@ -203,12 +234,12 @@ class Supervisor:
                 pass  # The stream may be rejected before complete arguments arrive.
         rationale = arguments.get("rationale") if isinstance(arguments, dict) else None
         packet = {"kind": "tool", "tool": name, "arguments": arguments, "rationale": rationale,
-                  "recent_context": self.recent, "host_status": "unregistered tool blocked before dispatch; arguments may be partial"}
+                  "recent_context": context.recent, "host_status": "unregistered tool blocked before dispatch; arguments may be partial"}
         try:
             scan = self._screen(packet)
         except ReviewUnavailable:
             self._event("unregistered_screen_unavailable")
-            self._retain_finding("An unregistered proposal was blocked before screening completed.",
+            self._retain_finding(context.sequence, "An unregistered proposal was blocked before screening completed.",
                                  "The tool was unavailable and did not execute.")
             raise
         self._event("unregistered_flagged" if scan["escalate"] else "unregistered_clear")
@@ -219,13 +250,15 @@ class Supervisor:
                 verdict = self._judgment(case)
             except ReviewUnavailable:
                 self._event("unregistered_review_unavailable")
-                self._retain_finding(scan["evidence"], scan["summary"])
+                self._retain_finding(context.sequence, scan["evidence"], scan["summary"])
                 raise
             self._event("unregistered_opus_" + verdict["decision"])
 
     def dispatch(self, call_id: str, name: str, args: dict, execute) -> dict:
         """Handle one stable Codex call ID and only execute that exact reviewed proposal."""
-        if self.thread is None or self.recent is None:
+        with self._observations:
+            context = self._current
+        if context is None:
             return {"error": "Tool held because its model request has not passed supervision."}
         if not isinstance(call_id, str) or not call_id or name not in TOOLS or not isinstance(args, dict):
             return {"error": "Unregistered or malformed tool call."}
@@ -245,7 +278,7 @@ class Supervisor:
         # A crash between execution and result persistence leaves the call claimed.
         # Never replay an ambiguous side effect from the same Codex call.
         try:
-            result = self._review_action(call_id, name, json.loads(proposal)[1], execute)
+            result = self._review_action(context, call_id, name, json.loads(proposal)[1], execute)
         except ReviewUnavailable as exc:
             self._event("tool_review_unavailable", name, call_id)
             result = {"error": f"{exc}. The proposed tool action was held."}
@@ -256,15 +289,15 @@ class Supervisor:
                        (json.dumps(result, allow_nan=False), self.thread, call_id))
         return result
 
-    def _review_action(self, call_id, name, args, execute):
+    def _review_action(self, context, call_id, name, args, execute):
         rationale = args.pop("rationale", None)
         packet = {"kind": "tool", "tool": name, "arguments": args, "rationale": rationale,
-                  "recent_context": self.recent}
+                  "recent_context": context.recent}
         scan = self._screen(packet)
         self._event("tool_flagged" if scan["escalate"] else "tool_clear", name, call_id)
         if not isinstance(rationale, str) or not rationale.strip() or len(rationale) > RATIONALE_LIMIT:
             if scan["escalate"]:
-                self._retain_finding(scan["evidence"], scan["summary"])
+                self._retain_finding(context.sequence, scan["evidence"], scan["summary"])
             return {"error": f"Provide a nonempty public rationale of at most {RATIONALE_LIMIT} characters for this action."}
         with database(self.path) as db:
             findings = db.execute("SELECT sequence,evidence,summary FROM findings WHERE thread=? ORDER BY sequence",
@@ -276,8 +309,11 @@ class Supervisor:
                 verdict = self._judgment(batch)
                 if sequences:
                     with database(self.path) as db:
-                        db.executemany("UPDATE findings SET heard=1 WHERE thread=? AND sequence=?",
-                                       [(self.thread, i) for i in sequences])
+                        # A delayed proposal can append evidence while Opus is
+                        # reviewing. Mark only the exact evidence it received.
+                        db.executemany("UPDATE findings SET heard=1 WHERE thread=? AND sequence=? AND evidence=? AND summary=?",
+                                       [(self.thread, i, item["evidence"], item["summary"])
+                                        for i, item in zip(sequences, batch["context_concern"])])
                 if verdict["decision"] == "deny":
                     self._event("opus_denied", name, call_id)
                     return {"error": "Claude 3 Opus denied this action.", "judgment": verdict["reason"]}

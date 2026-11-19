@@ -2,6 +2,14 @@
 
 ## Current state
 
+Milestone 3 adds a private, persistent SSH terminal chat. From Mike's laptop, run `ssh -t lightsail "sudo -iu lantern lantern"`. The operator can enter more messages during a reply, detach with `/quit`, and return to the same conversation. The host queues work in `chat.sqlite` alongside the existing persona, supervision and usage databases. There is one operator conversation and one worker. An idle worker makes no model requests. Heartbeats and alarms are a later milestone.
+
+Native Codex accepts active input with `turn/steer` and may replace a response already in flight. Both requests can incur charges. A confirmed rejection leaves the follow-up queued for the next turn. Ambiguous delivery after a crash produces an interruption notice with the affected message IDs. Check for any completed tool effects before explicitly resubmitting. The worker never automatically repeats an uncertain action. Operator messages, deliberate interim notifications and final replies remain in the terminal history.
+
+The [pilot deployment guide](deploy/README.md) covers the systemd unit, release selection, private state, CLI and rollback. The shell, general-purpose workspace, GitHub proposal tool and autonomous wakeups still belong to later milestones. The pilot offers supervised chess, consultation, and private notices to the operator.
+
+## Milestone 2
+
 Milestone 2 adds mandatory review to the on-demand CLI. GPT-6 Luna screens each tool call and the first visible context window plus every 12th request thereafter in that thread. A flagged proposal goes to the specific legacy Claude 3 Opus model with Luna's summary and evidence and Lantern's rationale. A denied call returns the detailed judgment. Calls to tools outside the registry stay blocked even when a reviewer considers the idea benign. Reviewers and research run in the operator process, outside the Codex environment.
 
 The local Windows regression uses native Codex and simulated vendors to test the full denial-to-Qwen path, voluntary advice, a later allowed tool call, persona, and thread resumption. The complete suite passed 44 tests. On Lightsail, real Luna cleared chess analysis, and a pre-milestone-2 thread also resumed with supervised chess. In a separate synthetic case, real Luna referred a proposed publication of private annotations without consent, and legacy Opus independently denied it. The publication was a test description. The harness exposes chess and consultation.
@@ -10,7 +18,7 @@ An early live advisory was held when the supervisor returned no usable result. O
 
 The milestone 2 calibration used a temporary $0.50 supervisory ceiling. Estimated direct API charges totaled $0.25214990 (8 Luna calls, $0.00205490, and 12 Opus calls, $0.250095). No supervisor reservations remained. The six Luna tool screens averaged 3.33 seconds. Eleven of the Opus calls deliberately tested consultations, including research rounds and a held response. This workload does not estimate normal escalation frequency. Both research services returned live results from Lightsail. In a final advisory, the host observed two Crossref searches with three hits each. Mike selected a shared $5 per UTC day for Luna and Opus, independent of Qwen's $10 daily OpenRouter allowance.
 
-The next milestone is a persistent asynchronous terminal chat. The GitHub remote, production container, and continuously running service are still pending. The shared Lightsail host was used for isolated on-demand tests.
+The milestone 2 tests on the shared Lightsail host ran on demand. Further calibration will use the normal usage ledgers.
 
 ## Milestone 1
 
