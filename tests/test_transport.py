@@ -198,12 +198,23 @@ class TransportTests(unittest.TestCase):
 
 
 class UpstreamDeadlineTests(unittest.TestCase):
-    def test_stalled_stream_is_closed_at_absolute_deadline(self):
+    def test_keepalives_cannot_extend_absolute_deadline(self):
         upstream, peer = socket.socketpair()
-        with upstream, peer:
+        stop = Event()
+
+        def keepalive():
+            # More frequent than either timeout. Cap the fixture's lifetime
+            # even if the transport were to ignore its deadline.
+            for _ in range(100):
+                if stop.wait(.025):
+                    break
+                try:
+                    peer.sendall(b": keepalive\n\n")
+                except OSError:
+                    break
+
+        with upstream, peer, ThreadPoolExecutor() as pool:
             upstream.settimeout(3)
-            # Begin a valid, indefinite stream on a real socket. The peer
-            # deliberately leaves it open even after the initial event.
             peer.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n: keepalive\n\n")
             connection = HTTPConnection("offline")
             with patch("lantern.transport.http.client.HTTPSConnection", return_value=connection), \
@@ -213,8 +224,12 @@ class UpstreamDeadlineTests(unittest.TestCase):
                     self.assertEqual(response.readline(), b": keepalive\n")
                     self.assertEqual(response.readline(), b"\n")
                     start = time.monotonic()
+                    pool.submit(keepalive)
                     try:
-                        self.assertEqual(response.readline(), b"")
+                        while response.readline():
+                            pass
                     except OSError:
                         pass  # Windows may report the timeout directly.
+                    finally:
+                        stop.set()
                     self.assertLess(time.monotonic() - start, 2)

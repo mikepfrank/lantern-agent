@@ -14,7 +14,7 @@ import sys
 
 from .budget import Budget, MODEL_CONTEXT_TOKENS
 from .chess_tool import CHESS_TOOL, analyze_position
-from .codex_session import run_turn
+from .codex_session import CodexError, run_turn
 from .chat_store import ChatStore
 from .chat_worker import MESSAGE_TOOL, serve, worker_online
 from .persona import ThreadPersonas
@@ -56,7 +56,7 @@ def arguments():
     history.add_argument("--limit", type=int, default=30)
     commands.add_parser("status", help="Read worker, queue, and active turn status")
     worker = commands.add_parser("worker", help="Serve the durable chat until stopped")
-    worker.add_argument("--route", choices=ROUTES, default="cheapest")
+    worker.add_argument("--route", choices=ROUTES, default="fastest")
     return parser.parse_args()
 
 
@@ -138,7 +138,14 @@ async def main(args):
                     thread_id=thread,
                     on_thread=record_thread, take_input=take_input, return_input=return_input,
                     env={"LANTERN_GATEWAY_TOKEN": gateway.token},
+                    timeout=600 if args.command == "worker" else 180,
                 )
+        except CodexError as exc:
+            last = gateway.evidence[-1] if gateway.evidence else {}
+            if last.get("status") == "incomplete" and (last.get("output_limit_reached")
+                                                        or last.get("output_tokens") == MAX_OUTPUT_TOKENS):
+                raise CodexError(f"The provider reached the {MAX_OUTPUT_TOKENS:,}-token response limit.") from exc
+            raise
         finally:
             for entry in gateway.evidence:
                 print(json.dumps(entry), file=sys.stderr, flush=True)

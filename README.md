@@ -26,7 +26,7 @@ python -m lantern say --thread THREAD_ID --route cheapest "What were we discussi
 python -m lantern usage
 ```
 
-To run the persistent chat locally, start `python -m lantern worker` in one terminal and `python -m lantern chat` in another with the same state directory. Only the worker needs credentials. It waits locally when the inbox is empty. The pilot worker uses price routing by default and accepts `--route fastest` when started manually.
+To run the persistent chat locally, start `python -m lantern worker` in one terminal and `python -m lantern chat` in another with the same state directory. Only the worker needs credentials. It waits locally when the inbox is empty. The pilot worker uses throughput routing by default and accepts `--route cheapest` when started manually. Qwen can use up to 8,192 output tokens in a response. A worker turn including tools and reviews has a ten-minute deadline.
 
 New threads use [Lantern's own persona statement](lantern/personas/lantern-v1.md) by default. Codex receives it as developer instructions alongside the harness instructions. The first turn prints a thread ID and saves the selected persona text. A later process can resume the thread with the same state directory, including older threads created with the prototype persona. To try a different persona, start a new thread with `--persona path/to/file.md` before the subcommand.
 

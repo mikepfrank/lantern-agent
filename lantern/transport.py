@@ -13,7 +13,7 @@ import time
 
 
 MODEL = "qwen/qwen3.8-27b"
-MAX_OUTPUT_TOKENS = 4096
+MAX_OUTPUT_TOKENS = 8192
 # USD per million tokens. Admission uses the same ceilings as the upstream filter.
 MAX_PROMPT_PRICE = 1
 MAX_COMPLETION_PRICE = 4
@@ -21,7 +21,7 @@ ROUTES = {"fastest": "throughput", "cheapest": "price"}
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_EVENT_BYTES = 2 * 1024 * 1024
 UPSTREAM_IDLE_SECONDS = 120
-UPSTREAM_DEADLINE_SECONDS = 180
+UPSTREAM_DEADLINE_SECONDS = 300
 TERMINAL_EVENTS = {"response.completed", "response.failed", "response.incomplete"}
 
 
@@ -219,6 +219,9 @@ def _inspect(event, names, evidence):
     if kind not in TERMINAL_EVENTS:
         return None
     evidence["status"] = kind.partition(".")[2]
+    incomplete = response.get("incomplete_details") or {}
+    if isinstance(incomplete, dict) and incomplete.get("reason") == "max_output_tokens":
+        evidence["output_limit_reached"] = True
     usage = response.get("usage") or {}
     for name in ("input_tokens", "output_tokens"):
         if type(usage.get(name)) is int:
