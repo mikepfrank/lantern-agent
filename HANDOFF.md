@@ -2,13 +2,21 @@
 
 ## Current state
 
-**Operator check, November 18, 2026 (US Central).** Mike inspected the private state directory on Lightsail and chatted with Lantern in the existing room after the persona and heritage update. He reported that Lantern seemed more confident about its origins and its role. This completes the manual check of the updated room. Continue using the same conversation. The next planned milestone is persistent alarms and adjustable heartbeats under the existing daily budget.
+**November 19, 2026 (US Central).** Milestones 1–4 are running in the private Lightsail CLI pilot. Release `ec11dd1` enabled independent work in Mike's existing room. Its first real heartbeat fired at 11:41 a.m. Central. Lantern checked its schedule and budget, saved a note in `workspace/files/notes/`, and chose a 300-minute cadence after starting at 60 minutes. Luna and Opus reviewed the proposed actions. Mike can inspect the current setting with `lantern schedule` and pause the heartbeat with `lantern heartbeat 0`.
 
-Milestone 3 adds a private, persistent SSH terminal chat. From Mike's laptop, run `ssh -t lightsail "sudo -iu lantern lantern"`. The operator can enter more messages during a reply, detach with `/quit`, and return to the same conversation. The host queues work in `chat.sqlite` alongside the existing persona, supervision and usage databases. There is one operator conversation and one worker. An idle worker makes no model requests. Heartbeats and alarms are a later milestone.
+Milestone 3 adds a private, persistent SSH terminal chat. From Mike's laptop, run `ssh -t lightsail "sudo -iu lantern lantern"`. The operator can enter more messages during a reply, detach with `/quit`, and return to the same conversation. The host queues work in `chat.sqlite` alongside the existing persona, supervision and usage databases. There is one operator conversation and one worker. Between inputs and scheduled wakes, the worker waits locally.
 
 Native Codex accepts active input with `turn/steer` and may replace a response already in flight. Both requests can incur charges. A confirmed rejection leaves the follow-up queued for the next turn. Ambiguous delivery after a crash produces an interruption notice with the affected message IDs. Check for any completed tool effects before explicitly resubmitting. The worker never automatically repeats an uncertain action. Operator messages, deliberate interim notifications and final replies remain in the terminal history.
 
-The [pilot deployment guide](deploy/README.md) covers the systemd unit, release selection, private state, CLI and rollback. The shell, general-purpose workspace, GitHub proposal tool and autonomous wakeups still belong to later milestones. The pilot offers supervised chess analysis, consultation with Opus, private notices to the operator, and access to the founding archive.
+The [pilot deployment guide](deploy/README.md) covers the systemd unit, release selection, private state, CLI and rollback. Current tools cover chess, consultation with Opus, private notices, heritage reading, persistent workspace files, web search, budget status, heartbeat and alarm scheduling. Shell and Python execution, the container with its editable harness clone, and GitHub proposals remain to be implemented.
+
+### Independent work
+
+The private worker resumes the same native Codex room for human messages, heartbeats and alarms. The harness identifies the source of a scheduled turn to both Qwen and its reviewers. Mike's messages have priority. The cadence and one-time alarms persist through restarts. A daily cap leaves waiting work queued until midnight UTC. If a cap interrupts work that reached the provider, Lantern receives a continuation with instructions to check the earlier tool results. See the [operator commands](README.md#independent-work).
+
+The editable directory is `~lantern/.local/state/lantern/workspace/files/`. The host mediates list, read and write operations, including creating subdirectories and updating an existing file by its digest. Codex's native sandbox remains read-only. The release, heritage, ledgers and review policy are outside the model's writable directory. Public search uses Mwmbl for general results, Wikipedia for background and Crossref for papers.
+
+All 99 tests passed on Amazon Linux with native Codex and simulated model providers. An offline rehearsal on the actual 193-record room changed only its session metadata. The worker backed up the original rollout under `operator-backups/independent-work-v1/` before the live upgrade. Separate live checks returned three hits from each search index. A paid autonomous turn exercised the budget and schedule tools, a supervised file write and cadence adjustment. The first proposed write was denied, and Lantern revised the note. The scheduled-alarm and midnight rollover cases were exercised with a controlled clock.
 
 ### Lightsail pilot
 
@@ -23,6 +31,8 @@ For routine inspection, log in as `lantern` and open `~/.local/state/lantern`. T
 ### Private persona and heritage archive
 
 Mike supplied a revised `Lantern.md` and three exports of the founding LM Studio conversation between Mike and Qwen on his MacBook. The local project keeps them under the ignored `heritage/` directory. The private Lightsail launcher uses `~lantern/.local/state/lantern/heritage/`, outside both Git checkouts and the installed application bundle. Provision or restore these files over a private channel. Keep the originals, extracts, screenshots and quotations out of GitHub issues, PRs, commits and public research queries.
+
+On November 18 Mike inspected the state directory and reported that Lantern seemed more confident about its origins and role after chatting with the updated persona and archive access.
 
 The private CLI uses `Lantern.md` as the default persona for new threads. The active operator room also uses that revision. Other saved threads retain their pinned personas.
 
@@ -65,7 +75,7 @@ Milestone 1 passed on 2026-11-18 (US Central) with [Qwen's own Lantern statement
 - OpenRouter returned “No endpoints found that can handle the requested parameters” with `require_parameters=true`. Omitting that optional filter resolved the problem while retaining the pinned model, allowlisted tool and price ceilings.
 - The operator CLI and the tests are described in [README.md](README.md). The live prototype state, including the thread store and budget SQLite file, is private to `lantern` under its default state directory. No chess or GPT-2 service changes were required.
 
-Lantern's own shell access, general web search, scheduled wakeups and GitHub PR submission are later milestones.
+At milestone 1, Lantern's own shell access, general web search, scheduled wakeups and GitHub PR submission were planned. See Current state for deployment status.
 
 ## Lantern's copy of its harness
 
