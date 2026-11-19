@@ -63,6 +63,11 @@ def arguments():
     usage.add_argument("--day", help="Detailed report for a UTC date (YYYY-MM-DD)")
     usage.add_argument("--calls", action="store_true", help="List individual ledger entries")
     usage.add_argument("--batch", type=int, help="Compare calls attributed to this worker batch on the selected day")
+    flags = commands.add_parser("flags", help="Read Luna's recorded reasons for flagging context or tools")
+    flags.add_argument("--kind", choices=("context", "tool"), help="Filter to context scans or tool reviews")
+    flags.add_argument("--batch", type=int, help="Filter to this worker batch")
+    flags.add_argument("--limit", type=int, default=20, help="Number of flags per page (1 to 200)")
+    flags.add_argument("--before-id", type=int, help="Read flags older than this flag ID")
     commands.add_parser("chat", help="Attach to the persistent operator conversation")
     send = commands.add_parser("send", help="Queue a message without attaching to chat")
     send.add_argument("message")
@@ -82,6 +87,11 @@ def arguments():
 
 async def main(args):
     state = args.state.resolve()
+    if args.command == "flags":
+        from .flag_report import flag_report
+        print(json.dumps(flag_report(state, kind=args.kind, batch=args.batch,
+                                     limit=args.limit, before_id=args.before_id), indent=2))
+        return
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     if args.command == "usage" and (args.day is not None or args.calls or args.batch is not None):
         from .usage_report import usage_report
@@ -207,7 +217,7 @@ async def main(args):
                                 partial(opus.review, vendor_call, operator_context=context),
                                 partial(opus.consult, vendor_call, operator_context=context),
                                 sample_every=int(os.environ.get("LANTERN_SPOT_EVERY", "12")),
-                                tool_names=[tool["name"] for tool in tools])
+                                tool_names=[tool["name"] for tool in tools], batch_id=batch_id)
 
         def execute(call_id, name, arguments):
             if name == MESSAGE_TOOL["name"] and notify is not None:

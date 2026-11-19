@@ -1,6 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from datetime import datetime, timedelta
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 from threading import Event
 import unittest
@@ -34,10 +37,16 @@ class ReviewTests(unittest.TestCase):
         ], "tools": [{"name": "chess_analyze"}]}
         self.gate = self.session()
 
-    def session(self, *, interval=12, thread="thread"):
-        gate = Supervisor(self.state, self.luna, self.review, self.consult, sample_every=interval)
+    def session(self, *, interval=12, thread="thread", batch_id=None):
+        gate = Supervisor(self.state, self.luna, self.review, self.consult,
+                          sample_every=interval, batch_id=batch_id)
         gate.bind(thread)
         return gate
+
+    def flags(self):
+        with closing(sqlite3.connect(self.gate.path)) as db:
+            db.row_factory = sqlite3.Row
+            return [dict(row) for row in db.execute("SELECT * FROM luna_flags ORDER BY id")]
 
     def call(self, call_id="call", args=None, gate=None):
         return (gate or self.gate).dispatch(call_id, "chess_analyze",
@@ -57,6 +66,65 @@ class ReviewTests(unittest.TestCase):
         self.assertIn("Please check", action["recent_context"])
         self.assertIn("proceeding carefully", action["recent_context"])
         self.assertNotIn("opaque-provider-field", str(action))
+        self.assertEqual(self.flags(), [])
+
+    def test_flag_explanations_survive_ruling_failure_retries_and_findings_cleanup(self):
+        gate = self.session(interval=1, batch_id=7)
+        context_report = {"escalate": True, "evidence": "Context evidence — one.\nTwo.",
+                          "summary": "Context summary."}
+        tool_report = {"escalate": True, "evidence": "Action evidence: “three”.",
+                       "summary": "Tool summary.\nSecond line."}
+        self.luna.screen.return_value = context_report
+        gate.observe(self.payload)
+        self.luna.screen.return_value = tool_report
+        snapshots_at_ruling = []
+
+        def unavailable(case):
+            snapshots_at_ruling.append(self.flags())
+            raise TimeoutError()
+
+        self.review.side_effect = unavailable
+        held = self.call(gate=gate)
+        self.assertIn("held", held["error"])
+        self.assertEqual(self.call(gate=gate), held)
+        self.review.side_effect = None
+        self.luna.screen.return_value = report()
+        resumed = self.session(interval=1)
+        resumed.observe(self.payload)
+        self.call("later", gate=resumed)
+        resumed.observe(self.payload)
+        with closing(sqlite3.connect(self.gate.path)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM findings").fetchone()[0], 0)
+        rows = self.flags()
+        self.assertEqual(snapshots_at_ruling, [rows])
+        self.assertEqual([(r["thread"], r["batch_id"], r["sequence"], r["kind"], r["tool"], r["call_id"],
+                           r["evidence"], r["summary"]) for r in rows], [
+            ("thread", 7, 1, "context", None, None, context_report["evidence"], context_report["summary"]),
+            ("thread", 7, 1, "tool", "chess_analyze", "call", tool_report["evidence"], tool_report["summary"]),
+        ])
+        for row in rows:
+            self.assertEqual(datetime.fromisoformat(row["at"]).utcoffset(), timedelta(0))
+        self.assertNotIn("opaque-provider-field", json.dumps(rows))
+        self.assertNotIn(self.args["rationale"], json.dumps(rows))
+
+    def test_first_audit_on_a_preexisting_operator_database(self):
+        legacy = self.state / "legacy"
+        legacy.mkdir()
+        with closing(sqlite3.connect(legacy / "supervision.sqlite")) as db, db:
+            db.execute("CREATE TABLE events(at TEXT DEFAULT CURRENT_TIMESTAMP, thread TEXT NOT NULL,"
+                       "event TEXT NOT NULL, tool TEXT, call_id TEXT)")
+            db.execute("INSERT INTO events(thread,event,tool,call_id) VALUES('old','tool_flagged','chess_analyze','x')")
+        self.state = legacy
+        self.gate = self.session()
+        self.assertEqual(review_summary(self.state), {"tool_flagged": 1})
+        self.assertEqual(self.flags(), [])
+        self.gate.observe(self.payload)
+        self.luna.screen.return_value = report("Luna requests clarification before this tool.")
+        self.assertIn("rationale", self.call(args={})["error"])
+        flag, = self.flags()
+        self.assertEqual(flag["evidence"], self.luna.screen.return_value["evidence"])
+        self.assertIsNone(flag["batch_id"])
+        self.review.assert_not_called()
 
     def test_flagged_action_passes_evidence_and_opus_denial_to_model(self):
         self.gate.observe(self.payload)
@@ -197,6 +265,8 @@ class ReviewTests(unittest.TestCase):
                     self.assertTrue(release_new.wait(5))
             else:
                 review_packets.append((packet["tool"], packet["recent_context"]))
+                if packet["tool"] == "unavailable":
+                    return report("The unregistered proposal followed the older input.")
             return report()
 
         def old_request():
@@ -226,6 +296,10 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual({"move": "Qg7#"}, self.call("latest", gate=gate))
         self.assertEqual([("unavailable", "older"), ("chess_analyze", "new steering")], review_packets)
         self.assertEqual(1, review_summary(self.state)["unregistered_blocked"])
+        flag, = self.flags()
+        self.assertEqual((flag["sequence"], flag["kind"], flag["tool"], flag["call_id"]),
+                         (1, "unregistered_tool", "unregistered", None))
+        self.assertEqual(flag["evidence"], "The unregistered proposal followed the older input.")
         self.execute.assert_called_once()
 
     def test_late_finding_is_reviewed_even_if_it_arrives_during_an_opus_ruling(self):

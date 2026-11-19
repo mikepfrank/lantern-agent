@@ -24,6 +24,10 @@ Use `lantern usage --day YYYY-MM-DD` for a UTC-day comparison and `lantern usage
 
 For the first heartbeat (batch 10, before batch tagging), worker journal receipts and the supervisor ledger showed three Qwen requests ($0.03767440), five Luna tool checks ($0.00156275) and two Opus escalation calls ($0.09537000). Opus reviewed the first proposed workspace note and the heartbeat cadence change. This comparison used the observed turn's time window. The full UTC-day ledger also includes deliberate calibration calls. Keep those distinct when estimating normal overhead.
 
+### Luna's flag history
+
+The private operator command `lantern flags` reads the screening audit in `supervision.sqlite`. For new context and tool flags, the harness saves Luna's reported evidence and summary before consulting Opus. These entries survive a later clean scan, a ruling, or an unavailable reviewer. Use `--batch N` to compare concerns with that turn's usage, or `--kind tool` to include both registered and unregistered tool proposals. The first heartbeat predates this audit. Its two flag events and the saved denial still exist, but Luna's own wording for them was never recorded.
+
 ### Lightsail pilot
 
 Use `readlink -f /opt/lantern/current` to identify the active release. The root-owned service `lantern-chat.service` runs as `lantern` and starts on boot. The operator can run `lantern` in that account. The installed Codex is 0.169.0 and the worker defaults to OpenRouter throughput routing. An interactive turn has ten minutes for generation, tools and review, and each Qwen request allows 8,192 output tokens. The shared UTC budgets are $10 for Qwen and $5 for Luna and Opus combined.

@@ -112,13 +112,15 @@ def review_cases(case, findings):
 
 
 class Supervisor:
-    def __init__(self, state: Path, luna, review, consult, *, sample_every: int = 12, tool_names=None):
+    def __init__(self, state: Path, luna, review, consult, *, sample_every: int = 12, tool_names=None,
+                 batch_id: int | None = None):
         if type(sample_every) is not int or sample_every < 1:
             raise ValueError("Sample interval must be a positive integer")
         self.path = state / DATABASE
         self.luna, self.review, self.consult = luna, review, consult
         self.sample_every = sample_every
         self.tool_names = frozenset(TOOLS if tool_names is None else tool_names)
+        self.batch_id = batch_id
         self.thread = None
         self._observations = Condition()
         self._received = self._processed = 0
@@ -137,6 +139,12 @@ class Supervisor:
                 CREATE TABLE IF NOT EXISTS events(
                     at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, thread TEXT NOT NULL,
                     event TEXT NOT NULL, tool TEXT, call_id TEXT);
+                CREATE TABLE IF NOT EXISTS luna_flags(
+                    id INTEGER PRIMARY KEY,
+                    at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    thread TEXT NOT NULL, batch_id INTEGER, sequence INTEGER NOT NULL,
+                    kind TEXT NOT NULL, tool TEXT, call_id TEXT,
+                    evidence TEXT NOT NULL, summary TEXT NOT NULL);
             """)
 
     def bind(self, thread: str) -> None:
@@ -150,6 +158,22 @@ class Supervisor:
         with database(self.path) as db:
             db.execute("INSERT INTO events(thread, event, tool, call_id) VALUES (?, ?, ?, ?)",
                        (self.thread, event, tool, call_id))
+
+    def _record_screen(self, db, scan, sequence, kind, tool=None, call_id=None):
+        """Commit Luna's stated concern with its event, independently of the later ruling."""
+        flagged = scan["escalate"]
+        prefix = "unregistered" if kind == "unregistered_tool" else kind
+        event = prefix + ("_flagged" if flagged else "_clear")
+        db.execute("INSERT INTO events(thread,event,tool,call_id) VALUES (?,?,?,?)",
+                   (self.thread, event, tool, call_id))
+        if flagged:
+            # Unregistered names and arguments originate on the wire. Store a
+            # fixed label for them, alongside the two reviewed report fields.
+            label = "unregistered" if kind == "unregistered_tool" else tool
+            db.execute("""INSERT INTO luna_flags(thread,batch_id,sequence,kind,tool,call_id,evidence,summary)
+                          VALUES (?,?,?,?,?,?,?,?)""",
+                       (self.thread, self.batch_id, sequence, kind, label, call_id,
+                        scan["evidence"], scan["summary"]))
 
     def _screen(self, packet) -> dict:
         try:
@@ -204,7 +228,7 @@ class Supervisor:
                     # Only clear issues Opus has already considered on a concrete action.
                     db.execute("DELETE FROM findings WHERE thread=? AND sequence<? AND heard=1",
                                (self.thread, sequence))
-            self._event("context_flagged" if scan["escalate"] else "context_clear")
+                self._record_screen(db, scan, sequence, "context")
         return ReviewedContext(sequence, recent_messages(context))
 
     def _retain_finding(self, sequence, evidence, summary):
@@ -243,7 +267,8 @@ class Supervisor:
             self._retain_finding(context.sequence, "An unregistered proposal was blocked before screening completed.",
                                  "The tool was unavailable and did not execute.")
             raise
-        self._event("unregistered_flagged" if scan["escalate"] else "unregistered_clear")
+        with database(self.path) as db:
+            self._record_screen(db, scan, context.sequence, "unregistered_tool")
         if scan["escalate"]:
             case = {key: packet[key] for key in ("tool", "arguments", "rationale", "host_status")}
             case.update(evidence=scan["evidence"], summary=scan["summary"])
@@ -295,7 +320,8 @@ class Supervisor:
         packet = {"kind": "tool", "tool": name, "arguments": args, "rationale": rationale,
                   "recent_context": context.recent}
         scan = self._screen(packet)
-        self._event("tool_flagged" if scan["escalate"] else "tool_clear", name, call_id)
+        with database(self.path) as db:
+            self._record_screen(db, scan, context.sequence, "tool", name, call_id)
         if not isinstance(rationale, str) or not rationale.strip() or len(rationale) > RATIONALE_LIMIT:
             if scan["escalate"]:
                 self._retain_finding(context.sequence, scan["evidence"], scan["summary"])
