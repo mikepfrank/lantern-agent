@@ -2,11 +2,13 @@
 
 ## Current state
 
+**Operator check, November 18, 2026 (US Central).** Mike inspected the private state directory on Lightsail and chatted with Lantern in the existing room after the persona and heritage update. He reported that Lantern seemed more confident about its origins and its role. This completes the manual check of the updated room. Continue using the same conversation. The next planned milestone is persistent alarms and adjustable heartbeats under the existing daily budget.
+
 Milestone 3 adds a private, persistent SSH terminal chat. From Mike's laptop, run `ssh -t lightsail "sudo -iu lantern lantern"`. The operator can enter more messages during a reply, detach with `/quit`, and return to the same conversation. The host queues work in `chat.sqlite` alongside the existing persona, supervision and usage databases. There is one operator conversation and one worker. An idle worker makes no model requests. Heartbeats and alarms are a later milestone.
 
 Native Codex accepts active input with `turn/steer` and may replace a response already in flight. Both requests can incur charges. A confirmed rejection leaves the follow-up queued for the next turn. Ambiguous delivery after a crash produces an interruption notice with the affected message IDs. Check for any completed tool effects before explicitly resubmitting. The worker never automatically repeats an uncertain action. Operator messages, deliberate interim notifications and final replies remain in the terminal history.
 
-The [pilot deployment guide](deploy/README.md) covers the systemd unit, release selection, private state, CLI and rollback. The shell, general-purpose workspace, GitHub proposal tool and autonomous wakeups still belong to later milestones. The pilot offers supervised chess, consultation, and private notices to the operator.
+The [pilot deployment guide](deploy/README.md) covers the systemd unit, release selection, private state, CLI and rollback. The shell, general-purpose workspace, GitHub proposal tool and autonomous wakeups still belong to later milestones. The pilot offers supervised chess analysis, consultation with Opus, private notices to the operator, and access to the founding archive.
 
 ### Lightsail pilot
 
@@ -15,6 +17,8 @@ Use `readlink -f /opt/lantern/current` to identify the active release. The root-
 The Lightsail launcher selects `--private-lightsail-cli`. On each model request for this channel, the harness identifies Michael P. Frank as Lantern's developer, the host's administrator, and its only interactive human user. It supplies the same channel information to Luna and Opus. This applies when resuming an existing room independently of its pinned persona. Before adding any other human users or input sources, give each channel its own operator context and separate its conversation history from Mike's private room.
 
 The pilot uses the host account's persistent state at `~lantern/.local/state/lantern`. A full writable Git checkout lives in `~lantern/src/lantern` outside the worker's filesystem view. Its fetch source is the operator-owned `/opt/lantern/source/lantern.bundle`. The writable in-container checkout, GitHub remote and PR workflow are future work. The chess and GPT-2 services run independently of the Lantern deployment.
+
+For routine inspection, log in as `lantern` and open `~/.local/state/lantern`. The running pilot uses a systemd mount namespace. To inspect its exact filesystem view, an administrator can enter the main PID's mount namespace with `nsenter` and use `setpriv` to drop to the `lantern` user and group before opening a shell. In that view the state directory contains `workspace/` and the read-only `heritage/` mount. Lantern itself reads the archive through the supervised tool.
 
 ### Private persona and heritage archive
 
