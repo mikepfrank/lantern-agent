@@ -28,6 +28,8 @@ class TransportTests(unittest.TestCase):
     def setUp(self):
         self.reserve = Mock(return_value=31)
         self.settle = Mock()
+        self.observe = Mock()
+        self.unregistered = Mock()
         self.wire = []
         self.http_status = 200
         self.stream = event("response.completed", response={"id": "r1", "output": [],
@@ -56,7 +58,8 @@ class TransportTests(unittest.TestCase):
 
     def gateway(self, route):
         return OpenRouterGateway("upstream-test-key", route=route, tools=[CHESS],
-                                 reserve=self.reserve, settle=self.settle)
+                                 reserve=self.reserve, settle=self.settle, observe=self.observe,
+                                 unregistered=self.unregistered)
 
     def test_routing_accounting_and_canonical_tools(self):
         for route, sort in (("cheapest", "price"), ("fastest", "throughput")):
@@ -95,6 +98,14 @@ class TransportTests(unittest.TestCase):
             _, received = self.request(gate)
             self.assertNotIn(b"exec_command", received)
             self.settle.assert_not_called()
+            self.unregistered.assert_called_once_with("exec_command", None)
+
+    def test_context_review_failure_prevents_qwen_charge(self):
+        self.observe.side_effect = RuntimeError("unavailable")
+        with self.gateway("cheapest") as gate:
+            self.assertEqual(self.request(gate)[0], 503)
+            self.assertFalse(self.wire)
+            self.settle.assert_called_once_with(31, Decimal(0))
 
     def test_missing_cost_conserves_reservation(self):
         self.stream = event("response.completed", response={"id": "r2", "usage": {}})

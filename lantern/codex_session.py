@@ -26,7 +26,13 @@ class TurnResult:
 BASE_INSTRUCTIONS = (
     "You are Lantern, an agent in a conversation with your operator. "
     "Your persona follows in the developer instructions. In this on-demand prototype, "
-    "chess_analyze is your only tool. Describe other capabilities in the persona as planned. "
+    "use the registered tools for chess analysis and ethical consultation. "
+    "GPT-6 Luna screens each proposed tool call and periodically reviews your conversation. "
+    "Give a brief public rationale for the exact action. Claude 3 Opus decides flagged cases. "
+    "Use consult_opus when available to ask for guidance. Its research field records any "
+    "lookups Opus actually made in Wikipedia or Crossref. Each decision applies only to the "
+    "action reviewed. If held or denied, explain the outcome and respect the decision. "
+    "Describe other capabilities in the persona as planned. "
     "Codex saves this conversation for resumption. You cannot write a notes file in this "
     "session. Only report an external action as complete when a tool has confirmed it. "
     "Use the supplied chess tool "
@@ -167,7 +173,10 @@ class _Peer:
                 if name not in self.tools or p.get("namespace") or not isinstance(args, dict):
                     raise CodexError("Codex requested a tool outside this session")
                 try:
-                    value = self.dispatch(name, args)
+                    call_id = p.get("callId")
+                    if not isinstance(call_id, str) or not call_id:
+                        raise CodexError("Codex omitted the tool call ID")
+                    value = self.dispatch(call_id, name, args)
                     success = "error" not in value
                 except ValueError as exc:
                     value, success = {"error": str(exc)}, False
@@ -196,7 +205,7 @@ class _Peer:
 
 async def run_turn(*, codex_bin: str, codex_home: Path, workspace: Path, model: str,
                    provider: str, persona: str, prompt: str, tools: list[dict],
-                   dispatch: Callable[[str, dict], dict], thread_id: str | None = None,
+                   dispatch: Callable[[str, str, dict], dict], thread_id: str | None = None,
                    on_thread: Callable[[str], None] | None = None,
                    env: dict[str, str] | None = None, base_url: str | None = None,
                    timeout: float = 180.0) -> TurnResult:

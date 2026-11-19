@@ -27,8 +27,8 @@ class ToolRequestTests(unittest.IsolatedAsyncioTestCase):
         self.dispatches = []
         self.sent = []
 
-        def chess(name, args):
-            self.dispatches.append((name, args))
+        def chess(call_id, name, args):
+            self.dispatches.append((call_id, name, args))
             return {"best": "Qg7#"}
 
         async def save(message):
@@ -44,14 +44,14 @@ class ToolRequestTests(unittest.IsolatedAsyncioTestCase):
     async def test_chess_result_returns_on_the_call(self):
         await self.peer.handle({"id": 17, "method": "item/tool/call", "params": self.params})
         response, = self.sent
-        self.assertEqual(self.dispatches, [("chess_analyze", {"fen": "position"})])
+        self.assertEqual(self.dispatches, [("call", "chess_analyze", {"fen": "position"})])
         self.assertEqual(response["id"], 17)
         self.assertTrue(response["result"]["success"])
         self.assertEqual(json.loads(response["result"]["contentItems"][0]["text"]), {"best": "Qg7#"})
 
     async def test_other_threads_turns_and_unregistered_tools_cannot_dispatch(self):
         for invalid in ({"threadId": "another"}, {"turnId": "another"}, {"tool": "shell"},
-                        {"namespace": "another"}, {"arguments": []}):
+                        {"namespace": "another"}, {"arguments": []}, {"callId": None}):
             with self.subTest(invalid=invalid), self.assertRaises(CodexError):
                 await self.peer.handle({"id": 18, "method": "item/tool/call",
                                         "params": {**self.params, **invalid}})

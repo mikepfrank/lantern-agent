@@ -24,6 +24,13 @@ class ProtocolError(ValueError):
     """Only fixed local messages may be exposed in diagnostics."""
 
 
+class UnregisteredCall(ProtocolError):
+    def __init__(self, item):
+        super().__init__("provider returned an unregistered tool")
+        self.name = item.get("name")
+        self.arguments = item.get("arguments")
+
+
 def _check_input(items, names):
     if isinstance(items, str):
         return
@@ -49,7 +56,7 @@ def _check_input(items, names):
             raise ProtocolError("unsupported conversation item")
 
 
-def _prepare(payload, route, tools):
+def _prepare(payload, route, tools, *, resuming=False):
     if not isinstance(payload, dict) or payload.get("model") != MODEL or payload.get("stream") is not True:
         raise ProtocolError("expected a streaming request for " + MODEL)
     if payload.get("previous_response_id") is not None:
@@ -60,6 +67,11 @@ def _prepare(payload, route, tools):
     if not isinstance(incoming, list) or any(not isinstance(tool, dict) for tool in incoming):
         raise ProtocolError("invalid tool declarations")
     declared = {t.get("name") for t in incoming if t.get("type") == "function"}
+    # Codex persists dynamic tool names at thread/start. Original chess-only
+    # threads can still run their tool under the current review schema.
+    if resuming and "chess_analyze" in declared and names - declared == {"consult_opus"}:
+        tools = [tool for tool in tools if tool["name"] != "consult_opus"]
+        names = {tool["name"] for tool in tools}
     if incoming and not names.issubset(declared):
         raise ProtocolError("Codex did not advertise all configured Lantern tools")
     choice = payload.get("tool_choice", "auto")
@@ -161,11 +173,11 @@ def _inspect(event, names, evidence):
     for item in items:
         if item.get("type") == "function_call":
             if item.get("name") not in names or item.get("namespace"):
-                raise ProtocolError("provider returned an unregistered tool")
+                raise UnregisteredCall(item)
         elif item.get("type") not in ("message", "reasoning"):
             raise ProtocolError("unsupported provider output")
     if kind.startswith("response.function_call_arguments.") and "name" in event and event["name"] not in names:
-        raise ProtocolError("provider returned an unregistered tool")
+        raise UnregisteredCall(event)
     if kind in ("error", "response.failed"):
         _classify_error(response.get("error") or event.get("error") or event, evidence)
     if response.get("id"):
@@ -197,12 +209,14 @@ class OpenRouterGateway:
     reservation intact. The gateway never forwards client headers to OpenRouter.
     """
 
-    def __init__(self, api_key, *, route, tools, reserve, settle):
+    def __init__(self, api_key, *, route, tools, reserve, settle, observe, unregistered, resuming=False):
         if route not in ROUTES or not api_key:
             raise ValueError("a valid route and OpenRouter key are required")
         self.route = route
         self.tools = list(tools)
         self.reserve, self.settle = reserve, settle
+        self.observe, self.resuming = observe, resuming
+        self.unregistered = unregistered
         self._api_key = api_key
         self.token = secrets.token_urlsafe(32)
         self.evidence = []
@@ -236,7 +250,8 @@ class OpenRouterGateway:
                     if not 0 < length <= MAX_REQUEST_BYTES:
                         evidence["error"] = "invalid request size"
                         return self.fail(413, "invalid request size")
-                    prepared = _prepare(json.loads(self.rfile.read(length)), gateway.route, gateway.tools)
+                    prepared = _prepare(json.loads(self.rfile.read(length)), gateway.route, gateway.tools,
+                                        resuming=gateway.resuming)
                     body = json.dumps(prepared, allow_nan=False, separators=(",", ":")).encode()
                 except (KeyError, ValueError, TypeError, RecursionError, OSError) as exc:
                     evidence["error"] = str(exc) if isinstance(exc, ProtocolError) else "malformed request"
@@ -246,6 +261,12 @@ class OpenRouterGateway:
                 except Exception:
                     evidence["error"] = "budget reservation refused"
                     return self.fail(402, "budget reservation refused")
+                try:
+                    gateway.observe(prepared)
+                except Exception:
+                    gateway.settle(reservation, Decimal(0))
+                    evidence["error"] = "required context review unavailable"
+                    return self.fail(503, evidence["error"])
                 evidence["status"] = "unconfirmed"
                 headers = {"Authorization": "Bearer " + gateway._api_key, "Content-Type": "application/json",
                            "Accept": "text/event-stream", "Accept-Encoding": "identity",
@@ -285,6 +306,11 @@ class OpenRouterGateway:
                             self.wfile.flush()
                 except Exception as exc:
                     evidence["error"] = str(exc) if isinstance(exc, ProtocolError) else "gateway or upstream failure"
+                    if isinstance(exc, UnregisteredCall):
+                        try:
+                            gateway.unregistered(exc.name, exc.arguments)
+                        except Exception:
+                            evidence["review_error"] = "unregistered tool review unavailable"
                     if not started:
                         self.fail(502, "OpenRouter connection failed")
                     else:

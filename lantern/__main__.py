@@ -2,7 +2,8 @@
 
 import argparse
 import asyncio
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from functools import partial
 import hashlib
 import json
 import os
@@ -15,6 +16,10 @@ from .budget import Budget, MODEL_CONTEXT_TOKENS
 from .chess_tool import CHESS_TOOL, analyze_position
 from .codex_session import run_turn
 from .persona import ThreadPersonas
+from . import opus
+from .luna import Luna
+from .review_vendors import DEFAULT_DAILY_USD, ReviewerVendors
+from .supervision import Supervisor, review_summary, supervised_tools
 from .transport import (
     MAX_COMPLETION_PRICE, MAX_OUTPUT_TOKENS, MAX_PROMPT_PRICE, MODEL, ROUTES, OpenRouterGateway,
 )
@@ -50,8 +55,14 @@ async def main(args):
     reservation = Decimal(MODEL_CONTEXT_TOKENS * MAX_PROMPT_PRICE +
                           MAX_OUTPUT_TOKENS * MAX_COMPLETION_PRICE) / 1_000_000
     ledger = Budget(state / "usage.sqlite", reservation)
+    try:
+        limit = Decimal(os.environ.get("LANTERN_REVIEW_DAILY_USD", str(DEFAULT_DAILY_USD)))
+    except InvalidOperation as exc:
+        raise ValueError("LANTERN_REVIEW_DAILY_USD must be a dollar amount") from exc
+    vendors = ReviewerVendors(state, limit)
     if args.command == "usage":
-        print(json.dumps(ledger.today(), indent=2))
+        print(json.dumps({**ledger.today(), "supervisors": vendors.today(),
+                          "review_events_all_time": review_summary(state)}, indent=2))
         return
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
@@ -68,6 +79,10 @@ async def main(args):
 
     async def turn(prompt, route, thread=None):
         positions = []
+        tools = supervised_tools([CHESS_TOOL])
+        supervisor = Supervisor(state, Luna(vendors.call), partial(opus.review, vendors.call),
+                                partial(opus.consult, vendors.call),
+                                sample_every=int(os.environ.get("LANTERN_SPOT_EVERY", "12")))
 
         def dispatch(name, arguments):
             if name != CHESS_TOOL["name"]:
@@ -78,15 +93,18 @@ async def main(args):
 
         def record_thread(tid):
             personas.bind(tid, persona)
+            supervisor.bind(tid)
             print(f"Thread {tid}", file=sys.stderr, flush=True)
 
-        with OpenRouterGateway(key, route=route, tools=[CHESS_TOOL], reserve=ledger.reserve,
-                               settle=ledger.settle) as gateway:
+        with OpenRouterGateway(key, route=route, tools=tools, reserve=ledger.reserve,
+                               settle=ledger.settle, observe=supervisor.observe, unregistered=supervisor.unregistered,
+                               resuming=bool(thread)) as gateway:
             try:
                 result = await run_turn(
                     codex_bin=args.codex, codex_home=codex_home, workspace=workspace, model=MODEL,
                     provider="lantern", base_url=gateway.base_url, persona=persona, prompt=prompt,
-                    tools=[CHESS_TOOL], dispatch=dispatch, thread_id=thread,
+                    tools=tools, dispatch=lambda cid, name, args: supervisor.dispatch(cid, name, args, dispatch),
+                    thread_id=thread,
                     on_thread=record_thread,
                     env={"LANTERN_GATEWAY_TOKEN": gateway.token},
                 )

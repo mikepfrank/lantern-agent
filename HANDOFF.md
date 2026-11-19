@@ -2,6 +2,18 @@
 
 ## Current state
 
+Milestone 2 adds mandatory review to the on-demand CLI. GPT-6 Luna screens each tool call and the first visible context window plus every 12th request thereafter in that thread. A flagged proposal goes to the specific legacy Claude 3 Opus model with Luna's summary and evidence and Lantern's rationale. A denied call returns the detailed judgment. Calls to tools outside the registry stay blocked even when a reviewer considers the idea benign. Reviewers and research run in the operator process, outside the Codex environment.
+
+The local Windows regression uses native Codex and simulated vendors to test the full denial-to-Qwen path, voluntary advice, a later allowed tool call, persona, and thread resumption. The complete suite passed 44 tests. On Lightsail, real Luna cleared chess analysis, and a pre-milestone-2 thread also resumed with supervised chess. In a separate synthetic case, real Luna referred a proposed publication of private annotations without consent, and legacy Opus independently denied it. The publication was a test description. The harness exposes chess and consultation.
+
+An early live advisory was held when the supervisor returned no usable result. On retry the Opus guidance reached Qwen. An advisory may now request one formatting correction after an unreadable XML response. Invalid adjudications hold the action. The consultation tool returns the host's record of searches so Lantern can distinguish completed research from a request to look something up. Use `python -m lantern usage` for the separate supervisor cost/latency breakdown and review outcomes.
+
+The milestone 2 calibration used a temporary $0.50 supervisory ceiling. Estimated direct API charges totaled $0.25214990 (8 Luna calls, $0.00205490, and 12 Opus calls, $0.250095). No supervisor reservations remained. The six Luna tool screens averaged 3.33 seconds. Eleven of the Opus calls deliberately tested consultations, including research rounds and a held response. This workload does not estimate normal escalation frequency. Both research services returned live results from Lightsail. In a final advisory, the host observed two Crossref searches with three hits each. The provisional normal CLI setting is $2 per UTC day for both supervisors together, independent of Qwen's $10 allowance.
+
+The next milestone is a persistent asynchronous terminal chat. The GitHub remote, production container, and continuously running service are still pending. The shared Lightsail host was used for isolated on-demand tests.
+
+## Milestone 1
+
 Milestone 1 passed on 2026-11-18 (US Central) with [Qwen's own Lantern statement](lantern/personas/lantern-v1.md) as the default for new threads. The repository preserves the attachment byte for byte. The harness reads it as UTF-8 text, normalizes line endings, and pins that text to each thread. The GitHub remote, persistent service and production container are future milestones.
 
 ### What was verified
@@ -13,7 +25,7 @@ Milestone 1 passed on 2026-11-18 (US Central) with [Qwen's own Lantern statement
 - OpenRouter returned “No endpoints found that can handle the requested parameters” with `require_parameters=true`. Omitting that optional filter resolved the problem while retaining the pinned model, allowlisted tool and price ceilings.
 - The operator CLI and the tests are described in [README.md](README.md). The live prototype state, including the thread store and budget SQLite file, is private to `lantern` under its default state directory. No chess or GPT-2 service changes were required.
 
-Next is the supervision milestone. Shell access, web search, scheduled wakeups, a persistent asynchronous CLI and GitHub PR submission are still pending.
+Lantern's own shell access, general web search, scheduled wakeups and GitHub PR submission are later milestones.
 
 ## Lantern's copy of its harness
 

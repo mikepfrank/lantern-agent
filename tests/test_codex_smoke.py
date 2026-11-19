@@ -1,10 +1,9 @@
 """Opt in with LANTERN_TEST_CODEX=1 and a native codex binary on PATH.
 
-Only the remote Responses endpoint is replaced. Native Codex, the on-disk thread,
-the HTTP gateway, budget ledger, persona loading and the chess engine are real.
+All three model providers are simulated. Native Codex, its on-disk thread,
+the HTTP gateway, persona, review policy and chess engine are real.
 """
 
-import argparse
 import asyncio
 from contextlib import contextmanager, redirect_stdout
 from io import BytesIO, StringIO
@@ -13,11 +12,15 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from lantern.__main__ import MATE_FEN, main
+from lantern.__main__ import MATE_FEN, arguments, main
+from lantern.chess_tool import analyze_position
+from lantern.opus import OPUS_MODEL
+from lantern.review_vendors import DEFAULT_DAILY_USD, ReviewerVendors
 from lantern.transport import MODEL
 
 
@@ -57,7 +60,42 @@ class NativeCodexSmoke(unittest.TestCase):
         routes = []
         errors = []
         child_pids = []
+        review_calls = []
         start_process = asyncio.create_subprocess_exec
+        initial_reason = "I intend to use a private puzzle before its author grants permission."
+        denial = "Wait for permission or switch to an openly shared position."
+        advice = "Use the public mate-in-one fixture."
+        allowed_reason = "The supplied fixture is public and the operator requests chess analysis."
+
+        def fake_review(vendor, key, body):
+            payload = json.loads(body)
+            usage = {"input_tokens": 60, "output_tokens": 30}
+            if vendor == "luna":
+                self.assertEqual(key, "offline-luna-key")
+                packet = json.loads(payload["input"][0]["content"])
+                review_calls.append((vendor, packet["kind"]))
+                escalate = packet["kind"] == "tool" and packet["rationale"] == initial_reason
+                report = {"escalate": escalate, "evidence": "The agent reports missing permission." if escalate else "",
+                          "summary": "The operator asked Lantern to analyze a chess position."}
+                return {"model": payload["model"], "status": "completed", "usage": usage, "output": [
+                    {"type": "message", "role": "assistant", "status": "completed",
+                     "content": [{"type": "output_text", "text": json.dumps(report)}]}]}
+            if vendor != "opus":
+                raise AssertionError("Unexpected reviewer")
+            self.assertEqual(key, "offline-opus-key")
+            case = json.loads(payload["messages"][0]["content"])["case"]
+            review_calls.append((vendor, case["tool"]))
+            if case["tool"] == "chess_analyze":
+                self.assertEqual(case["rationale"], initial_reason)
+                self.assertEqual(case["arguments"], {"fen": MATE_FEN})
+                self.assertIn("permission", case["evidence"])
+                text = f'<review decision="deny">{denial}</review>'
+            else:
+                self.assertEqual(case["tool"], "consult_opus")
+                self.assertIn("question", case["arguments"])
+                text = f"<advice>{advice}</advice>"
+            return {"model": OPUS_MODEL, "stop_reason": "end_turn", "usage": usage,
+                    "content": [{"type": "text", "text": text}]}
 
         async def record_process(*args, **kwargs):
             process = await start_process(*args, **kwargs)
@@ -69,7 +107,7 @@ class NativeCodexSmoke(unittest.TestCase):
             try:
                 request = json.loads(body)
                 self.assertEqual(request["model"], MODEL)
-                self.assertEqual([t["name"] for t in request["tools"]], ["chess_analyze"])
+                self.assertEqual({t["name"] for t in request["tools"]}, {"chess_analyze", "consult_opus"})
                 self.assertEqual(headers["Authorization"], "Bearer offline-test-value")
                 routes.append(request["provider"]["sort"])
                 serial = len(routes)
@@ -84,20 +122,28 @@ class NativeCodexSmoke(unittest.TestCase):
                 users = [json.dumps(i["content"]) for i in history if i.get("role") == "user"]
                 ticket = re.search(r"Beacon-[0-9a-f]+", " ".join(users))
                 self.assertIsNotNone(ticket, "operator ticket missing from the actual native thread")
+                tool_outputs = {i["call_id"]: json.dumps(i["output"]) for i in history
+                                if i.get("type") == "function_call_output"}
                 if serial == 1:
                     self.assertIn(MATE_FEN, users[-1])
-                    item = {"type": "function_call", "id": "fc_fixture", "call_id": "call_fixture",
-                            "status": "completed", "name": "chess_analyze",
-                            "arguments": json.dumps({"fen": MATE_FEN})}
+                    tool, args = "chess_analyze", {"fen": MATE_FEN, "rationale": initial_reason}
+                elif serial == 2:
+                    self.assertIn(denial, tool_outputs["call_1"])
+                    self.assertNotIn("Qg7#", tool_outputs["call_1"])
+                    tool, args = "consult_opus", {"question": "Which alternative should I choose?",
+                                                  "rationale": "I would like advice on obtaining permission."}
+                elif serial == 3:
+                    self.assertIn(advice, tool_outputs["call_2"])
+                    tool, args = "chess_analyze", {"fen": MATE_FEN, "rationale": allowed_reason}
+                if serial <= 3:
+                    item = {"type": "function_call", "id": f"fc_{serial}", "call_id": f"call_{serial}",
+                            "status": "completed", "name": tool, "arguments": json.dumps(args)}
                 else:
-                    outputs = [i["output"] for i in history if i.get("type") == "function_call_output"
-                               and i.get("call_id") == "call_fixture"]
-                    self.assertEqual(len(outputs), 1)
-                    self.assertIn("Qg7#", json.dumps(outputs[0]))
-                    if serial == 2:
+                    self.assertIn("Qg7#", tool_outputs["call_3"])
+                    if serial == 4:
                         answer = "Qg7# is checkmate."
                     else:
-                        self.assertEqual(serial, 3, "unexpected extra API request")
+                        self.assertEqual(serial, 5, "unexpected extra API request")
                         self.assertIn("preceding exchange", users[-1])
                         self.assertNotIn(ticket.group(), users[-1])
                         answer = f"{ticket.group()} Qg7#"
@@ -111,14 +157,26 @@ class NativeCodexSmoke(unittest.TestCase):
 
         with TemporaryDirectory(prefix="lantern-smoke-") as tmp:
             state = Path(tmp)
-            args = argparse.Namespace(state=state, persona=None, codex=binary, command="smoke")
-            with patch.dict(os.environ, OPENROUTER_API_KEY="offline-test-value"), \
+            with patch.object(sys, "argv", ["lantern", "--state", str(state), "--codex", binary, "smoke"]):
+                args = arguments()
+            with patch.dict(os.environ, OPENROUTER_API_KEY="offline-test-value",
+                            OPENAI_API_KEY="offline-luna-key", ANTHROPIC_API_KEY="offline-opus-key",
+                            LANTERN_SPOT_EVERY="12", LANTERN_REVIEW_DAILY_USD=str(DEFAULT_DAILY_USD)), \
                  patch("lantern.transport._open_upstream", fake_provider), \
+                 patch("lantern.review_vendors.request_json", side_effect=fake_review), \
+                 patch("lantern.__main__.analyze_position", wraps=analyze_position) as engine, \
                  patch("asyncio.create_subprocess_exec", record_process), redirect_stdout(StringIO()) as output:
                 try:
                     asyncio.run(main(args))
                 finally:
                     self.assertEqual(errors, [])
-        self.assertEqual(routes, ["throughput", "throughput", "price"])
+            ledger = ReviewerVendors(state, DEFAULT_DAILY_USD).today()
+            self.assertEqual({entry["purpose"]: entry["calls"] for entry in ledger["by_purpose"]},
+                             {"spot": 1, "tool": 3, "escalation": 1, "consult": 1})
+            self.assertEqual(ledger["reserved_usd"], "0")
+        engine.assert_called_once_with({"fen": MATE_FEN})
+        self.assertEqual(review_calls, [("luna", "context"), ("luna", "tool"), ("opus", "chess_analyze"),
+                                       ("luna", "tool"), ("opus", "consult_opus"), ("luna", "tool")])
+        self.assertEqual(routes, ["throughput"] * 4 + ["price"])
         self.assertEqual(len(set(child_pids)), 2)
         self.assertIn('"smoke": "passed"', output.getvalue())
