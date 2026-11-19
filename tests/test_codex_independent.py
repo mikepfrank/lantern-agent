@@ -142,10 +142,11 @@ class NativeIndependentWorker(unittest.TestCase):
                 self.assertEqual(calls, [(tid, 1, "operator", 100, 40, 10000)]
                                  + [(tid, 2, "heartbeat", 100, 40, 10000)] * 4)
                 with closing(sqlite3.connect(state / "review-costs.sqlite")) as db:
-                    reviews_by_batch = db.execute("""SELECT thread_id,batch_id,vendor,purpose,tool FROM calls
+                    reviews_by_batch = db.execute("""SELECT thread_id,batch_id,vendor,purpose,tool,tool_call_id FROM calls
                                                      ORDER BY rowid""").fetchall()
-                self.assertEqual(reviews_by_batch, [(tid, 1, "luna", "spot", None)]
-                                 + [(tid, 2, "luna", "tool", name) for name, _ in actions])
+                self.assertEqual(reviews_by_batch, [(tid, 1, "luna", "spot", None, None)]
+                                 + [(tid, 2, "luna", "tool", name, f"call_{n}")
+                                    for n, (name, _) in enumerate(actions, 2)])
 
         self.assertEqual(len(requests), 5)
         self.assertEqual(["notes/handoff.md" in request["instructions"] for request in requests],

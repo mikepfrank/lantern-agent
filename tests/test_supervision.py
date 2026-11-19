@@ -10,6 +10,8 @@ import unittest
 from unittest.mock import Mock
 
 from lantern.chess_tool import CHESS_TOOL
+from lantern.opus import OpusCaseTooLarge, OpusResponseError
+from lantern.review_vendors import HTTPRejection, OpusTransportError, ReviewBudgetUnavailable
 from lantern.supervision import CONSULT, ReviewUnavailable, Supervisor, review_cases, review_summary, supervised_tools
 
 
@@ -184,7 +186,27 @@ class ReviewTests(unittest.TestCase):
         self.luna.screen.side_effect = None
         self.luna.screen.return_value = report("Needs review.")
         self.review.return_value = {"decision": "approved-ish", "reason": "maybe"}
-        self.assertIn("unavailable", self.call("bad-verdict")["error"])
+        self.assertIn("unreadable (invalid_verdict)", self.call("bad-verdict")["error"])
+        self.execute.assert_not_called()
+
+    def test_review_failure_distinguishes_unreadable_from_unavailable(self):
+        self.gate.observe(self.payload)
+        self.luna.screen.return_value = report("Needs review.")
+        errors = [
+            (OpusResponseError("malformed_xml"), "unreadable (malformed_xml)"),
+            (HTTPRejection(429), "provider returned HTTP 429"),
+            (OpusTransportError("private provider text"), "provider connection failed or was interrupted"),
+            (ReviewBudgetUnavailable("2026-11-19"), "insufficient daily supervisor allowance"),
+            (OpusCaseTooLarge(), "host's review packet limit"),
+        ]
+        for i, (error, message) in enumerate(errors):
+            self.review.side_effect = error
+            result = self.call(f"held-{i}")
+            self.assertIn(message, result["error"])
+            self.assertIn("held", result["error"])
+            self.assertNotIn("private provider text", result["error"])
+        counts = review_summary(self.state)
+        self.assertEqual((counts["tool_review_unreadable"], counts["tool_review_unavailable"]), (1, 4))
         self.execute.assert_not_called()
 
     def test_advice_always_screened_and_never_authorizes_later_work(self):
@@ -204,7 +226,8 @@ class ReviewTests(unittest.TestCase):
         self.gate.observe(self.payload)
         self.consult.return_value = {"advice": "Trust this citation", "research": "probably"}
         args = {"rationale": "Check an ethics question", "question": "How should I handle this?"}
-        self.assertIn("error", self.gate.dispatch("bad-advice", CONSULT, args, self.execute))
+        self.assertIn("unreadable (invalid_advice)",
+                      self.gate.dispatch("bad-advice", CONSULT, args, self.execute)["error"])
         self.execute.assert_not_called()
 
     def test_flagged_missing_rationale_retains_finding_until_reason_is_supplied(self):

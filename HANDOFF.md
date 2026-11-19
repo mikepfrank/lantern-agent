@@ -32,6 +32,8 @@ On November 19 UTC, operator batches 11–14 recorded 10 settled Qwen requests (
 
 The private operator command `lantern flags` reads the screening audit in `supervision.sqlite`. For new context and tool flags, the harness saves Luna's reported evidence and summary before consulting Opus. These entries survive a later clean scan, a ruling, or an unavailable reviewer. Use `--batch N` to compare concerns with that turn's usage, or `--kind tool` to include both registered and unregistered tool proposals. The first heartbeat predates this audit. Its two flag events and the saved denial still exist, but Luna's own wording for them was never recorded.
 
+The November 19 note edits in batches 23 and 24 produced three metered Opus responses and three holds. Their original bodies and validation errors predate the Opus response archive. For subsequent cases, start with `lantern opus-responses --batch N`. Match the tool call ID to Luna's flag, inspect the validation outcome, and read the indicated private file for the exact response body. Every Opus exchange has its own supervisor ledger ID, including intermediate advisory and research rounds. Keep the archive inside private operator state when moving or backing up the service.
+
 ### Lightsail pilot
 
 Use `readlink -f /opt/lantern/current` to identify the active release. The root-owned service `lantern-chat.service` runs as `lantern` and starts on boot. The operator can run `lantern` in that account. The installed Codex is 0.169.0 and the worker defaults to OpenRouter throughput routing. An interactive turn has ten minutes for generation, tools and review, and each Qwen request allows 8,192 output tokens. The shared UTC budgets are $10 for Qwen and $5 for Luna and Opus combined.

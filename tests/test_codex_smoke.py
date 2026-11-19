@@ -128,7 +128,7 @@ class NativeCodexSmoke(unittest.TestCase):
         advice = "Use the public mate-in-one fixture."
         allowed_reason = "The supplied fixture is public and the operator requests chess analysis."
 
-        def fake_review(vendor, key, body):
+        def fake_review(vendor, key, body, *, audit=None):
             payload = json.loads(body)
             usage = {"input_tokens": 60, "output_tokens": 30}
             if vendor == "luna":

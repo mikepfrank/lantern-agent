@@ -19,6 +19,36 @@ class QueryRejected(ValueError):
     pass
 
 
+class OpusCaseTooLarge(ValueError):
+    pass
+
+
+class OpusResponseError(ValueError):
+    """A response arrived, but the host rejected it. Codes are supplied by host validators."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+class AuditedReply(dict):
+    """Associate a decoded reply with its private audit receipt outside the vendor JSON."""
+
+    def __init__(self, reply: dict, record_validation):
+        super().__init__(reply)
+        self.record_validation = record_validation
+
+
+def _record_validation(reply, outcome):
+    if isinstance(reply, AuditedReply):
+        reply.record_validation(outcome)
+
+
+def _invalid(reply, code):
+    _record_validation(reply, code)
+    return OpusResponseError(code)
+
+
 def _system(mode: str) -> str:
     today = datetime.now(timezone.utc).date().isoformat()
     if mode == "review":
@@ -130,29 +160,39 @@ def public_search(source: str, query: str) -> list[dict]:
 
 
 def _element(response: dict) -> ET.Element:
-    if (not isinstance(response, dict) or response.get("model") != OPUS_MODEL
-            or response.get("stop_reason") != "end_turn"):
-        raise ValueError("Opus did not complete its review")
+    if not isinstance(response, dict):
+        raise _invalid(response, "invalid_json")
+    if response.get("model") != OPUS_MODEL:
+        raise _invalid(response, "unexpected_model")
+    stop = response.get("stop_reason")
+    if stop != "end_turn":
+        raise _invalid(response, "output_limit" if stop == "max_tokens" else "incomplete_response")
     blocks = response.get("content")
     if (not isinstance(blocks, list) or len(blocks) != 1 or not isinstance(blocks[0], dict)
             or blocks[0].get("type") != "text"):
-        raise ValueError("Expected one Opus text reply")
+        raise _invalid(response, "invalid_content")
     text = blocks[0].get("text")
-    if not isinstance(text, str) or len(text) > 8192 or "<!" in text or "<?" in text:
-        raise ValueError("Invalid Opus XML")
+    if not isinstance(text, str):
+        raise _invalid(response, "invalid_content")
+    if len(text) > 8192:
+        raise _invalid(response, "response_text_too_long")
+    if "<!" in text or "<?" in text:
+        raise _invalid(response, "forbidden_xml")
     try:
         element = ET.fromstring(text.strip())
-    except ET.ParseError:
-        raise ValueError("Malformed Opus XML") from None
-    if len(element) or not (element.text or "").strip():
-        raise ValueError("Expected one nonempty, plain-text Opus response element")
+    except (ET.ParseError, UnicodeError):
+        raise _invalid(response, "malformed_xml") from None
+    if len(element):
+        raise _invalid(response, "nested_elements")
+    if not (element.text or "").strip():
+        raise _invalid(response, "empty_element")
     return element
 
 
 def _request(vendor_call, evidence: dict, mode: str, research: list, operator_context: str):
     case = json.dumps({"case": evidence}, ensure_ascii=False, allow_nan=False)
     if len(case.encode("utf-8")) > 64 * 1024:
-        raise ValueError("Opus case exceeds the review packet size limit")
+        raise OpusCaseTooLarge("Opus case exceeds the review packet size limit")
     messages = [{"role": "user", "content": case}]
     system = _system(mode)
     if operator_context:
@@ -165,7 +205,7 @@ def _request(vendor_call, evidence: dict, mode: str, research: list, operator_co
                             purpose="escalation" if mode == "review" else "consult")
         try:
             element = _element(reply)
-        except ValueError:
+        except OpusResponseError:
             # A voluntary conversation can ask once for clearer formatting.
             # An invalid adjudication never authorizes a tool.
             if (mode != "consult" or repaired or not isinstance(reply, dict)
@@ -180,13 +220,18 @@ def _request(vendor_call, evidence: dict, mode: str, research: list, operator_co
         if element.tag != "search":
             if (mode == "review" and element.tag == "review"
                     and element.attrib in ({"decision": "allow"}, {"decision": "deny"})):
-                return {"decision": element.attrib["decision"], "reason": text}
+                decision = element.attrib["decision"]
+                _record_validation(reply, "verdict_" + decision)
+                return {"decision": decision, "reason": text}
             if mode == "consult" and element.tag == "advice" and not element.attrib:
+                _record_validation(reply, "advice")
                 return text
-            raise ValueError("Opus did not return the requested decision format")
-        if (searches >= MAX_SEARCHES or set(element.attrib) != {"source"}
-                or element.attrib["source"] not in ("wikipedia", "crossref")):
-            raise ValueError("Opus requested unavailable research")
+            raise _invalid(reply, "invalid_verdict" if mode == "review" else "invalid_advice")
+        if searches >= MAX_SEARCHES:
+            raise _invalid(reply, "search_limit")
+        if set(element.attrib) != {"source"} or element.attrib["source"] not in ("wikipedia", "crossref"):
+            raise _invalid(reply, "invalid_search")
+        _record_validation(reply, "search")
         source = element.attrib["source"]
         searches += 1
         try:

@@ -101,6 +101,32 @@ class OpusTests(unittest.TestCase):
             opus.consult(vendor, {})
         self.assertEqual(2, vendor.call_count)
 
+    def test_validation_belongs_to_each_individual_reply(self):
+        outcomes = [[], [], []]
+        vendor = Mock(side_effect=[
+            opus.AuditedReply(response('private preamble <advice>Proceed</advice>'), outcomes[0].append),
+            opus.AuditedReply(response('<search source="crossref">ethics</search>'), outcomes[1].append),
+            opus.AuditedReply(response('<advice>Ask for consent.</advice>'), outcomes[2].append),
+        ])
+        with patch("lantern.opus.public_search", return_value=[]):
+            opus.consult(vendor, {})
+        self.assertEqual(outcomes, [["malformed_xml"], ["search"], ["advice"]])
+
+        for reply, expected in [
+            (response('private text <review decision="allow">Yes</review>'), "malformed_xml"),
+            (response('<review decision="allow"><nested>Yes</nested></review>'), "nested_elements"),
+            (response('<advice>Yes</advice>'), "invalid_verdict"),
+            ({**response('private truncated text'), "stop_reason": "max_tokens"}, "output_limit"),
+        ]:
+            observed = []
+            vendor = Mock(return_value=opus.AuditedReply(reply, observed.append))
+            with self.subTest(expected=expected), self.assertRaises(opus.OpusResponseError) as failure:
+                opus.review(vendor, {})
+            self.assertEqual(failure.exception.code, expected)
+            self.assertEqual(observed, [expected])
+            self.assertNotIn("private", str(failure.exception))
+            self.assertEqual(vendor.call_count, 1)
+
     def test_public_research_only_uses_fixed_hosts_and_sanitizes_snippets(self):
         with patch("lantern.opus._json_get", return_value={"query": {"search": [
             {"title": "Privacy", "snippet": 'A <span class="searchmatch">privacy</span> topic.'}

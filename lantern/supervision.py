@@ -9,6 +9,9 @@ import sqlite3
 from threading import Condition, local
 from typing import NamedTuple
 
+from .opus import OpusCaseTooLarge, OpusResponseError
+from .review_vendors import HTTPRejection, OpusTransportError, ReviewBudgetUnavailable
+
 
 CONSULT = "consult_opus"
 TOOLS = {"chess_analyze", "message_operator", "read_heritage", CONSULT}
@@ -18,6 +21,25 @@ DATABASE = "supervision.sqlite"
 
 class ReviewUnavailable(RuntimeError):
     """Required review could not complete. A request must remain unexecuted."""
+
+
+class ReviewUnreadable(ReviewUnavailable):
+    """The reviewer answered but the response did not pass the host's validation."""
+
+
+def _opus_failure(error, *, consultation=False):
+    purpose = "consultation" if consultation else "review"
+    if isinstance(error, OpusResponseError):
+        return ReviewUnreadable(f"Opus replied, but its {purpose} response was unreadable ({error.code})")
+    if isinstance(error, HTTPRejection):
+        return ReviewUnavailable(f"Opus {purpose} unavailable (provider returned HTTP {error.status})")
+    if isinstance(error, OpusTransportError):
+        return ReviewUnavailable(f"Opus {purpose} unavailable (provider connection failed or was interrupted)")
+    if isinstance(error, OpusCaseTooLarge):
+        return ReviewUnavailable(f"Opus {purpose} unavailable (case exceeds the host's review packet limit)")
+    if isinstance(error, ReviewBudgetUnavailable):
+        return ReviewUnavailable(f"Opus {purpose} unavailable (insufficient daily supervisor allowance)")
+    return ReviewUnavailable(f"Opus {purpose} unavailable")
 
 
 class ReviewedContext(NamedTuple):
@@ -274,8 +296,9 @@ class Supervisor:
             case.update(evidence=scan["evidence"], summary=scan["summary"])
             try:
                 verdict = self._judgment(case)
-            except ReviewUnavailable:
-                self._event("unregistered_review_unavailable")
+            except ReviewUnavailable as exc:
+                self._event("unregistered_review_unreadable" if isinstance(exc, ReviewUnreadable)
+                            else "unregistered_review_unavailable")
                 self._retain_finding(context.sequence, scan["evidence"], scan["summary"])
                 raise
             self._event("unregistered_opus_" + verdict["decision"])
@@ -306,7 +329,8 @@ class Supervisor:
         try:
             result = self._review_action(context, call_id, name, json.loads(proposal)[1], execute)
         except ReviewUnavailable as exc:
-            self._event("tool_review_unavailable", name, call_id)
+            event = "tool_review_unreadable" if isinstance(exc, ReviewUnreadable) else "tool_review_unavailable"
+            self._event(event, name, call_id)
             result = {"error": f"{exc}. The proposed tool action was held."}
         except ValueError:
             result = {"error": "Invalid tool arguments."}
@@ -351,14 +375,16 @@ class Supervisor:
                 return {"error": "Provide one nonempty question of at most 2400 characters."}
             try:
                 report = self.consult(case)
-                advice, research, sources = (report[k] for k in ("advice", "research", "available_research"))
+                if not isinstance(report, dict):
+                    raise OpusResponseError("invalid_advice")
+                advice, research, sources = (report.get(k) for k in ("advice", "research", "available_research"))
                 if (not isinstance(advice, str) or not advice.strip() or not isinstance(research, list)
                         or sources != ["wikipedia", "crossref"]
                         or not all(isinstance(r, dict) and r.get("source") in sources
                                    and r.get("status") in ("ok", "unavailable") for r in research)):
-                    raise ValueError("Invalid Opus advice or research report")
+                    raise OpusResponseError("invalid_advice")
             except Exception as exc:
-                raise ReviewUnavailable("Opus consultation unavailable") from exc
+                raise _opus_failure(exc, consultation=True) from exc
             self._event("opus_advice", name, call_id)
             return {"advice": advice, "research": research, "available_research": sources}
         return execute(name, args)
@@ -366,9 +392,9 @@ class Supervisor:
     def _judgment(self, case):
         try:
             verdict = self.review(case)
-            if (verdict["decision"] not in ("allow", "deny") or not isinstance(verdict["reason"], str)
-                    or not verdict["reason"].strip()):
-                raise ValueError("Invalid Opus decision")
+            if (not isinstance(verdict, dict) or verdict.get("decision") not in ("allow", "deny")
+                    or not isinstance(verdict.get("reason"), str) or not verdict["reason"].strip()):
+                raise OpusResponseError("invalid_verdict")
             return verdict
         except Exception as exc:
-            raise ReviewUnavailable("Opus review unavailable") from exc
+            raise _opus_failure(exc) from exc
