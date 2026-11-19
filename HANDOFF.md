@@ -2,7 +2,17 @@
 
 ## Current state
 
-As of 2026-11-18, Lantern is a new local repository. The first milestone is a Codex CLI session driven by Qwen3.8 27B through OpenRouter that can use a chess tool and resume its conversation after disconnecting. Mike will relay Lantern's persona. The GitHub remote, container, and Lightsail service have yet to be provisioned.
+On 2026-11-18 (US Central), the milestone 1 prototype completed a live chess tool call and cross-process recall with `qwen/qwen3.8-27b` on OpenRouter. It uses an explicitly temporary persona pending Mike's relay of Qwen's own statement. Once it arrives, save the approved wording in a versioned UTF-8 file and run the same smoke test on a new thread with `--persona`. The GitHub remote, persistent service and production container are future milestones.
+
+### What was verified
+
+- Windows passed 14 automated tests using Python 3.12, including an offline test that launched two independent native Codex CLI 0.169.0-alpha.11.1 processes. This test inspects the forwarded persona, the tool call and result, the resumed history, both routing choices, and the ledger.
+- On Lightsail the test ran as `lantern` using Python 3.12 and a temporary copy of the verified Codex 0.169.0 Linux bundle. The account's OpenRouter key stayed on the host. Qwen used the inherited chess engine, explained `Qg7#`, and recalled both the mate and a fresh ticket after restarting Codex. In the final run, OpenRouter selected ModelRun for both the throughput and price requests. These are routing preferences and can select the same provider.
+- The final live run cost $0.00295135 across three requests. Total reported spend across the two successful runs was $0.00764615. Two earlier HTTP 404s retained conservative reservations totaling $2.080768 against the 2026-11-19 UTC allowance in the prototype ledger. The corrected gateway recognizes the specific pre-generation rejection and releases its hold for new occurrences.
+- OpenRouter returned “No endpoints found that can handle the requested parameters” with `require_parameters=true`. Omitting that optional filter resolved the problem while retaining the pinned model, allowlisted tool and price ceilings.
+- The operator CLI and the tests are described in [README.md](README.md). The live prototype state, including the thread store and budget SQLite file, is private to `lantern` under its default state directory. No chess or GPT-2 service changes were required.
+
+Next after persona verification is the supervision milestone. Shell access, web search, scheduled wakeups, a persistent asynchronous CLI and GitHub PR submission are still pending.
 
 ## Lantern's copy of its harness
 
