@@ -16,6 +16,14 @@ Use `/status` for active and queued work, `/history` for recent messages, and `/
 
 The [pilot deployment guide](deploy/README.md) covers the private systemd service and operator commands.
 
+### Independent work
+
+The Lightsail worker accepts timed wakeups in the same private room. Run `lantern schedule` to see the heartbeat interval, next wake, pending reminders and any budget pause (all times UTC). From a `lantern` login shell, `lantern heartbeat 0` pauses periodic wakes and `lantern heartbeat 60` schedules them hourly. One-time alarms have their own schedule. Lantern can adjust either through supervised tools. The initial hourly setting is applied once, and the first heartbeat is due when the worker becomes idle. Human messages take priority. Missed heartbeats coalesce into one wake after downtime.
+
+Lantern can list, read and write UTF-8 notes and source files relative to `~/.local/state/lantern/workspace/files/`. Updating an existing file requires the digest returned by the read tool. Its editable files persist across restarts. Shell execution and the editable Git clone inside a container are later steps. The worker separately provides read-only access to the private heritage archive.
+
+The supervised `web_search` tool returns links and short excerpts from Mwmbl, Wikipedia or Crossref. `budget_status` reports both ledgers, outstanding reservations and time to midnight UTC. If a daily cap blocks a turn, the worker durably defers pending work. If a request already ran, a continuation asks Lantern to inspect earlier effects before resuming.
+
 ## Run locally
 
 Use Python 3.11 or later, a compatible native Codex CLI on your PATH, and `OPENROUTER_API_KEY`, `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` in the operator environment. The Anthropic organization needs legacy access to `claude-3-opus-20240229`. The Python harness uses the standard library. Codex receives a short-lived loopback token. Provider keys stay in the operator process.
@@ -26,7 +34,7 @@ python -m lantern say --thread THREAD_ID --route cheapest "What were we discussi
 python -m lantern usage
 ```
 
-To run the persistent chat locally, start `python -m lantern worker` in one terminal and `python -m lantern chat` in another with the same state directory. Only the worker needs credentials. It waits locally when the inbox is empty. The pilot worker uses throughput routing by default and accepts `--route cheapest` when started manually. Qwen can use up to 8,192 output tokens in a response. A worker turn including tools and reviews has a ten-minute deadline.
+To run the persistent chat locally, start `python -m lantern worker` in one terminal and `python -m lantern chat` in another with the same state directory. Only the worker needs credentials. Use `worker --heartbeat-minutes 60` to enable independent work in that room. The pilot worker uses throughput routing by default and accepts `--route cheapest` when started manually. Qwen can use up to 8,192 output tokens in a response. A worker turn including tools and reviews has a ten-minute deadline.
 
 The private Lightsail launcher uses the operator-provisioned `heritage/Lantern.md` and offers `read_heritage` for the original LM Studio conversation. The [project handoff](HANDOFF.md#private-persona-and-heritage-archive) describes the archive and its private provisioning. Other installations default to the [bundled persona](lantern/personas/lantern-v1.md). Codex receives the selected persona as developer instructions and the harness pins it to the thread. To try a different persona, start a new thread with `--persona path/to/file.md` before the subcommand.
 

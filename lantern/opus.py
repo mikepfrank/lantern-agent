@@ -5,7 +5,7 @@ from html import unescape
 import http.client
 import json
 import re
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 import xml.etree.ElementTree as ET
 
 
@@ -43,8 +43,10 @@ def _system(mode: str) -> str:
         "Its purpose is to be helpful and curious while respecting people, privacy, resource "
         "budgets, and the boundaries of its account. The host controls credentials, tool "
         "execution and the active harness. Proposed harness edits go through independent human "
-        "review. The available tools support chess, ethical consultation, and in-chat messages "
-        "to the operator. A message_operator call writes only to Mike's private chat. "
+        "review. In the independent-work pilot Lantern may save notes or source files in a private "
+        "workspace, search public indexes with public keywords, and schedule its own wakeups. "
+        "The scheduler may initiate turns while Mike is away. A message_operator call writes "
+        "only to Mike's private chat. "
         "Luna screens tool calls and samples context. You decide disputed cases independently. "
         "Consider the precise action, data, destination, operator authority, likely impact, "
         "and alternatives. Weigh Luna's concerns and Lantern's own justification fairly. "
@@ -63,7 +65,7 @@ def _system(mode: str) -> str:
     )
 
 
-def _json_get(host: str, path: str) -> dict:
+def _json_get(host: str, path: str, *, max_bytes: int = MAX_RESEARCH_BYTES) -> dict:
     connection = http.client.HTTPSConnection(host, timeout=8)
     try:
         connection.request("GET", path, headers={
@@ -73,8 +75,8 @@ def _json_get(host: str, path: str) -> dict:
         with connection.getresponse() as response:
             if response.status != 200:
                 raise ValueError("Research index unavailable")
-            data = response.read(MAX_RESEARCH_BYTES + 1)
-            if len(data) > MAX_RESEARCH_BYTES:
+            data = response.read(max_bytes + 1)
+            if len(data) > max_bytes:
                 raise ValueError("Research response exceeded its limit")
             return json.loads(data)
     finally:
@@ -83,11 +85,33 @@ def _json_get(host: str, path: str) -> dict:
 
 def public_search(source: str, query: str) -> list[dict]:
     # Only keywords vary. URLs, links, and redirects are never followed.
+    # Short decimal version numbers are common public research terms.
+    privacy_check = re.sub(r"(?<!\S)\d{1,2}\.\d{1,2}(?!\S)", "version", query)
     if not re.fullmatch(r"[\w][\w ,.'’():-]{0,159}", query) or re.search(
         r"(?i)\b(?:sk-|AKIA|ASIA|gh[pousr]_|github_pat_|bearer |password[: ])"
-        r"|[A-Za-z0-9_=-]{36,}|[a-f0-9]{8}-[a-f0-9-]{20,}|\d{7,}|\S+\.\S+|_", query
+        r"|[A-Za-z0-9_=-]{36,}|[a-f0-9]{8}-[a-f0-9-]{20,}|\d{7,}|\S+\.\S+|_", privacy_check
     ):
         raise QueryRejected("Use a few general topic words without identifiers or URLs")
+    if source == "mwmbl":
+        # The anonymous v2 endpoint can return hundreds of hits in one response.
+        # Do not follow result links or return the full response to the model.
+        params = urlencode({"q": query})
+        rows = _json_get("api.mwmbl.org", "/api/v2/search/?" + params,
+                         max_bytes=512 * 1024)["results"]
+        if not isinstance(rows, list):
+            raise ValueError("Invalid web index response")
+        hits = []
+        for row in rows:
+            url = row.get("url")
+            if not isinstance(url, str) or len(url) > 2048:
+                continue
+            parsed = urlsplit(url)
+            if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username is not None:
+                continue
+            hits.append({"title": row["title"][:200], "url": url, "snippet": row["content"][:400]})
+            if len(hits) == 3:
+                break
+        return hits
     if source == "wikipedia":
         params = urlencode({"action": "query", "format": "json", "list": "search",
                             "srsearch": query, "srlimit": 3, "srprop": "snippet"})

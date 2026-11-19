@@ -13,6 +13,14 @@ MODEL_CONTEXT_TOKENS = 1_024_000
 DAILY_USD = Decimal("10")
 
 
+class BudgetUnavailable(ValueError):
+    """The OpenRouter reservation would exceed the named UTC day's allowance."""
+
+    def __init__(self, day: str):
+        super().__init__("OpenRouter daily budget has insufficient unreserved funds")
+        self.day = day
+
+
 def units(amount: Decimal) -> int:
     if not amount.is_finite() or amount < 0:
         raise ValueError("Expected a finite, nonnegative cost")
@@ -42,7 +50,7 @@ class Budget:
                 (day,),
             ).fetchone()
             if used + self.reservation > units(DAILY_USD):
-                raise ValueError("OpenRouter daily budget has insufficient unreserved funds")
+                raise BudgetUnavailable(day)
             request_id = uuid4().hex
             db.execute("INSERT INTO requests VALUES (?, ?, ?, NULL)", (request_id, day, self.reservation))
         return request_id
@@ -57,8 +65,8 @@ class Budget:
                 if previous != (actual,):
                     raise ValueError("Unknown or conflicting OpenRouter settlement")
 
-    def today(self) -> dict:
-        day = datetime.now(timezone.utc).date().isoformat()
+    def today(self, *, day: str | None = None) -> dict:
+        day = day or datetime.now(timezone.utc).date().isoformat()
         with closing(sqlite3.connect(self.path)) as db:
             spent, held, count = db.execute("""
                 SELECT COALESCE(SUM(actual), 0),

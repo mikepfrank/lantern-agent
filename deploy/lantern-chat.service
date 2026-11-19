@@ -10,7 +10,7 @@ WorkingDirectory=/opt/lantern/current
 EnvironmentFile=/etc/lantern/worker.env
 Environment=HOME=/home/lantern/.local/state/lantern
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/lantern worker
+ExecStart=/usr/local/bin/lantern worker --heartbeat-minutes 60
 Restart=on-failure
 RestartSec=3
 KillMode=mixed

@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 
 from .codex_session import CodexError, SteeringInput
+from .scheduler import DailyBudgetHold
 
 
 MESSAGE_TOOL = {
@@ -70,12 +71,16 @@ async def process_batch(store, batch, turn, route):
         return {"event_id": store.notify(batch.id, text, call_id), "delivered_to": "operator chat"}
 
     prompt = "\n\n".join(event.text for event in batch.messages)
+    source = {"scheduled": True} if batch.messages[0].role == "system" else {}
     try:
         result, _ = await turn(
             prompt, route, batch.thread_id, on_thread=lambda tid: store.bind_thread(batch.id, tid),
             take_input=take_input, return_input=lambda ids: store.release_steer(batch.id, ids), notify=notify,
+            **source,
         )
         store.complete(batch.id, result.text)
+    except DailyBudgetHold as hold:
+        store.defer_for_budget(batch.id, hold)
     except (CodexError, ValueError, OSError, RuntimeError) as exc:
         # No automatic retry: the last tool or paid request might have completed.
         # Do not copy arbitrary third-party exception bodies into the operator chat.
@@ -84,11 +89,15 @@ async def process_batch(store, batch, turn, route):
         print(f"Chat batch {batch.id} ended with {type(exc).__name__}", file=sys.stderr, flush=True)
 
 
-async def serve(state, store, turn, route):
+async def serve(state, store, turn, route, *, heartbeat_minutes=None, budget_check=None, on_start=None):
     with worker_lock(state):
         store.recover()
+        if on_start is not None:
+            on_start()
+        if heartbeat_minutes is not None:
+            store.initialize_heartbeat(heartbeat_minutes)
         while True:
-            batch = store.claim()
+            batch = store.claim(budget_check=budget_check, include_scheduled=heartbeat_minutes is not None)
             if batch is None:
                 await asyncio.sleep(.35)
             else:

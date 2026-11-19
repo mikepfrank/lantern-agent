@@ -25,6 +25,14 @@ class VendorError(RuntimeError):
     """Safe to show to the operator. Never contains a request, key, or vendor body."""
 
 
+class ReviewBudgetUnavailable(VendorError):
+    """The supervisor reservation would exceed the named UTC day's allowance."""
+
+    def __init__(self, day: str):
+        super().__init__("Insufficient unreserved supervisor allowance")
+        self.day = day
+
+
 class HTTPRejection(VendorError):
     def __init__(self, status):
         super().__init__(f"Supervisor API returned HTTP {status}")
@@ -125,7 +133,7 @@ class ReviewerVendors:
             used, = db.execute("SELECT COALESCE(SUM(COALESCE(cost,reserved)),0) FROM calls WHERE day=?",
                                (day,)).fetchone()
             if used + held > units(self.limit):
-                raise VendorError("Insufficient unreserved supervisor allowance")
+                raise ReviewBudgetUnavailable(day)
             db.execute("INSERT INTO calls(id,at,day,vendor,purpose,reserved,status) VALUES(?,?,?,?,?,?,?)",
                        (request_id, now.isoformat(), day, vendor, purpose, held, "pending"))
         started = time.monotonic()
@@ -157,8 +165,8 @@ class ReviewerVendors:
                 db.execute("""UPDATE calls SET cost=?, input_tokens=?, output_tokens=?, cache_reads=?,
                     cache_writes=?, ms=?, status=? WHERE id=?""", (charge, *tokens, elapsed, status, request_id))
 
-    def today(self):
-        day = datetime.now(timezone.utc).date().isoformat()
+    def today(self, *, day: str | None = None):
+        day = day or datetime.now(timezone.utc).date().isoformat()
         with closing(sqlite3.connect(self.path)) as db:
             db.row_factory = sqlite3.Row
             rows = db.execute("""SELECT vendor, purpose, COUNT(*) AS calls, COALESCE(SUM(cost),0) AS cost,

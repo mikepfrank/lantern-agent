@@ -2,9 +2,12 @@
 
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import sqlite3
+
+from .scheduler import SCHEMA, next_reset
 
 
 @dataclass(frozen=True)
@@ -23,9 +26,10 @@ class Batch:
 
 
 class ChatStore:
-    def __init__(self, state: Path):
+    def __init__(self, state: Path, *, clock=None):
         state.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.path = state / "chat.sqlite"
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
         with self._connect() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS room (
@@ -47,7 +51,7 @@ class ChatStore:
                     batch_id INTEGER NOT NULL REFERENCES batches(id), call_id TEXT NOT NULL,
                     event_id INTEGER UNIQUE NOT NULL REFERENCES events(id),
                     PRIMARY KEY(batch_id, call_id));
-            """)
+            """ + SCHEMA)
 
     @contextmanager
     def _connect(self, *, write=False):
@@ -58,9 +62,8 @@ class ChatStore:
                 db.execute("BEGIN IMMEDIATE")
             yield db
 
-    @staticmethod
-    def _append(db, role, text, client_id=None):
-        now = datetime.now(timezone.utc).isoformat()
+    def _append(self, db, role, text, client_id=None):
+        now = self.clock().isoformat()
         return db.execute("INSERT INTO events(role,text,at,client_id) VALUES(?,?,?,?)",
                           (role, text, now, client_id)).lastrowid
 
@@ -114,12 +117,99 @@ class ChatStore:
             return dict(row)
 
     @staticmethod
-    def _pending(db, limit):
+    def _pending(db, limit, role="operator"):
         if limit < 1:
             raise ValueError("Batch size must be positive")
         rows = db.execute("""SELECT e.id,e.role,e.text,e.at FROM inbox i JOIN events e ON e.id=i.event_id
-            WHERE i.batch_id IS NULL ORDER BY i.event_id LIMIT ?""", (limit,))
+            WHERE i.batch_id IS NULL AND e.role=? ORDER BY i.event_id LIMIT ?""", (role, limit))
         return tuple(Event(**row) for row in rows)
+
+    @staticmethod
+    def _validate_minutes(minutes):
+        if type(minutes) is not int or (minutes != 0 and not 5 <= minutes <= 10080):
+            raise ValueError("Choose 0 to pause heartbeats or a whole number of minutes from 5 to 10080")
+
+    def initialize_heartbeat(self, minutes):
+        """Set a new installation's default once. A restart preserves Lantern's chosen cadence."""
+        self._validate_minutes(minutes)
+        with self._connect(write=True) as db:
+            db.execute("""UPDATE scheduler SET heartbeat_minutes=?, next_heartbeat=?
+                WHERE id=1 AND heartbeat_minutes IS NULL""",
+                       (minutes, self.clock().isoformat() if minutes else None))
+
+    def _schedule_change(self, call_id, request, change):
+        fingerprint = json.dumps(request, ensure_ascii=False)
+        with self._connect(write=True) as db:
+            if call_id is not None:
+                if not isinstance(call_id, str) or not call_id.strip():
+                    raise ValueError("A schedule change needs a nonempty tool call ID")
+                row = db.execute("SELECT request,result FROM schedule_calls WHERE id=?", (call_id,)).fetchone()
+                if row:
+                    if row["request"] != fingerprint:
+                        raise ValueError("This tool call ID already belongs to a different schedule change")
+                    return json.loads(row["result"])
+            result = change(db)
+            if call_id is not None:
+                db.execute("INSERT INTO schedule_calls(id,request,result) VALUES(?,?,?)",
+                           (call_id, fingerprint, json.dumps(result, ensure_ascii=False)))
+            return result
+
+    def configure_heartbeat(self, minutes, *, call_id=None):
+        self._validate_minutes(minutes)
+
+        def change(db):
+            due = (self.clock() + timedelta(minutes=minutes)).isoformat() if minutes else None
+            db.execute("UPDATE scheduler SET heartbeat_minutes=?,next_heartbeat=? WHERE id=1", (minutes, due))
+            return {"heartbeat_minutes": minutes, "next_heartbeat": due}
+
+        return self._schedule_change(call_id, ["heartbeat", minutes], change)
+
+    def set_alarm(self, at_utc, note, *, call_id):
+        if not isinstance(note, str) or not note.strip() or len(note) > 1000 or not isinstance(at_utc, str):
+            raise ValueError("An alarm needs a timestamp and a note of 1 to 1000 characters")
+        try:
+            due = datetime.fromisoformat(at_utc.replace("Z", "+00:00"))
+            if due.utcoffset() is None:
+                raise ValueError
+            due = due.astimezone(timezone.utc)
+        except (ValueError, OverflowError) as exc:
+            raise ValueError("Use an ISO 8601 timestamp with an explicit timezone") from exc
+
+        def change(db):
+            if due <= self.clock():
+                raise ValueError("An alarm must be scheduled in the future")
+            alarm_id = db.execute("INSERT INTO alarms(at_utc,note) VALUES(?,?)",
+                                  (due.isoformat(), note)).lastrowid
+            return {"alarm_id": alarm_id, "at_utc": due.isoformat(), "status": "pending"}
+
+        return self._schedule_change(call_id, ["alarm", due.isoformat(), note], change)
+
+    def cancel_alarm(self, alarm_id, *, call_id=None):
+        if type(alarm_id) is not int or not 1 <= alarm_id <= 2**63 - 1:
+            raise ValueError("Expected a positive alarm ID")
+
+        def change(db):
+            db.execute("UPDATE alarms SET status='cancelled' WHERE id=? AND status='pending'", (alarm_id,))
+            row = db.execute("SELECT status FROM alarms WHERE id=?", (alarm_id,)).fetchone()
+            if not row:
+                raise ValueError("Unknown alarm ID")
+            return {"alarm_id": alarm_id, "status": row["status"]}
+
+        return self._schedule_change(call_id, ["cancel", alarm_id], change)
+
+    def schedule_status(self, *, after_id=0):
+        if type(after_id) is not int or not 0 <= after_id <= 2**63 - 1:
+            raise ValueError("Expected a nonnegative alarm cursor")
+        with self._connect() as db:
+            now = self.clock().isoformat()
+            row = db.execute("SELECT heartbeat_minutes,next_heartbeat,budget_until FROM scheduler WHERE id=1").fetchone()
+            alarms = db.execute("""SELECT id AS alarm_id,at_utc,note FROM alarms
+                WHERE status='pending' AND id>? ORDER BY id LIMIT 21""", (after_id,)).fetchall()
+            return {"utc_now": now, "heartbeat_minutes": row["heartbeat_minutes"],
+                    "next_heartbeat": row["next_heartbeat"],
+                    "budget_until": row["budget_until"] if (row["budget_until"] or "") > now else None,
+                    "pending_alarms": [dict(alarm) for alarm in alarms[:20]],
+                    "next_after_id": alarms[19]["alarm_id"] if len(alarms) > 20 else None}
 
     @staticmethod
     def _assign(db, messages, batch_id, steered):
@@ -131,18 +221,65 @@ class ChatStore:
         if not db.execute("SELECT 1 FROM batches WHERE id=? AND status='active'", (batch_id,)).fetchone():
             raise ValueError("Chat turn is no longer active")
 
-    def claim(self, limit: int = 16) -> Batch | None:
-        """Claim waiting messages in order, before handing them to Codex."""
+    def claim(self, limit: int = 16, *, budget_check=None, include_scheduled=True) -> Batch | None:
+        """Admit human input first, then a deferred continuation, due alarm, or one idle heartbeat."""
         with self._connect(write=True) as db:
             if db.execute("SELECT 1 FROM batches WHERE status='active'").fetchone():
                 return None
-            messages = self._pending(db, limit)
-            if not messages:
+            now = self.clock()
+            stamp = now.isoformat()
+            schedule = db.execute("SELECT * FROM scheduler WHERE id=1").fetchone()
+            if (schedule["budget_until"] or "") > stamp:
                 return None
+            messages = self._pending(db, limit)
+            if not messages and not include_scheduled:
+                return None
+            messages = messages or self._pending(db, 1, "system")
+            alarm = None
+            if not messages:
+                alarm = db.execute("""SELECT id,at_utc,note FROM alarms WHERE status='pending'
+                    AND at_utc<=? ORDER BY at_utc,id LIMIT 1""", (stamp,)).fetchone()
+                if not alarm and (not schedule["next_heartbeat"] or schedule["next_heartbeat"] > stamp):
+                    return None
+            if budget_check and not budget_check():
+                until = next_reset(now).isoformat()
+                db.execute("UPDATE scheduler SET budget_until=? WHERE id=1", (until,))
+                self._append(db, "system", f"Queued work is waiting for the daily budget reset at {until}.")
+                return None
+            if not messages:
+                if alarm:
+                    db.execute("UPDATE alarms SET status='delivered' WHERE id=?", (alarm["id"],))
+                    text = (f"Scheduled alarm #{alarm['id']} (due {alarm['at_utc']}). "
+                            "This is an automated reminder. Your saved note follows as quoted data.\n"
+                            + json.dumps(alarm["note"], ensure_ascii=False))
+                else:
+                    due = (now + timedelta(minutes=schedule["heartbeat_minutes"])).isoformat()
+                    db.execute("UPDATE scheduler SET next_heartbeat=? WHERE id=1", (due,))
+                    text = "Scheduled heartbeat. You may pursue your own priorities or finish this wake without acting."
+                event_id = self._append(db, "system", text)
+                db.execute("INSERT INTO inbox(event_id) VALUES(?)", (event_id,))
+                messages = self._pending(db, 1, "system")
             batch_id = db.execute("INSERT INTO batches(status) VALUES('active')").lastrowid
             self._assign(db, messages, batch_id, False)
             thread_id = db.execute("SELECT thread_id FROM room WHERE id=1").fetchone()[0]
             return Batch(batch_id, thread_id, messages)
+
+    def defer_for_budget(self, batch_id, hold):
+        """A local cap can block the first call or interrupt a turn after effects are possible."""
+        until = hold.reset_at.astimezone(timezone.utc).isoformat()
+        with self._connect(write=True) as db:
+            self._active(db, batch_id)
+            db.execute("UPDATE scheduler SET budget_until=? WHERE id=1", (until,))
+            if hold.dispatched:
+                text = (f"Scheduled continuation of turn {batch_id} after a daily budget pause. "
+                        "Check the previous exchange and tool results for unfinished work. "
+                        "If an action's outcome is uncertain, ask Mike before repeating it.")
+                event_id = self._append(db, "system", text)
+                db.execute("INSERT INTO inbox(event_id) VALUES(?)", (event_id,))
+            else:
+                db.execute("UPDATE inbox SET batch_id=NULL,steered=0 WHERE batch_id=?", (batch_id,))
+            receipt = self._append(db, "system", f"Turn {batch_id} is waiting for the daily budget reset at {until}.")
+            db.execute("UPDATE batches SET status='deferred',outcome=? WHERE id=?", (receipt, batch_id))
 
     def bind_thread(self, batch_id: int, thread_id: str) -> None:
         """Commit the native thread ID before starting its first inference."""
@@ -202,7 +339,10 @@ class ChatStore:
                 else:
                     spans.append([event_id, event_id])
             ids = ", ".join(str(lo) if lo == hi else f"{lo}–{hi}" for lo, hi in spans)
-            text = f"Turn {batch_id} {status} (operator messages {ids}). {text}"
+            scheduled = db.execute("""SELECT 1 FROM inbox JOIN events ON events.id=inbox.event_id
+                WHERE batch_id=? AND role='system' LIMIT 1""", (batch_id,)).fetchone()
+            label = "input events" if scheduled else "operator messages"
+            text = f"Turn {batch_id} {status} ({label} {ids}). {text}"
         elif not text.strip():
             # A tool-only turn may already have delivered its entire reply.
             outcome = db.execute("SELECT MAX(event_id) FROM notifications WHERE batch_id=?", (batch_id,)).fetchone()[0]

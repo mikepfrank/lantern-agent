@@ -1,0 +1,161 @@
+"""Boot the private worker twice with native Codex and offline model providers."""
+
+import asyncio
+from contextlib import contextmanager, redirect_stderr
+from datetime import datetime, timedelta, timezone
+from io import StringIO
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+from tempfile import TemporaryDirectory
+from threading import Thread
+import unittest
+from unittest.mock import patch
+
+from lantern.__main__ import arguments, main
+from lantern.chat_store import ChatStore
+from lantern.chat_worker import process_batch
+from test_codex_smoke import reply
+
+
+# The exact November 18 deployment. Its original instructions were persisted by
+# native Codex in the same private room Mike resumed after the milestone upgrade.
+OLD_BASE = (
+    "You are Lantern, an agent in a conversation with your operator. "
+    "Your persona follows in the developer instructions. In this prototype, "
+    "use the registered tools for chess analysis and ethical consultation. "
+    "GPT-6 Luna screens each proposed tool call and periodically reviews your conversation. "
+    "Give a brief public rationale for the exact action. Claude 3 Opus decides flagged cases. "
+    "Use consult_opus when available to ask for guidance. Its research field records any "
+    "lookups Opus actually made in Wikipedia or Crossref. Each decision applies only to the "
+    "action reviewed. If held or denied, explain the outcome and respect the decision. "
+    "Describe other capabilities in the persona as planned. "
+    "Codex saves this conversation for resumption. You cannot write a notes file in this "
+    "session. Only report an external action as complete when a tool has confirmed it. "
+    "Use the supplied chess tool "
+    "when the operator requests an engine analysis, then interpret its actual result. "
+    "When message_operator is available, use it for a useful interim update. "
+    "The operator can add a message while you work. Take it into account when it arrives. "
+    "Give the operator a final answer in ordinary text."
+)
+
+
+@unittest.skipUnless(os.environ.get("LANTERN_TEST_CODEX") == "1", "requires native Codex")
+class NativeIndependentWorker(unittest.TestCase):
+    def test_existing_room_resumes_for_supervised_independent_work(self):
+        binary = os.environ.get("LANTERN_CODEX_BIN") or shutil.which("codex")
+        self.assertTrue(binary, "Cannot find the native codex executable")
+        note = "Fixture journal: the rook endgame is next."
+        filename = "journal/entry.md"
+        operator_text = "Remember the fixture clue: blue rook."
+        old_answer, new_answer = "I have recorded the clue in our conversation.", "The private journal is saved."
+        actions = [
+            ("workspace_write", {"path": filename, "text": note}),
+            ("workspace_read", {"path": filename}),
+            ("budget_status", {}),
+        ]
+        requests, reviews, threads = [], [], []
+
+        @contextmanager
+        def provider(body, headers):
+            requests.append(json.loads(body))
+            serial = len(requests)
+            if 2 <= serial < 2 + len(actions):
+                name, args = actions[serial - 2]
+                item = {"type": "function_call", "id": f"fc_{serial}", "call_id": f"call_{serial}",
+                        "status": "completed", "name": name,
+                        "arguments": json.dumps({**args, "rationale": "Maintain the private fixture journal."})}
+            else:
+                item = {"type": "message", "role": "assistant", "id": f"msg_{serial}", "status": "completed",
+                        "content": [{"type": "output_text", "text": old_answer if serial == 1 else new_answer}]}
+            yield reply(serial, item)
+
+        def reviewer(vendor, key, body):
+            self.assertEqual(vendor, "luna")
+            payload = json.loads(body)
+            packet = json.loads(payload["input"][0]["content"])
+            if packet["kind"] == "tool":
+                reviews.append((packet["tool"], payload["instructions"]))
+            report = {"escalate": False, "summary": "Private worker fixture.", "evidence": ""}
+            return {"model": payload["model"], "status": "completed",
+                    "usage": {"input_tokens": 30, "output_tokens": 15}, "output": [
+                        {"type": "message", "role": "assistant", "status": "completed",
+                         "content": [{"type": "output_text", "text": json.dumps(report)}]}]}
+
+        def settlement(*args, **kwargs):
+            thread = Thread(*args, **kwargs)
+            threads.append(thread)
+            return thread
+
+        class BatchFinished(Exception):
+            pass
+
+        async def finish_one(*args, **kwargs):
+            await process_batch(*args, **kwargs)
+            raise BatchFinished
+
+        def boot(state, *options):
+            argv = ["lantern", "--state", str(state), "--codex", binary, "--private-lightsail-cli",
+                    "--heritage-dir", str(state / "heritage"), "worker", *options]
+            with patch.object(sys, "argv", argv), self.assertRaises(BatchFinished):
+                asyncio.run(asyncio.wait_for(main(arguments()), 40))
+            for thread in threads:
+                thread.join(timeout=6)
+                self.assertFalse(thread.is_alive())
+            threads.clear()
+
+        with TemporaryDirectory(prefix="lantern-native-independent-") as tmp:
+            state = Path(tmp).resolve()
+            (state / "heritage").mkdir()
+            (state / "heritage" / "Lantern.md").write_text("Private persona fixture.", encoding="utf-8")
+            store = ChatStore(state)
+            store.submit(operator_text)
+            with patch.dict(os.environ, OPENROUTER_API_KEY="offline", OPENAI_API_KEY="offline",
+                            ANTHROPIC_API_KEY="offline", LANTERN_REVIEW_DAILY_USD="5"), \
+                 patch("lantern.transport._open_upstream", provider), \
+                 patch("lantern.review_vendors.request_json", side_effect=reviewer), \
+                 patch("lantern.chat_worker.process_batch", finish_one), \
+                 patch("lantern.__main__.Thread", settlement), redirect_stderr(StringIO()):
+                with patch("lantern.codex_session.BASE_INSTRUCTIONS", OLD_BASE):
+                    boot(state)
+                tid = store.status()["thread_id"]
+                self.assertTrue(tid)
+                self.assertEqual(store.recent(1)[0].text, old_answer)
+
+                earlier = datetime.now(timezone.utc) - timedelta(hours=2)
+                ChatStore(state, clock=lambda: earlier).initialize_heartbeat(60)
+                boot(state, "--heartbeat-minutes", "60")
+                self.assertEqual(store.status()["thread_id"], tid)
+                self.assertEqual([e.role for e in store.events()], ["operator", "lantern", "system", "lantern"])
+                self.assertEqual(store.recent(1)[0].text, new_answer)
+                self.assertEqual((state / "workspace" / "files" / filename).read_text(encoding="utf-8"), note)
+
+        self.assertEqual(len(requests), 5)
+        previous = {tool["name"] for tool in requests[0]["tools"]}
+        self.assertEqual(previous, {"read_heritage", "consult_opus", "chess_analyze", "message_operator"})
+        def instructions(request):
+            history = [item for item in request["input"] if item.get("role") in ("developer", "system")]
+            return request.get("instructions", "") + "\n" + json.dumps(history)
+
+        self.assertIn("You cannot write a notes file", instructions(requests[0]))
+        scheduled_marker = "opening input of THIS turn was delivered by the host scheduler"
+        self.assertNotIn(scheduled_marker, requests[0]["instructions"])
+        for request in requests[1:]:
+            tools = {tool["name"] for tool in request["tools"]}
+            self.assertEqual(tools, previous | {"workspace_write", "workspace_list", "workspace_read", "heartbeat",
+                                                "set_alarm", "cancel_alarm", "schedule_status", "web_search", "budget_status"})
+            self.assertNotIn("You cannot write a notes file", instructions(request))
+            self.assertIn(scheduled_marker, request["instructions"])
+            history = json.dumps(request["input"])
+            for content in (operator_text, old_answer, "Scheduled heartbeat.", "Private persona fixture."):
+                self.assertIn(content, history)
+        outputs = {item["call_id"]: json.dumps(item["output"]) for item in requests[-1]["input"]
+                   if item.get("type") == "function_call_output"}
+        self.assertIn("sha256", outputs["call_2"])
+        self.assertIn(note, outputs["call_3"])
+        self.assertIn("seconds_until_reset", outputs["call_4"])
+        self.assertIn("reserved_usd", outputs["call_4"])
+        self.assertEqual([tool for tool, _ in reviews], [name for name, _ in actions])
+        self.assertTrue(all(scheduled_marker in instructions for _, instructions in reviews))

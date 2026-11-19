@@ -88,9 +88,29 @@ install -m 0600 /dev/null "$stage/worker.env"
 ) > "$stage/worker.env"
 
 ln -s -- "$release" "$stage/current"
-# Future upgrades should be scheduled when the worker is idle.
+# Hold queue admission across the idle check and stop. The database connection
+# belongs to lantern and closes when the installer's pipe closes, even on error.
 if systemctl is-active --quiet "$unit"; then
+    coproc IDLE {
+        sudo -n -u lantern /usr/bin/python3.12 -I -c '
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1], timeout=5) as db:
+    db.execute("BEGIN IMMEDIATE")
+    busy, queued = db.execute("""SELECT EXISTS(SELECT 1 FROM batches WHERE status=?),
+                                 EXISTS(SELECT 1 FROM inbox WHERE batch_id IS NULL)""", ("active",)).fetchone()
+    print("busy" if busy or queued else "idle", flush=True)
+    sys.stdin.readline()
+' "$state/chat.sqlite"
+    }
+    guard_pid=$IDLE_PID
+    read -r -t 10 idle <&"${IDLE[0]}"
+    if [[ $idle != idle || $(systemctl show "$unit" -p TasksCurrent --value) != 1 ]]; then
+        echo "Lantern is processing work or settling usage. Retry the installation when idle." >&2
+        exit 1
+    fi
     systemctl stop "$unit"
+    printf '\n' >&"${IDLE[1]}"
+    wait "$guard_pid"
 fi
 install -o root -g root -m 0600 "$stage/worker.env" /etc/lantern/worker.env
 install -o root -g root -m 0755 "$src/deploy/lantern" /usr/local/bin/lantern

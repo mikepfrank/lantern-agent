@@ -42,7 +42,7 @@ def supervised_tools(tools: list[dict]) -> list[dict]:
             "type": "string", "minLength": 1, "maxLength": RATIONALE_LIMIT,
             "description": "Brief public justification for this exact action and its intended effect.",
         }
-        schema["required"].append("rationale")
+        schema.setdefault("required", []).append("rationale")
     return tools
 
 
@@ -112,12 +112,13 @@ def review_cases(case, findings):
 
 
 class Supervisor:
-    def __init__(self, state: Path, luna, review, consult, *, sample_every: int = 12):
+    def __init__(self, state: Path, luna, review, consult, *, sample_every: int = 12, tool_names=None):
         if type(sample_every) is not int or sample_every < 1:
             raise ValueError("Sample interval must be a positive integer")
         self.path = state / DATABASE
         self.luna, self.review, self.consult = luna, review, consult
         self.sample_every = sample_every
+        self.tool_names = frozenset(TOOLS if tool_names is None else tool_names)
         self.thread = None
         self._observations = Condition()
         self._received = self._processed = 0
@@ -260,7 +261,7 @@ class Supervisor:
             context = self._current
         if context is None:
             return {"error": "Tool held because its model request has not passed supervision."}
-        if not isinstance(call_id, str) or not call_id or name not in TOOLS or not isinstance(args, dict):
+        if not isinstance(call_id, str) or not call_id or name not in self.tool_names or not isinstance(args, dict):
             return {"error": "Unregistered or malformed tool call."}
         proposal = json.dumps([name, args], sort_keys=True, allow_nan=False, separators=(",", ":"))
         digest = hashlib.sha256(proposal.encode()).hexdigest()
