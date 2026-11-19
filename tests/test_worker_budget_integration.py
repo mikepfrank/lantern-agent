@@ -38,13 +38,13 @@ class WorkerBudgetIntegration(unittest.TestCase):
         notices = []
         real_reserve = Budget.reserve
 
-        def reserve(ledger, payload):
+        def reserve(ledger, payload, **attribution):
             # Simulate a concurrent reservation after the outer preflight succeeded.
             if failure == "qwen" or (failure == "after_effect" and paid):
                 raise BudgetUnavailable(day)
-            return real_reserve(ledger, payload)
+            return real_reserve(ledger, payload, **attribution)
 
-        def reviewer(vendors, vendor, payload, *, purpose):
+        def reviewer(vendors, vendor, payload, *, purpose, **attribution):
             if failure == "supervisor_context" or (failure == "supervisor_tool" and purpose == "tool"):
                 raise ReviewBudgetUnavailable(day)
             if failure == "other_vendor_error":

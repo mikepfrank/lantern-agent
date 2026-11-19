@@ -72,11 +72,20 @@ async def process_batch(store, batch, turn, route):
 
     prompt = "\n\n".join(event.text for event in batch.messages)
     source = {"scheduled": True} if batch.messages[0].role == "system" else {}
+    trigger = "operator"
+    if source:
+        first = batch.messages[0].text
+        if first.startswith("Scheduled heartbeat."):
+            trigger = "heartbeat"
+        elif first.startswith("Scheduled alarm #"):
+            trigger = "alarm"
+        else:
+            trigger = "continuation"
     try:
         result, _ = await turn(
             prompt, route, batch.thread_id, on_thread=lambda tid: store.bind_thread(batch.id, tid),
             take_input=take_input, return_input=lambda ids: store.release_steer(batch.id, ids), notify=notify,
-            **source,
+            batch_id=batch.id, trigger=trigger, **source,
         )
         store.complete(batch.id, result.text)
     except DailyBudgetHold as hold:

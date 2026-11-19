@@ -87,7 +87,8 @@ class ChatWorkerTests(unittest.TestCase):
         self.store.submit("Before dispatch")
         batch = self.store.claim()
 
-        async def turn(prompt, route, thread_id, *, on_thread, take_input, return_input, notify):
+        async def turn(prompt, route, thread_id, *, on_thread, take_input, return_input, notify, batch_id, trigger):
+            self.assertEqual((batch.id, "operator"), (batch_id, trigger))
             self.assertEqual("Initial\n\nBefore dispatch", prompt)
             on_thread("native-thread")
             self.assertIsNone(take_input())

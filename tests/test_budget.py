@@ -1,6 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from decimal import Decimal
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
@@ -8,6 +10,28 @@ from lantern.budget import Budget
 
 
 class BudgetTests(unittest.TestCase):
+    def test_detailed_accounting_preserves_legacy_charges_and_unreported_fields(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "legacy.sqlite"
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute("CREATE TABLE requests(id TEXT PRIMARY KEY,day TEXT,reserved INTEGER,actual INTEGER)")
+                db.execute("INSERT INTO requests VALUES('old','2026-11-19',1000,5)")
+            ledger = Budget(path, Decimal("1"))
+            request = ledger.reserve({"input": "a private prompt"}, thread="native", batch_id=17, trigger="alarm")
+            ledger.finish(request, Decimal(".005"), status="completed", evidence={"input_tokens": 390,
+                          "output_tokens": 88, "cache_reads": 310, "reasoning_tokens": 20},
+                          ms=512, charge_source="openrouter")
+            ledger.settle(request, Decimal(".005"))
+            with self.assertRaisesRegex(ValueError, "conflicting"):
+                ledger.settle(request, Decimal(".5"))
+            with closing(sqlite3.connect(path)) as db:
+                self.assertEqual(("old", 5, None), db.execute("""SELECT r.id,r.actual,d.at FROM requests r
+                    LEFT JOIN request_details d USING(id) WHERE r.id='old'""").fetchone())
+                self.assertEqual((5000000, "native", 17, "alarm", "completed", 390, 88, 310, None, 20, 512, "openrouter"),
+                                 db.execute("""SELECT actual,thread,batch_id,trigger,status,input_tokens,
+                    output_tokens,cache_reads,cache_writes,reasoning_tokens,ms,charge_source
+                    FROM requests JOIN request_details USING(id) WHERE id=?""", (request,)).fetchone())
+
     def test_concurrent_reservations_cannot_exceed_daily_limit(self):
         with tempfile.TemporaryDirectory() as folder:
             ledger = Budget(Path(folder) / "usage.db", Decimal("3"))

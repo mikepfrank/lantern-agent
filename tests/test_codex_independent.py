@@ -1,13 +1,14 @@
 """Boot the private worker twice with native Codex and offline model providers."""
 
 import asyncio
-from contextlib import contextmanager, redirect_stderr
+from contextlib import closing, contextmanager, redirect_stderr
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 from threading import Thread
@@ -131,6 +132,17 @@ class NativeIndependentWorker(unittest.TestCase):
                 self.assertEqual([e.role for e in store.events()], ["operator", "lantern", "system", "lantern"])
                 self.assertEqual(store.recent(1)[0].text, new_answer)
                 self.assertEqual((state / "workspace" / "files" / filename).read_text(encoding="utf-8"), note)
+                with closing(sqlite3.connect(state / "usage.sqlite")) as db:
+                    calls = db.execute("""SELECT thread,batch_id,trigger,input_tokens,output_tokens,actual
+                                          FROM request_details JOIN requests USING(id)
+                                          ORDER BY request_details.rowid""").fetchall()
+                self.assertEqual(calls, [(tid, 1, "operator", 100, 40, 10000)]
+                                 + [(tid, 2, "heartbeat", 100, 40, 10000)] * 4)
+                with closing(sqlite3.connect(state / "review-costs.sqlite")) as db:
+                    reviews_by_batch = db.execute("""SELECT thread_id,batch_id,vendor,purpose,tool FROM calls
+                                                     ORDER BY rowid""").fetchall()
+                self.assertEqual(reviews_by_batch, [(tid, 1, "luna", "spot", None)]
+                                 + [(tid, 2, "luna", "tool", name) for name, _ in actions])
 
         self.assertEqual(len(requests), 5)
         previous = {tool["name"] for tool in requests[0]["tools"]}

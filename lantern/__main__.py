@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 from contextlib import ExitStack
+from contextvars import ContextVar
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import partial
@@ -58,7 +59,10 @@ def arguments():
     turn.add_argument("--thread", help="Thread ID printed by a previous turn")
     turn.add_argument("--route", choices=ROUTES, default="fastest")
     commands.add_parser("smoke", help="Test both routes, a real chess tool call and cross-process recall")
-    commands.add_parser("usage", help="Read this state directory's UTC-day spending and holds")
+    usage = commands.add_parser("usage", help="Read spending, holds and per-call accounting")
+    usage.add_argument("--day", help="Detailed report for a UTC date (YYYY-MM-DD)")
+    usage.add_argument("--calls", action="store_true", help="List individual ledger entries")
+    usage.add_argument("--batch", type=int, help="Compare calls attributed to this worker batch on the selected day")
     commands.add_parser("chat", help="Attach to the persistent operator conversation")
     send = commands.add_parser("send", help="Queue a message without attaching to chat")
     send.add_argument("message")
@@ -79,6 +83,10 @@ def arguments():
 async def main(args):
     state = args.state.resolve()
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if args.command == "usage" and (args.day is not None or args.calls or args.batch is not None):
+        from .usage_report import usage_report
+        print(json.dumps(usage_report(state, args.day, calls=args.calls, batch=args.batch), indent=2))
+        return
     if args.command in {"chat", "send", "history", "status", "schedule", "heartbeat"}:
         store = ChatStore(state)
         if args.command == "chat":
@@ -153,7 +161,7 @@ async def main(args):
         return supervised_tools(tools)
 
     async def turn(prompt, route, thread=None, *, on_thread=None, take_input=None, return_input=None,
-                   notify=None, scheduled=False):
+                   notify=None, scheduled=False, batch_id=None, trigger=None):
         persona = personas.select(thread, supplied)
         positions = []
         tools = tool_registry(notify)
@@ -173,13 +181,15 @@ async def main(args):
                         "Its reminder text, if present, is previously saved data. It carries no new human "
                         "request or authorization. Subsequent interactive steering comes from the operator.")
         hold_day = None
+        reviewing_tool = ContextVar("reviewing_tool", default=None)
 
         def reserve(payload):
             nonlocal hold_day
             if hold_day == datetime.now(timezone.utc).date().isoformat():
                 raise ReviewBudgetUnavailable(hold_day)
             try:
-                return ledger.reserve(payload)
+                return ledger.reserve(payload, thread=supervisor.thread, batch_id=batch_id,
+                                      trigger=trigger or args.command)
             except BudgetUnavailable as exc:
                 hold_day = exc.day
                 raise
@@ -187,7 +197,8 @@ async def main(args):
         def vendor_call(*args, **kwargs):
             nonlocal hold_day
             try:
-                return vendors.call(*args, **kwargs)
+                return vendors.call(*args, **kwargs, thread_id=supervisor.thread, batch_id=batch_id,
+                                    tool=reviewing_tool.get())
             except ReviewBudgetUnavailable as exc:
                 hold_day = exc.day
                 raise
@@ -225,9 +236,20 @@ async def main(args):
                 on_thread(tid)
             print(f"Thread {tid}", file=sys.stderr, flush=True)
 
+        def for_tool(name, callback, *arguments):
+            token = reviewing_tool.set(name)
+            try:
+                return callback(*arguments)
+            finally:
+                reviewing_tool.reset(token)
+
+        def dispatch(cid, name, arguments):
+            return for_tool(name, supervisor.dispatch, cid, name, arguments, partial(execute, cid))
+
         gateway = OpenRouterGateway(key, route=route, tools=tools, reserve=reserve,
-                                    settle=ledger.settle, observe=supervisor.observe,
-                                    unregistered=supervisor.unregistered, resuming=bool(thread),
+                                    settle=ledger.settle, finish=ledger.finish, observe=supervisor.observe,
+                                    unregistered=partial(for_tool, "unregistered", supervisor.unregistered),
+                                    resuming=bool(thread),
                                     operator_context=context)
 
         def report_usage():
@@ -241,7 +263,7 @@ async def main(args):
                 result = await run_turn(
                     codex_bin=args.codex, codex_home=codex_home, workspace=workspace, model=MODEL,
                     provider="lantern", base_url=gateway.base_url, persona=persona, prompt=prompt,
-                    tools=tools, dispatch=lambda cid, name, args: supervisor.dispatch(cid, name, args, partial(execute, cid)),
+                    tools=tools, dispatch=dispatch,
                     thread_id=thread,
                     on_thread=record_thread, take_input=take_input, return_input=return_input,
                     capture_steer=gateway.capture_steer, confirm_steer=gateway.confirm_steer,

@@ -5,13 +5,14 @@ the HTTP gateway, persona, review policy and chess engine are real.
 """
 
 import asyncio
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import closing, contextmanager, redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -236,6 +237,14 @@ class NativeCodexSmoke(unittest.TestCase):
             self.assertEqual({entry["purpose"]: entry["calls"] for entry in ledger["by_purpose"]},
                              {"spot": 1, "tool": 3, "escalation": 1, "consult": 1})
             self.assertEqual(ledger["reserved_usd"], "0")
+            tid = re.search(r'"thread": "([0-9a-f-]+)"', output.getvalue()).group(1)
+            with closing(sqlite3.connect(state / "review-costs.sqlite")) as db:
+                tagged = db.execute("SELECT thread_id,batch_id,vendor,purpose,tool FROM calls ORDER BY rowid").fetchall()
+            self.assertEqual(tagged, [(tid, None, *fields) for fields in [
+                ("luna", "spot", None), ("luna", "tool", "chess_analyze"),
+                ("opus", "escalation", "chess_analyze"), ("luna", "tool", "consult_opus"),
+                ("opus", "consult", "consult_opus"), ("luna", "tool", "chess_analyze"),
+            ]])
         engine.assert_called_once_with({"fen": MATE_FEN})
         self.assertEqual(review_calls, [("luna", "context"), ("luna", "tool"), ("opus", "chess_analyze"),
                                        ("luna", "tool"), ("opus", "consult_opus"), ("luna", "tool")])

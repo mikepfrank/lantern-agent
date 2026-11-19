@@ -238,9 +238,16 @@ def _inspect(event, names, evidence):
     if isinstance(incomplete, dict) and incomplete.get("reason") == "max_output_tokens":
         evidence["output_limit_reached"] = True
     usage = response.get("usage") or {}
-    for name in ("input_tokens", "output_tokens"):
-        if type(usage.get(name)) is int:
-            evidence[name] = usage[name]
+    inputs = usage.get("input_tokens_details")
+    outputs = usage.get("output_tokens_details")
+    for source, field, target in (
+        (usage, "input_tokens", "input_tokens"), (usage, "output_tokens", "output_tokens"),
+        (inputs, "cached_tokens", "cache_reads"), (inputs, "cache_write_tokens", "cache_writes"),
+        (outputs, "reasoning_tokens", "reasoning_tokens"),
+    ):
+        count = source.get(field) if isinstance(source, dict) else None
+        if type(count) is int and 0 <= count <= 2**63 - 1:
+            evidence[target] = count
     cost = usage.get("cost")
     if type(cost) in (Decimal, int) and Decimal(cost).is_finite() and cost >= 0:
         return Decimal(cost)
@@ -251,17 +258,19 @@ class OpenRouterGateway:
     """A fresh local token for one Codex client. Reserve/settle are durable host callbacks.
 
     reserve(prepared_payload) must reserve before returning its ID. settle(id, Decimal)
-    records confirmed USD. A provider failure, lost stream, or missing cost leaves the
+    records confirmed USD. With finish supplied, the ledger records status, observed
+    counters and any confirmed cost together. A lost stream or missing cost leaves the
     reservation intact. The gateway never forwards client headers to OpenRouter.
     """
 
     def __init__(self, api_key, *, route, tools, reserve, settle, observe, unregistered, resuming=False,
-                 operator_context=""):
+                 operator_context="", finish=None):
         if route not in ROUTES or not api_key:
             raise ValueError("a valid route and OpenRouter key are required")
         self.route = route
         self.tools = list(tools)
         self.reserve, self.settle = reserve, settle
+        self.finish = finish
         self.observe, self.resuming = observe, resuming
         self.unregistered = unregistered
         self.operator_context = operator_context
@@ -348,10 +357,19 @@ class OpenRouterGateway:
                 except Exception:
                     evidence["error"] = "budget reservation refused"
                     return self.fail(402, "budget reservation refused")
+                admitted_at = time.monotonic()
+
+                def meter(status, cost=None, source=None):
+                    if gateway.finish is not None:
+                        gateway.finish(reservation, cost, status=status, evidence=evidence,
+                                       ms=round((time.monotonic() - admitted_at) * 1000), charge_source=source)
+                    elif cost is not None:
+                        gateway.settle(reservation, cost)
+
                 try:
                     gateway.observe(prepared)
                 except Exception:
-                    gateway.settle(reservation, Decimal(0))
+                    meter("review_blocked", Decimal(0), "context_review_blocked")
                     evidence["error"] = "required context review unavailable"
                     return self.fail(503, evidence["error"])
                 evidence["status"] = "unconfirmed"
@@ -380,18 +398,20 @@ class OpenRouterGateway:
                                 detail = json.loads(upstream.read(16384))
                             except (ValueError, OSError):
                                 detail = None
-                            if isinstance(detail, dict):
-                                error = detail.get("error")
-                                _classify_error(error, evidence)
-                                if _no_eligible_endpoint(upstream.status, error):
-                                    gateway.settle(reservation, Decimal(0))
-                                    evidence["cost_usd"] = "0"
-                                    evidence["settlement_reason"] = "router_no_eligible_endpoint"
+                            error = detail.get("error") if isinstance(detail, dict) else None
+                            _classify_error(error, evidence)
+                            if _no_eligible_endpoint(upstream.status, error):
+                                meter("upstream_http_error", Decimal(0), "router_no_eligible_endpoint")
+                                evidence["cost_usd"] = "0"
+                                evidence["settlement_reason"] = "router_no_eligible_endpoint"
+                            else:
+                                meter("upstream_http_error")
                             return deliver(self.fail, upstream.status if 400 <= upstream.status < 600 else 502,
                                            "OpenRouter declined the request")
                         if upstream.getheader("Content-Type", "").split(";")[0].strip().lower() != "text/event-stream":
                             evidence["status"] = "invalid_upstream_response"
                             evidence["error"] = "expected OpenRouter event stream"
+                            meter("invalid_upstream_response")
                             return deliver(self.fail, 502, "expected OpenRouter event stream")
                         self.send_response(200)
                         self.send_header("Content-Type", "text/event-stream")
@@ -400,14 +420,15 @@ class OpenRouterGateway:
                         names = {tool["name"] for tool in prepared["tools"]}
                         for frame, event in _frames(upstream):
                             cost = _inspect(event, names, evidence)
-                            if cost is not None and "cost_usd" not in evidence:
-                                gateway.settle(reservation, cost)
-                                evidence["cost_usd"] = str(cost)
                             terminal = event.get("type") in TERMINAL_EVENTS
                             if terminal:
                                 # Publish the audited status only after any
                                 # confirmed cost has been durably recorded.
-                                evidence["status"] = event["type"].partition(".")[2]
+                                status = event["type"].partition(".")[2]
+                                meter(status, cost, "openrouter" if cost is not None else None)
+                                if cost is not None:
+                                    evidence["cost_usd"] = str(cost)
+                                evidence["status"] = status
                             deliver(self.wfile.write, frame)
                             if terminal:
                                 break
@@ -420,6 +441,7 @@ class OpenRouterGateway:
                     ):
                         evidence["upstream_transport_interrupted"] = True
                     evidence["status"] = "interrupted"
+                    meter("interrupted")
                     if isinstance(exc, UnregisteredCall):
                         try:
                             gateway.unregistered(exc.name, exc.arguments)

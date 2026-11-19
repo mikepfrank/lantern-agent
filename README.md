@@ -50,6 +50,12 @@ Opus decides flagged actions before execution. It sees Luna's evidence, a concis
 
 The two supervisory vendors share a default allowance of $5 per UTC day. Set `LANTERN_REVIEW_DAILY_USD` in the operator environment to configure it. Each request reserves funds before dispatch. The ledger estimates spend from reported tokens, including cache reads and writes. An ambiguous billing outcome keeps its reservation for the day. Run `python -m lantern usage` to see spend, holds, token counts and mean latency for spot checks, tool checks, escalations and consultations, alongside the review outcomes. The rate schedules are documented by [OpenAI](https://developers.openai.com/api/docs/models/gpt-6-luna) and [Anthropic](https://www.anthropic.com/news/claude-3-family).
 
+### Compare model costs
+
+From the Lightsail `lantern` account, use `lantern usage --day YYYY-MM-DD` for a UTC day's totals by model and review purpose, including the ratio of supervisor spend to Qwen spend. Use `lantern usage --calls` for today's individual calls. Combine `--day`, `--batch N` and `--calls` to inspect one turn. Qwen's costs come from OpenRouter. Luna and Opus costs are calculated from vendor-reported token counts. Outstanding reservations appear separately.
+
+New requests carry a batch ID in the persistent worker. Review calls also identify the tool under review where applicable. Older supervisor rows retain their token counts and costs. Older Qwen reservations retain their settlement amounts. Missing token counts and batch IDs are reported explicitly. Standalone CLI and calibration runs have no worker batch.
+
 ## Verify the prototype
 
 ```sh

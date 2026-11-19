@@ -61,10 +61,36 @@ class TransportTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def gateway(self, route):
+    def gateway(self, route, **kwargs):
         return OpenRouterGateway("upstream-test-key", route=route, tools=[CHESS],
                                  reserve=self.reserve, settle=self.settle, observe=self.observe,
-                                 unregistered=self.unregistered)
+                                 unregistered=self.unregistered, **kwargs)
+
+    def test_single_durable_observation_per_dispatch(self):
+        finish = Mock()
+        self.stream = event("response.completed", response={"usage": {"input_tokens": 1000, "output_tokens": 51,
+                            "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 0},
+                            "output_tokens_details": {"reasoning_tokens": 35}, "cost": .001}})
+        with self.gateway("fastest", finish=finish) as gate:
+            self.assertEqual(self.request(gate)[0], 200)
+            self.assertEqual(finish.call_args.args, (31, Decimal(".001")))
+            kwargs = finish.call_args.kwargs
+            self.assertEqual((kwargs["status"], kwargs["charge_source"]), ("completed", "openrouter"))
+            self.assertGreaterEqual(kwargs["ms"], 0)
+            self.assertEqual([kwargs["evidence"].get(k) for k in
+                             ("input_tokens","output_tokens","cache_reads","cache_writes","reasoning_tokens")],
+                             [1000, 51, 20, 0, 35])
+            self.stream = event("response.incomplete", response={"usage": {"output_tokens": 7}})
+            self.assertEqual(self.request(gate)[0], 200)
+            self.assertEqual(finish.call_args.args, (31, None))
+            self.assertEqual(finish.call_args.kwargs["status"], "incomplete")
+            self.assertIsNone(finish.call_args.kwargs["charge_source"])
+            self.observe.side_effect = RuntimeError("unavailable")
+            self.assertEqual(self.request(gate)[0], 503)
+            self.assertEqual(finish.call_args.args, (31, Decimal(0)))
+            self.assertEqual(finish.call_args.kwargs["charge_source"], "context_review_blocked")
+        self.assertEqual(finish.call_count, 3)
+        self.settle.assert_not_called()
 
     def test_routing_accounting_and_canonical_tools(self):
         for route, sort in (("cheapest", "price"), ("fastest", "throughput")):

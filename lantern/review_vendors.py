@@ -96,13 +96,19 @@ class ReviewerVendors:
         self.limit = limit
         self.path = state / "review-costs.sqlite"
         with closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute("""CREATE TABLE IF NOT EXISTS calls (
                 id TEXT PRIMARY KEY, at TEXT NOT NULL, day TEXT NOT NULL, vendor TEXT NOT NULL,
                 purpose TEXT NOT NULL, reserved INTEGER NOT NULL, cost INTEGER,
                 input_tokens INTEGER, output_tokens INTEGER, cache_reads INTEGER, cache_writes INTEGER,
-                ms INTEGER, status TEXT NOT NULL)""")
+                ms INTEGER, status TEXT NOT NULL, thread_id TEXT, batch_id INTEGER, tool TEXT)""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(calls)")}
+            for name, sql_type in (("thread_id", "TEXT"), ("batch_id", "INTEGER"), ("tool", "TEXT")):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE calls ADD COLUMN {name} {sql_type}")
 
-    def call(self, vendor, payload, *, purpose):
+    def call(self, vendor, payload, *, purpose, thread_id=None, batch_id=None, tool=None):
+        """Attribute each paid call to the host's active thread, batch and reviewed tool."""
         if vendor == "luna" and purpose in ("tool", "spot") and payload.get("model") == LUNA_MODEL:
             env, output_limit = "OPENAI_API_KEY", LUNA_OUTPUT
             output = payload.get("max_output_tokens")
@@ -134,8 +140,9 @@ class ReviewerVendors:
                                (day,)).fetchone()
             if used + held > units(self.limit):
                 raise ReviewBudgetUnavailable(day)
-            db.execute("INSERT INTO calls(id,at,day,vendor,purpose,reserved,status) VALUES(?,?,?,?,?,?,?)",
-                       (request_id, now.isoformat(), day, vendor, purpose, held, "pending"))
+            db.execute("""INSERT INTO calls(id,at,day,vendor,purpose,reserved,status,thread_id,batch_id,tool)
+                          VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                       (request_id, now.isoformat(), day, vendor, purpose, held, "pending", thread_id, batch_id, tool))
         started = time.monotonic()
         status, charge = "ambiguous", None
         tokens = (None, None, None, None)

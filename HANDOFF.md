@@ -18,6 +18,12 @@ The editable directory is `~lantern/.local/state/lantern/workspace/files/`. The 
 
 All 99 tests passed on Amazon Linux with native Codex and simulated model providers. An offline rehearsal on the actual 193-record room changed only its session metadata. The worker backed up the original rollout under `operator-backups/independent-work-v1/` before the live upgrade. Separate live checks returned three hits from each search index. A paid autonomous turn exercised the budget and schedule tools, a supervised file write and cadence adjustment. The first proposed write was denied, and Lantern revised the note. The scheduled-alarm and midnight rollover cases were exercised with a controlled clock.
 
+### Cost accounting
+
+Use `lantern usage --day YYYY-MM-DD` for a UTC-day comparison and `lantern usage --calls` for individual requests. A batch filter selects calls explicitly tagged with that worker batch. Supervisor calls carry purpose, timestamp, input/output/cache token counts, estimated cost, reservation, status and latency. After the accounting update, they also identify their thread, batch, and reviewed tool where applicable. New Qwen calls retain token counts and reported charges together with their thread, batch and trigger. The report marks missing historical fields. Private messages and tool arguments stay out of the cost ledgers.
+
+For the first heartbeat (batch 10, before batch tagging), worker journal receipts and the supervisor ledger showed three Qwen requests ($0.03767440), five Luna tool checks ($0.00156275) and two Opus escalation calls ($0.09537000). Opus reviewed the first proposed workspace note and the heartbeat cadence change. This comparison used the observed turn's time window. The full UTC-day ledger also includes deliberate calibration calls. Keep those distinct when estimating normal overhead.
+
 ### Lightsail pilot
 
 Use `readlink -f /opt/lantern/current` to identify the active release. The root-owned service `lantern-chat.service` runs as `lantern` and starts on boot. The operator can run `lantern` in that account. The installed Codex is 0.169.0 and the worker defaults to OpenRouter throughput routing. An interactive turn has ten minutes for generation, tools and review, and each Qwen request allows 8,192 output tokens. The shared UTC budgets are $10 for Qwen and $5 for Luna and Opus combined.

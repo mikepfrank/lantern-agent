@@ -38,13 +38,21 @@ class Budget:
             db.execute("""CREATE TABLE IF NOT EXISTS requests (
                 id TEXT PRIMARY KEY, day TEXT NOT NULL, reserved INTEGER NOT NULL,
                 actual INTEGER CHECK(actual >= 0))""")
+            # Older releases and existing databases use the four-column ledger.
+            # Keep their charges intact and leave unobserved historical detail unknown.
+            db.execute("""CREATE TABLE IF NOT EXISTS request_details (
+                id TEXT PRIMARY KEY REFERENCES requests(id), at TEXT NOT NULL, thread TEXT,
+                batch_id INTEGER, trigger TEXT, status TEXT NOT NULL, input_tokens INTEGER,
+                output_tokens INTEGER, cache_reads INTEGER, cache_writes INTEGER,
+                reasoning_tokens INTEGER, ms INTEGER, charge_source TEXT)""")
 
-    def reserve(self, payload: dict) -> str:
+    def reserve(self, payload: dict, *, thread=None, batch_id=None, trigger=None) -> str:
         # Independent of token estimates: reserve for the model's full context
         # at the per-token price ceilings applied by the gateway.
         with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("BEGIN IMMEDIATE")
-            day = datetime.now(timezone.utc).date().isoformat()
+            now = datetime.now(timezone.utc)
+            day = now.date().isoformat()
             used, = db.execute(
                 "SELECT COALESCE(SUM(COALESCE(actual, reserved)), 0) FROM requests WHERE day=?",
                 (day,),
@@ -53,17 +61,30 @@ class Budget:
                 raise BudgetUnavailable(day)
             request_id = uuid4().hex
             db.execute("INSERT INTO requests VALUES (?, ?, ?, NULL)", (request_id, day, self.reservation))
+            db.execute("""INSERT INTO request_details(id,at,thread,batch_id,trigger,status)
+                VALUES (?,?,?,?,?,'pending')""", (request_id, now.isoformat(), thread, batch_id, trigger))
         return request_id
 
     def settle(self, request_id: str, cost: Decimal) -> None:
-        actual = units(cost)
+        self.finish(request_id, cost, status="settled", evidence={}, ms=None, charge_source=None)
+
+    def finish(self, request_id: str, cost: Decimal | None, *, status: str, evidence: dict,
+               ms: int | None, charge_source: str | None) -> None:
+        """Record observed usage with a confirmed cost, or keep the reservation if unknown."""
+        actual = units(cost) if cost is not None else None
+        counters = [evidence.get(key) for key in
+                    ("input_tokens", "output_tokens", "cache_reads", "cache_writes", "reasoning_tokens")]
         with closing(sqlite3.connect(self.path)) as db, db:
-            row = db.execute("UPDATE requests SET actual=? WHERE id=? AND actual IS NULL",
-                             (actual, request_id))
-            if not row.rowcount:
-                previous = db.execute("SELECT actual FROM requests WHERE id=?", (request_id,)).fetchone()
-                if previous != (actual,):
+            if actual is not None:
+                row = db.execute("UPDATE requests SET actual=? WHERE id=? AND (actual IS NULL OR actual=?)",
+                                 (actual, request_id, actual))
+                if not row.rowcount:
                     raise ValueError("Unknown or conflicting OpenRouter settlement")
+            # Only the first terminal observation owns the token counts and timing.
+            # An explicit later settlement can independently resolve a retained hold.
+            db.execute("""UPDATE request_details SET status=?,input_tokens=?,output_tokens=?,cache_reads=?,
+                cache_writes=?,reasoning_tokens=?,ms=?,charge_source=? WHERE id=? AND status='pending'""",
+                       (status, *counters, ms, charge_source, request_id))
 
     def today(self, *, day: str | None = None) -> dict:
         day = day or datetime.now(timezone.utc).date().isoformat()
