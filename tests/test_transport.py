@@ -177,6 +177,63 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(client.result(), (200, self.stream))
             self.settle.assert_called_once_with(31, Decimal("0.000041"))
 
+    def test_acknowledged_steer_can_publish_before_original_headers_arrive(self):
+        waiting, release = Event(), Event()
+        self.reserve.side_effect = [31, 32]
+
+        @contextmanager
+        def upstream(body, headers):
+            if json.loads(body)["input"] == "original":
+                waiting.set()
+                if not release.wait(4):
+                    raise TimeoutError("Test did not release provider")
+            yield Stream(self.stream)
+
+        with patch("lantern.transport._open_upstream", upstream), ThreadPoolExecutor() as pool, \
+             self.gateway("cheapest") as gate:
+            self.assertIsNone(gate.capture_steer())
+            first = pool.submit(self.request, gate, input="original")
+            try:
+                self.assertTrue(waiting.wait(2))
+                marker = gate.capture_steer()
+                self.assertEqual(marker, 0)
+                self.assertEqual(self.request(gate, input="amended")[0], 200)
+                self.assertNotIn("client_disconnected", gate.evidence[0])
+                with self.assertRaises(RuntimeError):
+                    gate.assert_turn_complete()
+                gate.confirm_steer(marker)
+                gate.assert_turn_complete()
+                self.settle.assert_called_once_with(32, Decimal("0.000041"))
+                self.assertFalse(first.done())
+            finally:
+                release.set()
+            self.assertEqual(first.result()[0], 200)
+            gate.assert_turn_complete()
+            self.assertEqual(self.settle.call_count, 2)
+            self.settle.assert_called_with(31, Decimal("0.000041"))
+
+    def test_steer_never_exempts_final_other_requests_or_validation_failures(self):
+        gate = self.gateway("fastest")
+        complete = {"status": "completed"}
+        for records in (
+            [],
+            [{"status": "unconfirmed", "steer_acknowledged": True}],
+            [{"status": "completed", "client_disconnected": True}],
+            [{"status": "unconfirmed"}, {"status": "unconfirmed", "steer_acknowledged": True}, complete],
+            [{"status": "unconfirmed", "client_disconnected": True}, complete],
+            [{"status": "rejected", "steer_acknowledged": True}, complete],
+            [{"status": "invalid_upstream_response", "steer_acknowledged": True}, complete],
+            [{"status": "interrupted", "error": "provider returned an unregistered tool",
+              "steer_acknowledged": True}, complete],
+            [{"status": "interrupted", "error": "gateway or upstream failure", "steer_acknowledged": True}, complete],
+        ):
+            with self.subTest(records=records), self.assertRaises(RuntimeError):
+                gate.evidence = records
+                gate.assert_turn_complete()
+        gate.evidence = [{"status": "interrupted", "upstream_transport_interrupted": True,
+                          "steer_acknowledged": True}, complete]
+        gate.assert_turn_complete()
+
     def test_only_router_parameter_rejection_releases_hold(self):
         self.http_status = 404
         message = ("No endpoints found that can handle the requested parameters. "

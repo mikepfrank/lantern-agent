@@ -25,6 +25,8 @@ The installer obtains the three API keys in a login shell running as `lantern` a
 
 For an update, allow the current turn to finish before running the installer. It stops this worker, installs the release, switches the symlink and restarts the unit. A release rollback uses the same installer with the earlier reviewed revision and matching source. To refresh rotated keys, rerun the installer at an idle boundary.
 
+After steering a turn, its superseded provider request can continue reporting usage in the background even after the replacement reply is visible. Allow that settlement to finish before a planned restart. A forced stop retains any unresolved reservation against the admission day's budget.
+
 ## Chat
 
 From the laptop's normal terminal:

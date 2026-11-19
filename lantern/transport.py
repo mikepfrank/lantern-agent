@@ -29,6 +29,10 @@ class ProtocolError(ValueError):
     """Only fixed local messages may be exposed in diagnostics."""
 
 
+class UpstreamStreamEnded(ProtocolError):
+    """Provider transport ended before its terminal event could be validated."""
+
+
 class UnregisteredCall(ProtocolError):
     def __init__(self, item):
         super().__init__("provider returned an unregistered tool")
@@ -137,7 +141,10 @@ def _frames(upstream):
     lines = []
     size = 0
     while True:
-        line = upstream.readline(MAX_EVENT_BYTES - size + 1)
+        try:
+            line = upstream.readline(MAX_EVENT_BYTES - size + 1)
+        except (OSError, http.client.HTTPException) as exc:
+            raise UpstreamStreamEnded("upstream stream interrupted") from exc
         size += len(line)
         if size > MAX_EVENT_BYTES:
             raise ProtocolError("upstream event too large")
@@ -218,7 +225,6 @@ def _inspect(event, names, evidence):
             evidence["provider"] = endpoint.get("provider")
     if kind not in TERMINAL_EVENTS:
         return None
-    evidence["status"] = kind.partition(".")[2]
     incomplete = response.get("incomplete_details") or {}
     if isinstance(incomplete, dict) and incomplete.get("reason") == "max_output_tokens":
         evidence["output_limit_reached"] = True
@@ -251,6 +257,40 @@ class OpenRouterGateway:
         self._api_key = api_key
         self.token = secrets.token_urlsafe(32)
         self.evidence = []
+
+    def capture_steer(self):
+        """Capture the precise in-flight request before sending native turn/steer."""
+        index = len(self.evidence) - 1
+        if index >= 0:
+            entry = self.evidence[index]
+            if entry["status"] in {"rejected", "unconfirmed"} and "error" not in entry:
+                return index
+        return None
+
+    def confirm_steer(self, marker):
+        """Only a matching native ACK qualifies this request for supersession."""
+        if marker is not None:
+            self.evidence[marker]["steer_acknowledged"] = True
+
+    def assert_turn_complete(self):
+        """Validate a native turn's result before releasing it to the operator.
+
+        A later completed request can supersede an acknowledged steer target.
+        Its old provider request still drains normally under the original hold.
+        """
+        records = [entry.copy() for entry in self.evidence]
+        if not records or records[-1]["status"] != "completed" or records[-1].get("client_disconnected"):
+            raise RuntimeError("The gateway did not observe a completed final response")
+        for entry in records[:-1]:
+            status = entry["status"]
+            if status == "completed":
+                continue
+            if entry.get("steer_acknowledged") and (
+                (status in {"unconfirmed", "incomplete", "failed"} and "error" not in entry)
+                or (status == "interrupted" and entry.get("upstream_transport_interrupted"))
+            ):
+                continue
+            raise RuntimeError("The gateway observed an unsuccessful earlier request")
 
     def __enter__(self):
         gateway = self
@@ -335,6 +375,8 @@ class OpenRouterGateway:
                             return deliver(self.fail, upstream.status if 400 <= upstream.status < 600 else 502,
                                            "OpenRouter declined the request")
                         if upstream.getheader("Content-Type", "").split(";")[0].strip().lower() != "text/event-stream":
+                            evidence["status"] = "invalid_upstream_response"
+                            evidence["error"] = "expected OpenRouter event stream"
                             return deliver(self.fail, 502, "expected OpenRouter event stream")
                         self.send_response(200)
                         self.send_header("Content-Type", "text/event-stream")
@@ -346,13 +388,23 @@ class OpenRouterGateway:
                             if cost is not None and "cost_usd" not in evidence:
                                 gateway.settle(reservation, cost)
                                 evidence["cost_usd"] = str(cost)
+                            terminal = event.get("type") in TERMINAL_EVENTS
+                            if terminal:
+                                # Publish the audited status only after any
+                                # confirmed cost has been durably recorded.
+                                evidence["status"] = event["type"].partition(".")[2]
                             deliver(self.wfile.write, frame)
-                            if event.get("type") in TERMINAL_EVENTS:
+                            if terminal:
                                 break
                         else:
-                            raise ProtocolError("upstream stream ended before a terminal response")
+                            raise UpstreamStreamEnded("upstream stream ended before a terminal response")
                 except Exception as exc:
                     evidence["error"] = str(exc) if isinstance(exc, ProtocolError) else "gateway or upstream failure"
+                    if isinstance(exc, UpstreamStreamEnded) or (
+                        "http_status" not in evidence and isinstance(exc, (OSError, http.client.HTTPException))
+                    ):
+                        evidence["upstream_transport_interrupted"] = True
+                    evidence["status"] = "interrupted"
                     if isinstance(exc, UnregisteredCall):
                         try:
                             gateway.unregistered(exc.name, exc.arguments)
@@ -361,7 +413,6 @@ class OpenRouterGateway:
                     if not started:
                         deliver(self.fail, 502, "OpenRouter connection failed")
                     else:
-                        evidence["status"] = "interrupted"
                         self.close_connection = True
 
         # server_close() joins these handlers before callers inspect evidence.

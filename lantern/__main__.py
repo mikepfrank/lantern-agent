@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from contextlib import ExitStack
 from decimal import Decimal, InvalidOperation
 from functools import partial
 import hashlib
@@ -11,6 +12,7 @@ from pathlib import Path
 import secrets
 import shutil
 import sys
+from threading import Thread
 
 from .budget import Budget, MODEL_CONTEXT_TOKENS
 from .chess_tool import CHESS_TOOL, analyze_position
@@ -129,28 +131,40 @@ async def main(args):
         gateway = OpenRouterGateway(key, route=route, tools=tools, reserve=ledger.reserve,
                                     settle=ledger.settle, observe=supervisor.observe,
                                     unregistered=supervisor.unregistered, resuming=bool(thread))
+
+        def report_usage():
+            for entry in gateway.evidence:
+                print(json.dumps(entry), file=sys.stderr, flush=True)
+
         try:
-            with gateway:
+            with ExitStack() as resources:
+                resources.callback(report_usage)
+                resources.enter_context(gateway)
                 result = await run_turn(
                     codex_bin=args.codex, codex_home=codex_home, workspace=workspace, model=MODEL,
                     provider="lantern", base_url=gateway.base_url, persona=persona, prompt=prompt,
                     tools=tools, dispatch=lambda cid, name, args: supervisor.dispatch(cid, name, args, partial(execute, cid)),
                     thread_id=thread,
                     on_thread=record_thread, take_input=take_input, return_input=return_input,
+                    capture_steer=gateway.capture_steer, confirm_steer=gateway.confirm_steer,
                     env={"LANTERN_GATEWAY_TOKEN": gateway.token},
                     timeout=600 if args.command == "worker" else 180,
                 )
+                gateway.assert_turn_complete()
+                if args.command == "worker":
+                    # The superseded response can settle minutes after the
+                    # replacement. Keep its reservation while chat continues.
+                    settlement = resources.pop_all()
+                    try:
+                        Thread(target=settlement.close, name="lantern-settlement", daemon=False).start()
+                    except RuntimeError:
+                        settlement.close()
         except CodexError as exc:
             last = gateway.evidence[-1] if gateway.evidence else {}
             if last.get("status") == "incomplete" and (last.get("output_limit_reached")
                                                         or last.get("output_tokens") == MAX_OUTPUT_TOKENS):
                 raise CodexError(f"The provider reached the {MAX_OUTPUT_TOKENS:,}-token response limit.") from exc
             raise
-        finally:
-            for entry in gateway.evidence:
-                print(json.dumps(entry), file=sys.stderr, flush=True)
-        if not gateway.evidence or any(e.get("status") != "completed" for e in gateway.evidence):
-            raise RuntimeError("The gateway did not observe a completed response for every request")
         return result, positions
 
     if args.command == "worker":

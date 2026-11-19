@@ -1,19 +1,24 @@
 """Native Codex steering through the real loopback gateway and an offline provider."""
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, suppress
 from decimal import Decimal
+from io import StringIO
 import json
 import os
 from pathlib import Path
 import shutil
 from tempfile import TemporaryDirectory
 from threading import Event
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from lantern.codex_session import _Peer, run_turn, SteeringInput
-from lantern.transport import MODEL, OpenRouterGateway
+from lantern.__main__ import main
+from lantern.budget import Budget
+from lantern.chat_store import ChatStore
+from lantern.codex_session import _Peer
+from lantern.transport import OpenRouterGateway
 from test_codex_smoke import FixtureStream, reply
 
 
@@ -26,9 +31,11 @@ class NativeSteering(unittest.TestCase):
         followup = "Use the amended figure instead. Reference Orchard-843."
         first_inference = Event()
         acknowledged = Event()
-        claimed, rejected = [], []
+        release_old_response = Event()
+        settlement_finished = Event()
+        settlement_timed_out = Event()
         requests, sent, started, finished = [], [], [], []
-        reservations, settlements = [], {}
+        reports = []
         steer_ids = set()
         send, read = _Peer.send, _Peer.read
 
@@ -56,11 +63,13 @@ class NativeSteering(unittest.TestCase):
 
             def readline(self, *args):
                 # The HTTP response and first SSE frame have already reached
-                # Codex. Only release the rest once *native Codex* accepts input.
+                # Codex. The operator must see the amended answer even while
+                # this superseded provider request is still awaiting billing.
                 if self.tell() == self.end_of_first_frame:
                     first_inference.set()
-                    if not acknowledged.wait(10):
-                        raise TimeoutError("No turn/steer acknowledgement during first response")
+                    if not release_old_response.wait(15):
+                        settlement_timed_out.set()
+                        raise TimeoutError("The worker waited for obsolete provider billing before publishing")
                 return super().readline(*args)
 
         @contextmanager
@@ -75,50 +84,75 @@ class NativeSteering(unittest.TestCase):
             stream = reply(serial, item)
             yield SlowFirstResponse(stream.getvalue()) if serial == 1 else stream
 
-        def take_input():
-            if first_inference.is_set() and not claimed:
-                claimed.append(2)
-                return SteeringInput((2,), followup)
-            return None
+        class ObservedGateway(OpenRouterGateway):
+            def __exit__(self, *exc):
+                super().__exit__(*exc)
+                reports.extend(self.evidence)
+                settlement_finished.set()
 
-        def reserve(body):
-            key = len(reservations) + 1
-            reservations.append(key)
-            return key
+        def fake_review(vendor, key, body):
+            self.assertEqual(vendor, "luna")
+            report = json.dumps({"escalate": False, "evidence": "", "summary": "An operator updates a figure."})
+            return {"model": json.loads(body)["model"], "status": "completed",
+                    "usage": {"input_tokens": 50, "output_tokens": 20},
+                    "output": [{"type": "message", "role": "assistant", "status": "completed",
+                                "content": [{"type": "output_text", "text": report}]}]}
 
-        def settle(key, cost):
-            if key in settlements:
-                raise AssertionError("A provider request was charged twice")
-            settlements[key] = cost
+        async def exercise(state):
+            store = ChatStore(state)
+            usage = Budget(state / "usage.sqlite", Decimal("1"))
+            store.submit(prompt)
+            args = SimpleNamespace(command="worker", state=state, codex=binary, persona=None, route="fastest")
+            worker = asyncio.create_task(main(args))
+            try:
+                async with asyncio.timeout(12):
+                    while not first_inference.is_set():
+                        if worker.done():
+                            await worker
+                        await asyncio.sleep(.025)
+                    store.submit(followup)
+                    while not any(event.role in ("lantern", "system") for event in store.events()):
+                        if worker.done():
+                            await worker
+                        await asyncio.sleep(.025)
+                self.assertEqual([(event.role, event.text) for event in store.events()], [
+                    ("operator", prompt), ("operator", followup), ("lantern", "I used Orchard-843.")])
+                self.assertFalse(settlement_timed_out.is_set())
+                self.assertFalse(settlement_finished.is_set())
+                self.assertEqual(store.status()["queued"], 0)
+                self.assertIsNone(store.status()["active_batch"])
+                before = usage.today()
+                self.assertEqual((before["requests"], Decimal(before["spent_usd"])), (2, Decimal("0.00001")))
+                self.assertGreater(Decimal(before["reserved_usd"]), 0)
+            finally:
+                release_old_response.set()
+                worker.cancel()
+                with suppress(asyncio.CancelledError):
+                    await worker
+                if requests:
+                    self.assertTrue(await asyncio.to_thread(settlement_finished.wait, 10),
+                                    "The gateway failed to finish accounting")
+            after = usage.today()
+            self.assertEqual((after["requests"], Decimal(after["spent_usd"]), Decimal(after["reserved_usd"])),
+                             (2, Decimal("0.00002"), 0))
+            return store.status()["thread_id"]
 
         with TemporaryDirectory(prefix="lantern-native-steer-") as tmp:
-            home, workspace = Path(tmp) / "codex", Path(tmp) / "workspace"
-            home.mkdir()
-            workspace.mkdir()
-            with patch("lantern.transport._open_upstream", provider), \
+            with patch.dict(os.environ, OPENROUTER_API_KEY="offline", OPENAI_API_KEY="offline",
+                            ANTHROPIC_API_KEY="offline", LANTERN_REVIEW_DAILY_USD="5", LANTERN_SPOT_EVERY="12"), \
+                 patch("lantern.transport._open_upstream", provider), \
+                 patch("lantern.review_vendors.request_json", side_effect=fake_review), \
                  patch.object(_Peer, "send", record_send), patch.object(_Peer, "read", record_read), \
-                 OpenRouterGateway("offline", route="fastest", tools=[], reserve=reserve,
-                                   settle=settle, observe=lambda body: None,
-                                   unregistered=self.fail) as gateway:
-                result = asyncio.run(run_turn(
-                    codex_bin=binary, codex_home=home, workspace=workspace, model=MODEL, provider="lantern",
-                    persona="You are Lantern.", prompt=prompt, tools=[], dispatch=self.fail,
-                    env={"LANTERN_GATEWAY_TOKEN": gateway.token}, base_url=gateway.base_url,
-                    take_input=take_input, return_input=rejected.extend, timeout=30,
-                ))
+                 patch("lantern.__main__.OpenRouterGateway", ObservedGateway), redirect_stderr(StringIO()):
+                thread_id = asyncio.run(exercise(Path(tmp)))
 
         self.assertEqual([m["method"] for m in sent], ["turn/start", "turn/steer"])
-        self.assertEqual(started, [result.turn_id])
+        self.assertEqual(len(started), 1)
         self.assertEqual(finished, started)
-        self.assertEqual(sent[1]["params"]["expectedTurnId"], result.turn_id)
-        self.assertEqual(sent[1]["params"]["threadId"], result.thread_id)
+        self.assertEqual(sent[1]["params"]["expectedTurnId"], started[0])
+        self.assertEqual(sent[1]["params"]["threadId"], thread_id)
         self.assertTrue(acknowledged.is_set())
-        self.assertEqual(claimed, [2])
-        self.assertEqual(rejected, [])
-        self.assertEqual(len(requests), 2, gateway.evidence)
+        self.assertEqual(len(requests), 2, reports)
         self.assertEqual([sum(text.count(prompt) for text in users) for users in requests], [1, 1])
         self.assertEqual([sum(text.count(followup) for text in users) for users in requests], [0, 1])
-        self.assertEqual(result.text, "I used Orchard-843.")
-        self.assertEqual([entry["status"] for entry in gateway.evidence], ["completed", "completed"])
-        self.assertEqual(reservations, [1, 2])
-        self.assertEqual(settlements, {1: Decimal("0.00001"), 2: Decimal("0.00001")})
+        self.assertEqual([entry["status"] for entry in reports], ["completed", "completed"])

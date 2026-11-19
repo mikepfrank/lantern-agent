@@ -210,7 +210,7 @@ class _Peer:
         elif method == "model/rerouted" or (method == "error" and not p.get("willRetry", False)):
             raise CodexError("Codex reported a provider or turn error")
 
-    async def finish_turn(self, take_input, return_input):
+    async def finish_turn(self, take_input, return_input, capture_steer=None, confirm_steer=None):
         if take_input is None:
             while not self.finished:
                 await self.handle(await self.read())
@@ -219,6 +219,7 @@ class _Peer:
         # partial JSON frame or lose the acknowledgement for an in-flight steer.
         reader = asyncio.create_task(self.read())
         steer = None
+        displaced_request = None
         next_check = 0.0
         try:
             while not self.finished or steer is not None:
@@ -236,6 +237,8 @@ class _Peer:
                             take_input = None
                         elif (msg.get("result") or {}).get("turnId") != self.turn_id:
                             raise CodexError("Codex did not confirm delivery to this turn")
+                        elif confirm_steer is not None:
+                            confirm_steer(displaced_request)
                         steer = None
                     else:
                         raise CodexError("Unexpected Codex response during an active turn")
@@ -244,6 +247,11 @@ class _Peer:
                     reader = asyncio.create_task(self.read())
                 if not self.finished and steer is None and time.monotonic() >= next_check:
                     next_check = time.monotonic() + .25
+                    displaced_request = capture_steer() if capture_steer is not None else None
+                    if capture_steer is not None and displaced_request is None:
+                        # The preceding turn may already be closing. Leave the
+                        # input queued until there is a specific request to steer.
+                        continue
                     steer = take_input() if take_input else None
                     if steer is not None:
                         self.seq += 1
@@ -262,6 +270,8 @@ async def run_turn(*, codex_bin: str, codex_home: Path, workspace: Path, model: 
                    on_thread: Callable[[str], None] | None = None,
                    take_input: Callable[[], SteeringInput | None] | None = None,
                    return_input: Callable[[tuple[int, ...]], None] | None = None,
+                   capture_steer: Callable[[], int | None] | None = None,
+                   confirm_steer: Callable[[int | None], None] | None = None,
                    env: dict[str, str] | None = None, base_url: str | None = None,
                    timeout: float = 180.0) -> TurnResult:
     """Start or resume with a local gateway URL or the caller's isolated config.toml.
@@ -319,7 +329,7 @@ async def run_turn(*, codex_bin: str, codex_home: Path, workspace: Path, model: 
                 "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
                 "input": [{"type": "text", "text": prompt}]})
             peer.set_turn(resp["turn"]["id"])
-            await peer.finish_turn(take_input, return_input)
+            await peer.finish_turn(take_input, return_input, capture_steer, confirm_steer)
             return TurnResult(tid, peer.turn_id, "\n\n".join(peer.messages), tuple(peer.tool_calls))
     except TimeoutError as exc:
         raise CodexError("Codex timed out; do not replay a turn automatically") from exc
