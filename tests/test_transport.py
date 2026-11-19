@@ -61,10 +61,35 @@ class TransportTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def gateway(self, route, **kwargs):
-        return OpenRouterGateway("upstream-test-key", route=route, tools=[CHESS],
+    def gateway(self, route, *, tools=None, **kwargs):
+        return OpenRouterGateway("upstream-test-key", route=route, tools=[CHESS] if tools is None else tools,
                                  reserve=self.reserve, settle=self.settle, observe=self.observe,
                                  unregistered=self.unregistered, **kwargs)
+
+    def test_handoff_reminder_is_a_reviewed_instruction_on_write_capable_requests(self):
+        write_tool = {**CHESS, "name": "workspace_write"}
+        declared = [{"type": "function", "name": tool["name"]} for tool in [CHESS, write_tool]]
+        due = Mock(return_value=True)
+        with self.gateway("fastest", tools=[CHESS, write_tool], handoff_due=due, finish=Mock(),
+                          operator_context="Authenticated private operator.") as gate:
+            def send(tools, choice="auto"):
+                self.assertEqual(self.request(gate, tools=tools, tool_choice=choice,
+                                              instructions="Pinned base instructions.")[0], 200)
+                sent, _ = self.wire[-1]
+                self.assertEqual(self.observe.call_args.args[0], sent)
+                self.assertIn("Authenticated private operator.", sent["instructions"])
+                self.assertIn("Pinned base instructions.", sent["instructions"])
+                self.assertEqual(sent["input"], "A move?")
+                return sent["instructions"]
+
+            self.assertIn("notes/handoff.md", send(declared))
+            self.assertEqual(gate.evidence[-1]["handoff_event"], "reminded")
+            self.assertNotIn("notes/handoff.md", send([], "none"))
+            self.assertEqual(gate.evidence[-1]["handoff_event"], "tool_free")
+            self.assertNotIn("notes/handoff.md", send(declared, "none"))
+            self.assertNotIn("notes/handoff.md", send(declared, {"type": "function", "name": "chess"}))
+            due.return_value = False
+            self.assertNotIn("notes/handoff.md", send(declared))
 
     def test_single_durable_observation_per_dispatch(self):
         finish = Mock()

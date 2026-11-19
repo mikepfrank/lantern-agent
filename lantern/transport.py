@@ -32,6 +32,12 @@ MAX_EVENT_BYTES = 2 * 1024 * 1024
 UPSTREAM_IDLE_SECONDS = 120
 UPSTREAM_DEADLINE_SECONDS = 300
 TERMINAL_EVENTS = {"response.completed", "response.failed", "response.incomplete"}
+HANDOFF_REMINDER = (
+    "This conversation is approaching automatic compaction. Before finishing this turn, use your workspace "
+    "tools to refresh your existing private handoff note (or create notes/handoff.md) if needed. Record "
+    "decisions, open work, promises to Mike and relevant file paths. If your note is already current, "
+    "continue with the task."
+)
 
 
 class ProtocolError(ValueError):
@@ -110,6 +116,22 @@ def _prepare(payload, route, tools, *, resuming=False):
         tool_choice=choice, parallel_tool_calls=False,
     )
     return forwarded
+
+
+def _handoff_event(prepared, handoff_due):
+    if not prepared["tools"]:
+        # Native compaction sends a tool-free request containing the OLD context.
+        return "tool_free"
+    if not any(tool["name"] == "workspace_write" for tool in prepared["tools"]):
+        return None
+    choice = prepared["tool_choice"]
+    if choice == "none" or (isinstance(choice, dict) and choice["name"] != "workspace_write"):
+        return None
+    if handoff_due():
+        instructions = prepared.get("instructions") or ""
+        prepared["instructions"] = instructions + "\n\n" + HANDOFF_REMINDER if instructions else HANDOFF_REMINDER
+        return "reminded"
+    return None
 
 
 @contextmanager
@@ -264,7 +286,7 @@ class OpenRouterGateway:
     """
 
     def __init__(self, api_key, *, route, tools, reserve, settle, observe, unregistered, resuming=False,
-                 operator_context="", finish=None):
+                 operator_context="", finish=None, handoff_due=None):
         if route not in ROUTES or not api_key:
             raise ValueError("a valid route and OpenRouter key are required")
         self.route = route
@@ -274,6 +296,7 @@ class OpenRouterGateway:
         self.observe, self.resuming = observe, resuming
         self.unregistered = unregistered
         self.operator_context = operator_context
+        self.handoff_due = handoff_due
         self._api_key = api_key
         self.token = secrets.token_urlsafe(32)
         self.evidence = []
@@ -348,6 +371,10 @@ class OpenRouterGateway:
                         # Apply current channel facts even when Codex resumes an older thread.
                         instructions = prepared.get("instructions") or ""
                         prepared["instructions"] = (gateway.operator_context + "\n\n" + instructions).rstrip()
+                    if gateway.handoff_due is not None:
+                        event = _handoff_event(prepared, gateway.handoff_due)
+                        if event:
+                            evidence["handoff_event"] = event
                     body = json.dumps(prepared, allow_nan=False, separators=(",", ":")).encode()
                 except (KeyError, ValueError, TypeError, RecursionError, OSError) as exc:
                     evidence["error"] = str(exc) if isinstance(exc, ProtocolError) else "malformed request"

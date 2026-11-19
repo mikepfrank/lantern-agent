@@ -22,6 +22,8 @@ The Lightsail worker accepts timed wakeups in the same private room. Run `lanter
 
 Lantern can list, read and write UTF-8 notes and source files relative to `~/.local/state/lantern/workspace/files/`. Updating an existing file requires the digest returned by the read tool. Its editable files persist across restarts. Shell execution and the editable Git clone inside a container are later steps. The worker separately provides read-only access to the private heritage archive.
 
+When a single Qwen request in the current thread reports at least 180,000 input and output tokens combined, the worker reminds Lantern to update its handoff on the next request where it can write files. Lantern can use its existing handoff or `notes/handoff.md` and skip the write if the notes are current. Codex still controls when compaction runs.
+
 The supervised `web_search` tool returns links and short excerpts from Mwmbl, Wikipedia or Crossref. `budget_status` reports both ledgers, outstanding reservations and time to midnight UTC. If a daily cap blocks a turn, the worker durably defers pending work. If a request already ran, a continuation asks Lantern to inspect earlier effects before resuming.
 
 ## Run locally

@@ -260,7 +260,9 @@ async def main(args):
                                     settle=ledger.settle, finish=ledger.finish, observe=supervisor.observe,
                                     unregistered=partial(for_tool, "unregistered", supervisor.unregistered),
                                     resuming=bool(thread),
-                                    operator_context=context)
+                                    operator_context=context,
+                                    handoff_due=(lambda: ledger.handoff_reminder_due(supervisor.thread))
+                                    if independent else None)
 
         def report_usage():
             for entry in gateway.evidence:

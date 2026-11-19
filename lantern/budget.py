@@ -10,6 +10,7 @@ from uuid import uuid4
 
 UNITS_PER_DOLLAR = 1_000_000_000
 MODEL_CONTEXT_TOKENS = 1_024_000
+HANDOFF_REMINDER_TOKENS = 180_000
 DAILY_USD = Decimal("10")
 
 
@@ -45,6 +46,30 @@ class Budget:
                 batch_id INTEGER, trigger TEXT, status TEXT NOT NULL, input_tokens INTEGER,
                 output_tokens INTEGER, cache_reads INTEGER, cache_writes INTEGER,
                 reasoning_tokens INTEGER, ms INTEGER, charge_source TEXT)""")
+            db.execute("CREATE INDEX IF NOT EXISTS details_by_thread ON request_details(thread)")
+            db.execute("""CREATE TABLE IF NOT EXISTS handoff_events (
+                request_id TEXT PRIMARY KEY REFERENCES request_details(id), event TEXT NOT NULL)""")
+
+    def handoff_reminder_due(self, thread: str | None) -> bool:
+        """Use this thread's reported context sizes, even across UTC days and worker restarts."""
+        if not thread:
+            return False
+        with closing(sqlite3.connect(self.path)) as db:
+            # Admission order is stable even when a superseded stream settles late.
+            rows = db.execute("""SELECT d.input_tokens + COALESCE(d.output_tokens, 0), h.event
+                                 FROM request_details AS d
+                                 LEFT JOIN handoff_events AS h ON h.request_id=d.id
+                                 WHERE d.thread=? AND d.status IN ('completed','incomplete')
+                                 ORDER BY d.rowid DESC""", (thread,))
+            reached_threshold = False
+            for tokens, event in rows:
+                if event == "tool_free" or (tokens is not None and tokens < HANDOFF_REMINDER_TOKENS):
+                    break
+                if event == "reminded":
+                    return False
+                if tokens is not None:
+                    reached_threshold = True
+            return reached_threshold
 
     def reserve(self, payload: dict, *, thread=None, batch_id=None, trigger=None) -> str:
         # Independent of token estimates: reserve for the model's full context
@@ -82,9 +107,13 @@ class Budget:
                     raise ValueError("Unknown or conflicting OpenRouter settlement")
             # Only the first terminal observation owns the token counts and timing.
             # An explicit later settlement can independently resolve a retained hold.
-            db.execute("""UPDATE request_details SET status=?,input_tokens=?,output_tokens=?,cache_reads=?,
+            updated = db.execute("""UPDATE request_details SET status=?,input_tokens=?,output_tokens=?,cache_reads=?,
                 cache_writes=?,reasoning_tokens=?,ms=?,charge_source=? WHERE id=? AND status='pending'""",
                        (status, *counters, ms, charge_source, request_id))
+            event = evidence.get("handoff_event")
+            superseded = evidence.get("steer_acknowledged") or evidence.get("client_disconnected")
+            if updated.rowcount and status == "completed" and not superseded and event in ("reminded", "tool_free"):
+                db.execute("INSERT INTO handoff_events(request_id,event) VALUES (?,?)", (request_id, event))
 
     def today(self, *, day: str | None = None) -> dict:
         day = day or datetime.now(timezone.utc).date().isoformat()

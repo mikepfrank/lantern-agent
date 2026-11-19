@@ -16,6 +16,8 @@ The private worker resumes the same native Codex room for human messages, heartb
 
 The editable directory is `~lantern/.local/state/lantern/workspace/files/`. The host mediates list, read and write operations, including creating subdirectories and updating an existing file by its digest. Codex's native sandbox remains read-only. The release, heritage, ledgers and review policy are outside the model's writable directory. Public search uses Mwmbl for general results, Wikipedia for background and Crossref for papers.
 
+The handoff reminder uses the input and output token counts from a single request in the thread. At 180,000 tokens combined, it prompts Lantern on the next request that permits `workspace_write`. Lantern can refresh its existing handoff, use `notes/handoff.md`, or skip a write if its notes are current. Reminder state survives restarts. After successful delivery, another reminder requires a fresh crossing of the threshold following a smaller measured context or successful tool-free compaction. Codex retains its usual compaction schedule.
+
 All 99 tests passed on Amazon Linux with native Codex and simulated model providers. An offline rehearsal on the actual 193-record room changed only its session metadata. The worker backed up the original rollout under `operator-backups/independent-work-v1/` before the live upgrade. Separate live checks returned three hits from each search index. A paid autonomous turn exercised the budget and schedule tools, a supervised file write and cadence adjustment. The first proposed write was denied, and Lantern revised the note. The scheduled-alarm and midnight rollover cases were exercised with a controlled clock.
 
 ### Cost accounting
@@ -68,6 +70,7 @@ After restarting the final release, the private room retained its thread ID. A l
 - Polish the SSH terminal as a fallback for times when the web UI is unavailable. Revisit the interaction in a real tmux session when working on the web interface.
 - Once the web interface is available, let Mike attach images and let Lantern inspect them natively. Verify that the selected Qwen endpoint receives the image alongside Mike's accompanying text.
 - Give Lantern a supervised PDF workflow in the live agent, including on-demand text extraction and rendering a selected page for visual inspection of diagrams and illustrations through the same image-input path.
+- As a lower-priority experiment, trial a rolling context window with supervised lookup of older turns. Keep the persona, handoff and recent complete exchanges in view, including matched tool calls and results. The private `chat.sqlite` event log preserves operator messages, visible replies and status events independently of compaction. Codex also saves a native thread rollout under `codex/sessions/`. Before switching methods, verify which historical items can be recovered verbatim after compaction and restart. Test retrieval by turn or search phrase, preserve authorship and source labels, and keep both history stores intact when changing the active window.
 
 ## Milestone 2
 

@@ -127,7 +127,10 @@ class NativeIndependentWorker(unittest.TestCase):
 
                 earlier = datetime.now(timezone.utc) - timedelta(hours=2)
                 ChatStore(state, clock=lambda: earlier).initialize_heartbeat(60)
-                boot(state, "--heartbeat-minutes", "60")
+                # The fake provider reports 140 tokens per request. Cross that
+                # boundary as the existing room resumes with workspace tools.
+                with patch("lantern.budget.HANDOFF_REMINDER_TOKENS", 140):
+                    boot(state, "--heartbeat-minutes", "60")
                 self.assertEqual(store.status()["thread_id"], tid)
                 self.assertEqual([e.role for e in store.events()], ["operator", "lantern", "system", "lantern"])
                 self.assertEqual(store.recent(1)[0].text, new_answer)
@@ -145,6 +148,8 @@ class NativeIndependentWorker(unittest.TestCase):
                                  + [(tid, 2, "luna", "tool", name) for name, _ in actions])
 
         self.assertEqual(len(requests), 5)
+        self.assertEqual(["notes/handoff.md" in request["instructions"] for request in requests],
+                         [False, True, False, False, False])
         previous = {tool["name"] for tool in requests[0]["tools"]}
         self.assertEqual(previous, {"read_heritage", "consult_opus", "chess_analyze", "message_operator"})
         def instructions(request):
