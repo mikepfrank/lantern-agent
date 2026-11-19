@@ -61,7 +61,8 @@ src = Path(sys.argv[1])
 with ZipFile(sys.argv[2], "x", ZIP_DEFLATED) as app:
     app.writestr("__main__.py", "import runpy\nrunpy.run_module('lantern', run_name='__main__')\n")
     for path in sorted((src / "lantern").rglob("*")):
-        if path.suffix in {".py", ".md"} and path.is_file():
+        asset = path.parent == src / "lantern/web_assets" and path.suffix in {".css", ".html", ".js"}
+        if (path.suffix in {".py", ".md"} or asset) and path.is_file():
             app.write(path, path.relative_to(src).as_posix())
 PY
     chmod 0644 "$stage/release/lantern.pyz"
@@ -69,6 +70,11 @@ PY
 fi
 test -r "$release/lantern.pyz"
 sudo -n -u lantern /usr/bin/python3.12 -I "$release/lantern.pyz" worker --help >/dev/null
+# The code broker has its own installer and stays outside the worker's privileges.
+systemctl is-active --quiet lantern-code.socket || {
+    echo "Install the coding broker with deploy/install-coding.sh before activating this release." >&2
+    exit 1
+}
 
 # Run the login shell as lantern. Only these three values enter the service
 # environment; machine-readable secret values never go into arguments or logs.
@@ -115,8 +121,12 @@ fi
 install -o root -g root -m 0600 "$stage/worker.env" /etc/lantern/worker.env
 install -o root -g root -m 0755 "$src/deploy/lantern" /usr/local/bin/lantern
 install -o root -g root -m 0644 "$src/deploy/$unit" "/etc/systemd/system/$unit"
+install -o root -g root -m 0644 "$src/deploy/lantern-web.service" /etc/systemd/system/
 mv -Tf -- "$stage/current" "$base/current"
 systemctl daemon-reload
 systemctl enable --now "$unit"
 systemctl is-active --quiet "$unit"
+systemctl enable lantern-web.service
+systemctl restart lantern-web.service
+systemctl is-active --quiet lantern-web.service
 printf 'Lantern release %s active; run lantern in the lantern account.\n' "$revision"

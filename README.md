@@ -1,10 +1,18 @@
 # Lantern
 
-Lantern is a private terminal chat with Qwen3.8 27B. Each turn runs the Codex CLI app-server with a persistent thread store. A loopback gateway forwards text requests to OpenRouter. Lantern can use the Astra chess engine through `chess_analyze` and ask Claude 3 Opus for ethical guidance through `consult_opus`.
+Lantern is a private browser and terminal chat with Qwen3.8 27B. Each turn runs the Codex CLI app-server with a persistent thread store. A loopback gateway forwards text requests to OpenRouter. Lantern can use the Astra chess engine through `chess_analyze` and ask Claude 3 Opus for ethical guidance through `consult_opus`.
 
 ## Talk to Lantern on Lightsail
 
-From the laptop, run:
+To use the browser, run this in a terminal on the laptop. Open the private link printed there and leave the terminal open while chatting.
+
+```sh
+ssh -t -o ExitOnForwardFailure=yes -L 127.0.0.1:8765:127.0.0.1:8765 lightsail "sudo -u lantern -H /usr/local/bin/lantern web-link --wait"
+```
+
+The browser and terminal show the same conversation. Either interface can send a follow-up while Lantern is working. After a browser service restart, obtain a fresh link using the command above. Treat the link as a credential.
+
+To use terminal chat directly, run:
 
 ```sh
 ssh -t lightsail "sudo -iu lantern lantern"
@@ -20,11 +28,15 @@ The [pilot deployment guide](deploy/README.md) covers the private systemd servic
 
 The Lightsail worker accepts timed wakeups in the same private room. Run `lantern schedule` to see the heartbeat interval, next wake, pending reminders and any budget pause (all times UTC). From a `lantern` login shell, `lantern heartbeat 0` pauses periodic wakes and `lantern heartbeat 60` schedules them hourly. One-time alarms have their own schedule. Lantern can adjust either through supervised tools. The initial hourly setting is applied once, and the first heartbeat is due when the worker becomes idle. Human messages take priority. Missed heartbeats coalesce into one wake after downtime.
 
-Lantern can list, read and write UTF-8 notes and source files relative to `~/.local/state/lantern/workspace/files/`. Updating an existing file requires the digest returned by the read tool. Its editable files persist across restarts. Shell execution and the editable Git clone inside a container are later steps. The worker separately provides read-only access to the private heritage archive.
+Lantern can list, read and write UTF-8 notes and source files relative to `~/.local/state/lantern/workspace/files/`. Updating an existing file requires the digest returned by the read tool. The worker separately provides read-only access to the private heritage archive.
+
+On Lightsail, `coding_run` starts a fresh offline container for each reviewed shell command. Python, Git, and Lantern's full editable project checkout are available in `/work/lantern`. Files and local commits under `/work` persist. The running release, credentials, chat history and private note store live outside that volume. Only the operator deploys releases. GitHub proposal submission is a separate planned capability.
 
 When a single Qwen request in the current thread reports at least 180,000 input and output tokens combined, the worker reminds Lantern to update its handoff on the next request where it can write files. Lantern can use its existing handoff or `notes/handoff.md` and skip the write if the notes are current. Codex still controls when compaction runs.
 
 The supervised `web_search` tool returns links and short excerpts from Mwmbl, Wikipedia or Crossref. `budget_status` reports both ledgers, outstanding reservations and time to midnight UTC. If a daily cap blocks a turn, the worker durably defers pending work. If a request already ran, a continuation asks Lantern to inspect earlier effects before resuming.
+
+When something fails, Lantern can call `harness_logs` for recent operational records, optionally filtered by batch ID. Mike can inspect the same view with `lantern logs --limit 20` or `lantern logs --batch N`. The view reads existing ledgers and reports provider and review outcomes using a fixed set of fields. Raw Opus replies are available separately to the operator.
 
 ## Run locally
 

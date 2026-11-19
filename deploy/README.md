@@ -1,4 +1,4 @@
-# Lightsail terminal pilot
+# Lightsail private chat and coding pilot
 
 The systemd worker serves the private `lantern` account over its local SQLite chat queue. The operator can leave the SSH session and return later. There is no public listener, DNS record, or reverse proxy for this pilot.
 
@@ -16,6 +16,7 @@ git archive --format=tar.gz -o lantern-src.tar.gz HEAD
 After verifying the transferred digest and extracting the archive as the administrator, invoke the installer in that staging tree.
 
 ```sh
+sudo bash deploy/install-coding.sh /absolute/path/lantern.bundle FULL_GIT_REVISION
 sudo bash deploy/install.sh FULL_GIT_REVISION
 sudo systemctl status --no-pager lantern-chat.service
 sudo -iu lantern lantern status
@@ -41,6 +42,14 @@ Within an existing `lantern` shell, run `lantern`. Use `lantern status`, `lanter
 
 The unit passes `--heartbeat-minutes 60`. Its first independent start adds the new tool definitions to the current private Codex room under the exclusive worker lock. It preserves the pinned persona, messages and thread ID. It saves the original native history in `operator-backups/independent-work-v1/` in the private state directory before updating the registry and offsets. A later restart uses the saved cadence. Inspect it with `lantern schedule`. The worker reads and writes project files under `workspace/files/` through supervised tools.
 
-## Editable source
+## Browser
 
-The operator can provision a full writable Git clone in `~lantern/src/lantern` from a full bundle. Check whether a clone is already present before creating it. On later releases, preserve its commits and working tree. The installed application runs from the separate, operator-owned release. The systemd worker's filesystem view does not include this checkout. The production agent container, in-container checkout, and GitHub PR submission remain later deployment work.
+Use the [SSH command in the project README](../README.md#talk-to-lantern-on-lightsail) on the laptop. The local and remote ports must both be 8765. Only the private SSH tunnel carries browser traffic. The web service listens on host loopback, issues a fresh key at startup, and saves it in the owner-only `web-key` file in Lantern's private state. The operator link passes the key in the URL fragment. The browser clears it from the address bar and authenticates API requests from the tab. To rotate access, restart `lantern-web.service` and get a fresh link. Starting or stopping the web service does not interrupt the model worker.
+
+## Coding environment
+
+For a new installation, make the seed with `git bundle create lantern.bundle --branches --tags` from the reviewed repository. The coding installer builds a dedicated Python and Git image. Only the broker can reach Docker. The worker sends approved commands over `/run/lantern-code.sock`. Docker uses a pinned local image ID and starts a fresh unprivileged container with its own process namespace, offline networking, a read-only root and a writable coding volume. Each command gets 30 seconds, half a CPU, 256 MiB of RAM, 64 processes and 16 KiB of output. The 256 MiB ext4 volume is backed by `/var/lib/lanterncode/work.ext4` and mounts across boots.
+
+The full editable clone is `/work/lantern`, also available as `~/src/lantern` inside the container. This differs from the operator checkout in the host's `~lantern/src/lantern`. The installer seeds the coding clone once. Subsequent service updates preserve branches and uncommitted work. GitHub publication needs a separate host-side proposal tool. The running service loads the root-owned release under `/opt/lantern/current`.
+
+The first worker start with coding enabled backs up the existing native room in `operator-backups/coding-workspace-v1/` before adding the tool. The worker, browser and broker can be inspected separately with `systemctl status lantern-chat lantern-web lantern-code.socket lantern-code.service`. For a coding-only outage, recover the mount and broker before retrying. Check for completed edits if a command lost its response.

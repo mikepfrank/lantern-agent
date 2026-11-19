@@ -1,0 +1,143 @@
+:root {
+  color-scheme: dark;
+  --ink: #f1ede4;
+  --muted: #afa9a0;
+  --edge: #3b3a37;
+  --amber: #edc080;
+  --teal: #a6d3bd;
+  font-family: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  font-size: 16px;
+  background: #171919;
+  color: var(--ink);
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  margin: 0;
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+button, textarea { font: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; }
+button:disabled, textarea:disabled { cursor: default; }
+.masthead {
+  border-bottom: 1px solid var(--edge);
+  background: #1c1e1e;
+}
+.masthead-inner, main {
+  width: min(100% - 3rem, 54rem);
+  margin-inline: auto;
+}
+.masthead-inner {
+  min-height: 4.3rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .75rem;
+  font: 1.95rem/1 "Hedvig Letters Serif", Georgia, serif;
+  letter-spacing: -.05em;
+}
+.lamp {
+  position: relative;
+  display: inline-block;
+  width: .96rem;
+  height: 1.12rem;
+  border: 1.5px solid var(--amber);
+  border-radius: 3px 3px 5px 5px;
+  background: radial-gradient(ellipse at 50% 75%, #f5ce88 9%, #b77839 19%, #674932 40%, transparent 66%);
+  box-shadow: 0 0 11px #eab16423;
+}
+.lamp::before {
+  content: "";
+  position: absolute;
+  width: .37rem;
+  height: .32rem;
+  left: calc(50% - .25rem);
+  top: -.48rem;
+  border: 1.3px solid var(--amber);
+  border-bottom: none;
+  border-radius: .3rem .3rem 0 0;
+}
+.lamp::after {
+  content: "";
+  position: absolute;
+  inset: auto -.16rem -.16rem;
+  height: 2px;
+  background: var(--amber);
+}
+.connection, .worker, time, .older, #jump, .send-row { font-size: .82rem; }
+.connection {
+  display: inline-flex;
+  align-items: center;
+  gap: .5rem;
+  color: var(--muted);
+}
+.connection i { width: .48rem; height: .48rem; border-radius: 50%; background: currentColor; }
+.connection[data-state="live"] i { background: var(--teal); }
+.connection[data-state="offline"], .connection[data-state="locked"] { color: #edbb99; }
+main { display: flex; flex: 1; min-height: 0; flex-direction: column; padding-bottom: max(1.15rem, env(safe-area-inset-bottom)); }
+.room-heading { display: flex; align-items: baseline; gap: .8rem; justify-content: space-between; padding: 1.45rem 0 1rem; border-bottom: 1px solid var(--edge); }
+h1 { margin: 0; font: normal clamp(1.6rem, 4vw, 2rem)/1.2 "Hedvig Letters Serif", Georgia, serif; letter-spacing: -.035em; }
+.worker { text-align: right; color: var(--muted); }
+.worker[data-state="working"] { color: var(--amber); }
+.history { flex: 1; min-height: 0; overflow: auto; scrollbar-color: #595b57 transparent; scrollbar-width: thin; padding: 1.2rem .7rem 1rem .15rem; overflow-anchor: none; }
+.empty { margin: 3rem auto; text-align: center; color: var(--muted); }
+.older, #jump {
+  display: block;
+  color: var(--amber);
+  background: #242624;
+  border: 1px solid #51483b;
+  border-radius: 2rem;
+  padding: .42rem .9rem;
+}
+.older { margin: 0 auto 1.5rem; }
+.jump-wrap { position: relative; height: 0; }
+#jump { position: absolute; bottom: .65rem; left: 50%; transform: translateX(-50%); white-space: nowrap; box-shadow: 0 3px 14px #141414; }
+.older:hover, #jump:hover { background: #37342e; }
+.message { max-width: min(94%, 44rem); margin: .3rem 0 1.45rem; }
+.message header { display: flex; align-items: baseline; gap: .65rem; padding-bottom: .45rem; }
+.speaker { font-size: .84rem; font-weight: 650; color: var(--amber); }
+time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: .74rem; }
+.message .body { overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.55; }
+.message.operator { margin-left: auto; width: fit-content; max-width: 88%; padding: .75rem 1rem .85rem; border: 1px solid #35433e; border-radius: .8rem .2rem .8rem .8rem; background: #202b27; }
+.operator .speaker { color: var(--teal); }
+.message.system { border-left: 2px solid #696356; padding-left: .9rem; color: var(--muted); font-size: .87rem; }
+.system .speaker { color: var(--muted); }
+.body pre { tab-size: 4; overflow: auto; padding: .8rem; margin: .5rem 0; background: #111414; border: 1px solid var(--edge); white-space: pre; border-radius: .4rem; }
+.body code { font: .88em/1.5 "IBM Plex Mono", Consolas, monospace; }
+#composer { flex: none; margin-top: .35rem; padding: .8rem .95rem .65rem; background: #252726; border: 1px solid #514c43; border-radius: .8rem; }
+#composer:focus-within { border-color: #a88653; }
+#composer label { font-size: .83rem; font-weight: 600; }
+textarea { width: 100%; border: none; outline: none; background: transparent; color: var(--ink); resize: vertical; min-height: 2.8rem; max-height: 18vh; padding: .45rem 0; }
+textarea::placeholder { color: #a09e96; }
+.send-row { display: flex; justify-content: space-between; align-items: center; gap: .6rem; color: var(--muted); min-height: 2.12rem; }
+#send-state[data-error="true"] { color: #fac3a3; }
+#send { flex: none; color: #282018; border: 1px solid transparent; background: var(--amber); border-radius: .43rem; padding: .38rem .85rem; font-weight: 650; }
+#send span { margin-left: .3rem; }
+#send:hover:enabled { background: #fbd293; }
+#send:disabled { background: #514b40; color: #b8b0a3; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+@media (max-width: 600px) {
+  .masthead-inner, main { width: calc(100% - 1.7rem); }
+  .masthead-inner { min-height: 3.4rem; }
+  .brand { font-size: 1.66rem; }
+  .room-heading { padding: .95rem 0 .65rem; }
+  .history { padding-top: .9rem; padding-right: .2rem; }
+  .message { max-width: 97%; }
+  main { padding-bottom: max(.65rem, env(safe-area-inset-bottom)); }
+  #composer { padding: .6rem .75rem; }
+}
+@media (max-height: 520px) {
+  .masthead-inner { min-height: 2.5rem; }
+  .room-heading { padding-block: .4rem; }
+  h1 { font-size: 1.3rem; }
+  textarea { height: 2.3rem; min-height: 2.3rem; }
+}

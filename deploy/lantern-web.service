@@ -1,0 +1,39 @@
+[Unit]
+Description=Lantern private browser chat
+After=local-fs.target
+
+[Service]
+Type=exec
+User=lantern
+WorkingDirectory=/opt/lantern/current
+ExecStart=/usr/local/bin/lantern web --port 8765
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindPaths=/home/lantern/.local/state/lantern
+InaccessiblePaths=-/run/lantern-code.sock -/run/docker.sock -/etc/lantern
+InaccessiblePaths=-/home/lantern/.local/state/lantern/codex -/home/lantern/.local/state/lantern/heritage -/home/lantern/.local/state/lantern/operator-backups -/home/lantern/.local/state/lantern/workspace
+InaccessiblePaths=-/home/lantern/.local/state/lantern/review-costs.sqlite -/home/lantern/.local/state/lantern/supervision.sqlite -/home/lantern/.local/state/lantern/threads.sqlite -/home/lantern/.local/state/lantern/usage.sqlite
+InaccessiblePaths=-/home/lantern/.local/state/lantern/opus-responses
+RestrictAddressFamilies=AF_INET
+IPAddressDeny=any
+IPAddressAllow=localhost
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+LimitCORE=0
+MemoryMax=192M
+TasksMax=48
+
+[Install]
+WantedBy=multi-user.target

@@ -3,3 +3,7 @@ lantern/personas/lantern-v1.md -text whitespace=cr-at-eol
 deploy/*.sh text eol=lf
 deploy/lantern text eol=lf
 deploy/*.service text eol=lf
+deploy/coding/*.service text eol=lf
+deploy/coding/*.socket text eol=lf
+deploy/coding/*.mount text eol=lf
+deploy/coding/Dockerfile text eol=lf

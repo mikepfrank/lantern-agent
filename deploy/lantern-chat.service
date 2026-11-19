@@ -1,5 +1,5 @@
 [Unit]
-Description=Lantern private terminal chat worker
+Description=Lantern private chat worker
 After=network-online.target
 Wants=network-online.target
 
@@ -10,7 +10,7 @@ WorkingDirectory=/opt/lantern/current
 EnvironmentFile=/etc/lantern/worker.env
 Environment=HOME=/home/lantern/.local/state/lantern
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/lantern worker --heartbeat-minutes 60
+ExecStart=/usr/local/bin/lantern worker --heartbeat-minutes 60 --coding-socket /run/lantern-code.sock
 Restart=on-failure
 RestartSec=3
 KillMode=mixed

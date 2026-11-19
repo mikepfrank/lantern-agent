@@ -1,0 +1,33 @@
+[Unit]
+Description=Lantern restricted one-shot coding container broker
+Requires=docker.service var-lib-lanterncode-work.mount
+After=docker.service var-lib-lanterncode-work.mount
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/python3.12 -I /opt/lantern/coding/broker.py
+ExecStopPost=/usr/bin/python3.12 -I /opt/lantern/coding/broker.py --cleanup
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=18
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+LimitCORE=0
+Environment=HOME=/nonexistent
+Environment=DOCKER_HOST=unix:///var/run/docker.sock

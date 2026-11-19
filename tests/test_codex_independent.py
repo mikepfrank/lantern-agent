@@ -1,4 +1,4 @@
-"""Boot the private worker twice with native Codex and offline model providers."""
+"""Upgrade the same private room across tool releases with native Codex and offline providers."""
 
 import asyncio
 from contextlib import closing, contextmanager, redirect_stderr
@@ -68,6 +68,14 @@ class NativeIndependentWorker(unittest.TestCase):
                 item = {"type": "function_call", "id": f"fc_{serial}", "call_id": f"call_{serial}",
                         "status": "completed", "name": name,
                         "arguments": json.dumps({**args, "rationale": "Maintain the private fixture journal."})}
+            elif serial == 6:
+                item = {"type": "function_call", "id": "fc_6", "call_id": "call_6", "status": "completed",
+                        "name": "coding_run", "arguments": json.dumps({"command": "python -V",
+                        "rationale": "Identify the Python interpreter in my offline checkout."})}
+            elif serial == 7:
+                item = {"type": "function_call", "id": "fc_7", "call_id": "call_7", "status": "completed",
+                        "name": "harness_logs", "arguments": json.dumps({"batch_id": 2, "limit": 3,
+                        "rationale": "Check the recorded outcome of my earlier heartbeat."})}
             else:
                 item = {"type": "message", "role": "assistant", "id": f"msg_{serial}", "status": "completed",
                         "content": [{"type": "output_text", "text": old_answer if serial == 1 else new_answer}]}
@@ -148,7 +156,27 @@ class NativeIndependentWorker(unittest.TestCase):
                                  + [(tid, 2, "luna", "tool", name, f"call_{n}")
                                     for n, (name, _) in enumerate(actions, 2)])
 
-        self.assertEqual(len(requests), 5)
+                def reviewed_run(socket_path, args):
+                    self.assertEqual(reviews[-1][0], "coding_run")
+                    self.assertEqual(socket_path, state / "broker.sock")
+                    self.assertEqual(args, {"command": "python -V"})
+                    return {"exit_code": 0, "output": "Python offline-coding-fixture"}
+
+                store.submit("Check Python from the coding environment.")
+                with patch("lantern.coding_tools.run_code", side_effect=reviewed_run) as runner:
+                    boot(state, "--heartbeat-minutes", "60", "--coding-socket", str(state / "broker.sock"))
+                    runner.assert_called_once()
+                self.assertEqual(store.status()["thread_id"], tid)
+                self.assertEqual(len(requests), 8)
+                self.assertIn("coding_run", {tool["name"] for tool in requests[5]["tools"]})
+                self.assertIn("SSH-forwarded browser", requests[5]["instructions"])
+                self.assertIn("Python offline-coding-fixture", json.dumps(requests[-1]["input"]))
+                self.assertIn("private journal is saved", json.dumps(requests[-1]["input"]))
+                diagnostic = next(item for item in requests[-1]["input"] if item.get("type") == "function_call_output"
+                                  and item["call_id"] == "call_7")
+                self.assertIn("at_utc", json.dumps(diagnostic["output"]))
+
+        requests = requests[:5]
         self.assertEqual(["notes/handoff.md" in request["instructions"] for request in requests],
                          [False, True, False, False, False])
         previous = {tool["name"] for tool in requests[0]["tools"]}
@@ -163,7 +191,8 @@ class NativeIndependentWorker(unittest.TestCase):
         for request in requests[1:]:
             tools = {tool["name"] for tool in request["tools"]}
             self.assertEqual(tools, previous | {"workspace_write", "workspace_list", "workspace_read", "heartbeat",
-                                                "set_alarm", "cancel_alarm", "schedule_status", "web_search", "budget_status"})
+                                                "set_alarm", "cancel_alarm", "schedule_status", "web_search", "budget_status",
+                                                "harness_logs"})
             self.assertNotIn("You cannot write a notes file", instructions(request))
             self.assertIn(scheduled_marker, request["instructions"])
             history = json.dumps(request["input"])
@@ -175,5 +204,5 @@ class NativeIndependentWorker(unittest.TestCase):
         self.assertIn(note, outputs["call_3"])
         self.assertIn("seconds_until_reset", outputs["call_4"])
         self.assertIn("reserved_usd", outputs["call_4"])
-        self.assertEqual([tool for tool, _ in reviews], [name for name, _ in actions])
-        self.assertTrue(all(scheduled_marker in instructions for _, instructions in reviews))
+        self.assertEqual([tool for tool, _ in reviews], [name for name, _ in actions] + ["coding_run", "harness_logs"])
+        self.assertTrue(all(scheduled_marker in instructions for _, instructions in reviews[:-2]))

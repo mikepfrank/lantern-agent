@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Lantern · Conversation</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/room.css">
+  <script src="/room.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <div class="brand"><span class="lamp" aria-hidden="true"></span>Lantern</div>
+      <span class="connection" id="connection" role="status"><i aria-hidden="true"></i><span>Connecting</span></span>
+    </div>
+  </header>
+  <main>
+    <div class="room-heading">
+      <h1>Conversation</h1>
+      <span class="worker" id="worker" aria-live="polite"></span>
+    </div>
+    <section class="history" aria-label="Conversation history" tabindex="0" id="history">
+      <button class="older" id="older" type="button" hidden>Load earlier messages</button>
+      <div class="empty" id="empty">Loading conversation…</div>
+      <div id="events"></div>
+    </section>
+    <div class="jump-wrap"><button id="jump" type="button" hidden>Latest messages ↓</button></div>
+    <form id="composer">
+      <label for="draft">Message Lantern</label>
+      <textarea id="draft" rows="2" maxlength="16000" placeholder="Write a message…" disabled></textarea>
+      <div class="send-row">
+        <span id="send-state" role="status"></span>
+        <button id="send" type="submit" disabled>Send <span aria-hidden="true">↑</span></button>
+      </div>
+    </form>
+    <p class="sr-only" role="status" id="announcer"></p>
+    <noscript>Enable JavaScript to open the operator conversation.</noscript>
+  </main>
+</body>
+</html>

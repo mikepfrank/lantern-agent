@@ -11,6 +11,9 @@ from tempfile import NamedTemporaryFile
 from uuid import UUID
 
 from .codex_session import BASE_INSTRUCTIONS
+from .coding_tools import CODING_TOOL
+from .diagnostics import DIAGNOSTICS_TOOL
+from .supervision import supervised_tools
 
 
 def _update_room_meta(meta, tools, *, independent):
@@ -140,8 +143,31 @@ def install_room_tools(state, thread_id, tools):
         return
     if str(UUID(thread_id)) != thread_id:
         raise ValueError("Invalid private room thread ID")
-    return _migrate(state / "codex", thread_id, tools,
-                    state / "operator-backups" / "independent-work-v1", "independent-work")
+    home = state / "codex"
+    backups = state / "operator-backups"
+    optional = {"coding-workspace": CODING_TOOL, "harness-logs": DIAGNOSTICS_TOOL}
+    additions = {tool["name"]: label for label, tool in optional.items()}
+    stages = {label: [] for label in ("independent-work", *optional)}
+    for tool in tools:
+        stages[additions.get(tool["name"], "independent-work")].append(tool)
+
+    # Each stage has an immutable backup of its own starting point. Recover a
+    # partially replaced rollout/index BEFORE installing any newly enabled tool.
+    report = None
+    for label, specifications in stages.items():
+        directory = backups / f"{label}-v1"
+        backup = directory / f"{thread_id}.before-{label}.jsonl"
+        if not backup.exists() or backup.with_suffix(".done").exists():
+            continue
+        recovery_specs = specifications
+        if not specifications and label in optional:
+            recovery_specs = [supervised_tools([optional[label]])[0]]
+        report = _migrate(home, thread_id, recovery_specs, directory, label)
+
+    for label, specifications in stages.items():
+        if specifications:
+            report = _migrate(home, thread_id, specifications, backups / f"{label}-v1", label) or report
+    return report
 
 
 def _migrate(codex_home, thread_id, tools, backup_dir, label, old_persona=None, new_persona=None):
@@ -151,7 +177,10 @@ def _migrate(codex_home, thread_id, tools, backup_dir, label, old_persona=None, 
     if not row:
         raise ValueError("Native thread is missing")
     rollout = Path(row[0]).resolve(strict=True)
-    if not rollout.is_relative_to((home / "sessions").resolve(strict=True)) or not rollout.name.endswith(thread_id + ".jsonl"):
+    sessions = (home / "sessions").resolve(strict=True)
+    # After the first resume, Windows Codex can persist the same absolute path
+    # in extended-length form. Verify directory identity for either spelling.
+    if not rollout.name.endswith(thread_id + ".jsonl") or not any(p.samefile(sessions) for p in rollout.parents):
         raise ValueError("Unexpected native rollout path")
     backup = backup_dir / f"{thread_id}.before-{label}.jsonl"
     done = backup.with_suffix(".done")

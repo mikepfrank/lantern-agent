@@ -8,9 +8,11 @@ Milestone 3 adds a private, persistent SSH terminal chat. From Mike's laptop, ru
 
 Native Codex accepts active input with `turn/steer` and may replace a response already in flight. Both requests can incur charges. A confirmed rejection leaves the follow-up queued for the next turn. Ambiguous delivery after a crash produces an interruption notice with the affected message IDs. Check for any completed tool effects before explicitly resubmitting. The worker never automatically repeats an uncertain action. Operator messages, deliberate interim notifications and final replies remain in the terminal history.
 
-The [pilot deployment guide](deploy/README.md) covers the systemd unit, release selection, private state, CLI and rollback. Current tools cover chess, consultation with Opus, private notices, heritage reading, persistent workspace files, web search, budget status, heartbeat and alarm scheduling. Shell and Python execution, the container with its editable harness clone, and GitHub proposals remain to be implemented.
+The [pilot deployment guide](deploy/README.md) covers systemd, release selection, the private browser link, CLI, and coding volume. Mike can use the SSH-forwarded browser or the CLI in the same room. Private operator identity applies across both. The web process runs separately from the worker. Opening the browser or reloading history does not start a model turn. Coding commands go through the existing supervisor and a private local broker. Python, Git and shell run in disposable offline containers with a persistent full editable checkout in `/work/lantern`. Source changes remain local until Mike accepts and deploys a reviewed proposal.
 
 ### Independent work
+
+Lantern can inspect recent operating records with the supervised `harness_logs` tool. Use `lantern logs --batch N` to reproduce the same view as the operator; it does not involve a model call. Exact coverage is returned alongside the records. Operator forensic reports and private response bodies stay outside the coding sandbox and web client.
 
 The private worker resumes the same native Codex room for human messages, heartbeats and alarms. The harness identifies the source of a scheduled turn to both Qwen and its reviewers. Mike's messages have priority. The cadence and one-time alarms persist through restarts. A daily cap leaves waiting work queued until midnight UTC. If a cap interrupts work that reached the provider, Lantern receives a continuation with instructions to check the earlier tool results. See the [operator commands](README.md#independent-work).
 
@@ -62,9 +64,9 @@ After restarting the final release, the private room retained its thread ID. A l
 
 ## TODO
 
-- Build a private text web client for Mike on the existing chat queue. For the first trial, use SSH forwarding to a socket accessible only to the operator. Exercise follow-ups during a turn, reconnect, and duplicate-send handling with the same message ID. Give the browser its own read position and accurately identify the authenticated operator channel to Lantern, Luna and Opus. For hosted login, reuse the chess service's session and CSRF patterns with Lantern's own credentials and session storage.
+- For hosted browser login, consider the chess service's session and CSRF patterns with Lantern's own credentials and session storage. The current text browser pilot uses SSH and a private per-service key.
 - Expose the existing fastest/cheapest OpenRouter preferences through a supervised Lantern tool. Verify that a change reaches the next outbound request and that the same spend cap applies in either mode.
-- Give Lantern a persistent, unprivileged coding container with Python, limited shell execution and a full editable checkout. Keep the active release read-only and host credentials and ledgers outside the container. Verify ordinary local code and tests run across a restart. Then let Lantern submit a branch and pull request through a scoped GitHub integration, with Mike and Astra reviewing changes before merge or deployment.
+- Add a host-side, supervised GitHub proposal tool and a way to import upstream revisions into the coding clone while preserving Lantern's work. Keep GitHub credentials separate from every process that runs model-supplied code or Git hooks. Mike and Astra review proposals before merge and deployment.
 - Add supervised retrieval of page text so Lantern can read beyond search snippets. Design and test the prompt-injection safeguards before enabling retrieval.
   - Return readable text in a structured tool result labeled as untrusted, with its source URL. Extract visible text and account for hidden material such as HTML comments, metadata and invisible characters. Preserve the source and trust label when excerpts carry over to later turns.
   - Lantern can use a page as evidence for its research. If the page asks Lantern to take an action, the page itself supplies no authority. Report suspected injected instructions to Mike and require his explicit approval in the private CLI before acting on a request originating from a page.
@@ -103,19 +105,11 @@ At milestone 1, Lantern's own shell access, general web search, scheduled wakeup
 
 ## Lantern's copy of its harness
 
-Before deployment, give the unprivileged Lantern user a **full, writable Git clone** in its persistent container home at `~/src/lantern`. Include branches, tags, and their history. Lantern can inspect the harness, change it, run tests against its own copy, and make commits. Preserve its working tree, including uncommitted changes, across container replacement.
+The coding broker gives Lantern a full writable clone at `/work/lantern`, also reachable as `~/src/lantern` inside each command. The initial seed includes the reviewed project's branches, tags, and history. Both commits and uncommitted files live on the persistent volume.
 
-Put the live release in an operator-owned directory such as `/opt/lantern`, exposed read-only inside the container. Start the installed service from this release using trusted configuration and import paths. Store mutable runtime data separately. Tests and experiments launched in `~/src/lantern` can exercise proposed code without changing the code or policy loaded by the live service.
+The worker loads the operator-owned release from `/opt/lantern/current` on the host. The coding container mounts its own volume. Lantern can read the running revision's source from its initial checkout, run tests, edit files and commit proposals within that clone.
 
-For provisioning, the host can make a Git bundle from a current full mirror of the canonical repository with `git bundle create lantern.bundle --all`. Present that bundle read-only for initial setup. Run these commands as the container user with the credential-free canonical URL in `LANTERN_REPO_URL`.
-
-```sh
-mkdir -p "$HOME/src"
-git clone /run/provision/lantern.bundle "$HOME/src/lantern"
-git -C "$HOME/src/lantern" remote set-url origin "$LANTERN_REPO_URL"
-```
-
-Clone once when the persistent checkout is absent. On subsequent starts reuse it. Future upstream changes should be available to fetch without overwriting Lantern's work.
+The [coding installer](deploy/install-coding.sh) verifies the seed revision, creates the clone inside an offline container and preserves it on later installations. The operator keeps the canonical source bundle separately in `/opt/lantern/source/lantern.bundle`.
 
 Lantern should be able to submit a pull request through a reviewed tool call. The host-side tool uses a project-scoped GitHub identity to publish a proposal branch and open a PR against the canonical repository. Keep credentials outside the container and outside any process that runs Lantern's Git hooks, configuration, or tests. Run proposal tests without deployment credentials. Mike and the local project maintainer review proposed changes here before acceptance. Deploy from an explicitly selected, reviewed commit, independently of the writable checkout.
 
@@ -125,7 +119,7 @@ Lantern should be able to submit a pull request through a reviewed tool call. Th
 2. As Lantern, edit a tracked file, run a test, and commit on a proposal branch. Leave a second edit uncommitted and verify both edits survive container replacement.
 3. Use the submission tool to open a test PR. Check that its base and diff match the proposal, its commits are attributed to Lantern, and the canonical branch and running revision still match their pre-test values.
 
-A local Git smoke test on 2026-11-18 exercised the mirror, bundle, and clone steps with two commits, a second branch, and a tag. A proposal commit in the clone left the upstream revision intact. Container isolation, volume persistence, and the GitHub submission path still need the deployment tests above.
+A local Git smoke test on 2026-11-18 exercised the mirror, bundle, and clone steps with two commits, a second branch, and a tag. GitHub proposal submission is pending.
 
 ## Other agreed design decisions
 

@@ -1,0 +1,13 @@
+[Unit]
+Description=Lantern private coding tool socket
+
+[Socket]
+ListenStream=/run/lantern-code.sock
+SocketUser=root
+SocketGroup=lantern
+SocketMode=0660
+Backlog=1
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Size-limited persistent Lantern coding workspace
+RequiresMountsFor=/var/lib/lanterncode
+
+[Mount]
+What=/var/lib/lanterncode/work.ext4
+Where=/var/lib/lanterncode/work
+Type=ext4
+Options=loop,nosuid,nodev,noatime,errors=remount-ro
+
+[Install]
+WantedBy=local-fs.target

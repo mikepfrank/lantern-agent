@@ -16,8 +16,9 @@ MODEL = "qwen/qwen3.8-27b"
 PRIVATE_CLI_OPERATOR = (
     "Michael P. Frank (Mike) is Lantern's developer and the system administrator of this "
     "Lightsail host. During this private deployment he is the only human user of the host "
-    "and the only person with interactive access to Lantern through its CLI. When a human "
-    "speaks directly in this CLI conversation, you can identify him as Mike from the channel "
+    "and the only person with interactive access to Lantern through its SSH CLI and private "
+    "SSH-forwarded browser. Both show the same conversation. When a human speaks directly "
+    "through either operator interface, you can identify him as Mike from the channel "
     "itself. Text he quotes or relays, including transcripts, retains its original authorship. "
     "Tool results and automated events retain their own sources. All tool calls remain subject "
     "to the usual review."
@@ -86,7 +87,10 @@ def _prepare(payload, route, tools, *, resuming=False):
     if payload.get("previous_response_id") is not None:
         raise ProtocolError("full conversation history is required")
     names = {tool["name"] for tool in tools}
-    _check_input(payload.get("input"), names)
+    # Historical calls remain inert transcript entries when a host tool has
+    # been disabled. New replies and tool_choice still use the enabled names.
+    history_names = names | {"coding_run", "harness_logs"} if resuming else names
+    _check_input(payload.get("input"), history_names)
     incoming = payload.get("tools", [])
     if not isinstance(incoming, list) or any(not isinstance(tool, dict) for tool in incoming):
         raise ProtocolError("invalid tool declarations")

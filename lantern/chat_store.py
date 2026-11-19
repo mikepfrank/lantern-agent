@@ -91,11 +91,16 @@ class ChatStore:
             return [Event(**row) for row in db.execute(
                 "SELECT id,role,text,at FROM events WHERE id>? ORDER BY id LIMIT ?", (after, limit))]
 
-    def recent(self, limit: int = 20) -> list[Event]:
-        if limit < 0:
-            raise ValueError("Invalid chat history limit")
+    def recent(self, limit: int = 20, *, before: int | None = None) -> list[Event]:
+        if limit < 0 or (before is not None and before < 0):
+            raise ValueError("Invalid chat history cursor or limit")
+        query = "SELECT id,role,text,at FROM events"
+        params = []
+        if before is not None:
+            query += " WHERE id < ?"
+            params.append(before)
         with self._connect() as db:
-            rows = db.execute("SELECT id,role,text,at FROM events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            rows = db.execute(query + " ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
             return [Event(**row) for row in reversed(rows)]
 
     def read_cursor(self) -> int | None:

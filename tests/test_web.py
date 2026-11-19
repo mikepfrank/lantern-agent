@@ -1,0 +1,117 @@
+from contextlib import closing
+from http.client import HTTPConnection
+import json
+import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import threading
+import unittest
+import uuid
+
+from lantern.chat_store import ChatStore
+from lantern.web import PAGE_SIZE, RoomServer
+
+
+class WebRoomTests(unittest.TestCase):
+    def setUp(self):
+        self.state = Path(self.enterContext(TemporaryDirectory()))
+        self.room = self.enterContext(RoomServer(self.state, port=0))
+        self.store = ChatStore(self.state)
+        thread = threading.Thread(target=self.room.serve_forever, args=(0.01,))
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(self.room.shutdown)
+
+    def request(self, method, path, *, auth=True, headers=None, body=None):
+        request_headers = {}
+        if auth:
+            request_headers["Authorization"] = "Bearer " + self.room.key
+        if body is not None:
+            request_headers["Content-Type"] = "application/json"
+            body = json.dumps(body)
+        request_headers.update(headers or {})
+        with closing(HTTPConnection("127.0.0.1", self.room.server_port, timeout=4)) as client:
+            client.request(method, path, body=body, headers=request_headers)
+            response = client.getresponse()
+            data = response.read()
+            if response.headers.get_content_type() == "application/json":
+                data = json.loads(data)
+            return response.status, response.headers, data
+
+    def test_static_shell_and_private_routes(self):
+        self.store.submit("private content")
+        for path in ("/", "/room.css", "/room.js"):
+            code, headers, content = self.request("GET", path, auth=False)
+            self.assertEqual(200, code)
+            self.assertEqual("no-store", headers["Cache-Control"])
+            self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
+            self.assertNotIn(b"private content", content)
+            self.assertNotIn(self.room.key.encode(), content)
+        self.assertEqual(401, self.request("GET", "/api/room", auth=False)[0])
+        self.assertEqual(401, self.request("POST", "/api/messages", auth=False)[0])
+        self.assertEqual(401, self.request("GET", "/api/room?key=" + self.room.key, auth=False)[0])
+        self.assertEqual(404, self.request("GET", "/../chat.sqlite")[0])
+        self.assertEqual(404, self.request("GET", "/web-key")[0])
+
+    def test_host_and_origin_validation_precede_writes(self):
+        message = {"text": "hello", "client_id": str(uuid.uuid4())}
+        for headers in ({"Host": "outside.example"}, {"Origin": "null"},
+                        {"Origin": "https://outside.example"}, {"Origin": "http://127.0.0.1:12"}):
+            self.assertEqual(403, self.request("POST", "/api/messages", headers=headers, body=message)[0])
+        self.assertEqual([], self.store.events())
+        self.assertEqual(200, self.request("POST", "/api/messages", headers={
+            "Origin": f"http://127.0.0.1:{self.room.server_port}"}, body=message)[0])
+
+    def test_send_retry_cli_interleave_and_independent_cursors(self):
+        cli_event = self.store.submit("Hello from the terminal")
+        self.store.mark_read(cli_event)
+        message = {"text": "Follow-up\nfrom the browser 🏮", "client_id": str(uuid.uuid4())}
+        status, _, receipt = self.request("POST", "/api/messages", body=message)
+        self.assertEqual(200, status)
+        self.assertEqual(receipt, self.request("POST", "/api/messages", body=message)[2])
+        self.assertEqual(409, self.request("POST", "/api/messages", body={**message, "text": "different"})[0])
+        batch = self.store.claim()
+        self.assertEqual([cli_event, receipt["id"]], [event.id for event in batch.messages])
+        interim = self.store.notify(batch.id, "Still working", "test-call")
+        status, _, page = self.request("GET", f"/api/room?after={cli_event}")
+        self.assertEqual(200, status)
+        self.assertTrue(page["status"]["working"])
+        self.assertEqual([message["text"], "Still working"], [e["text"] for e in page["events"]])
+        final = self.store.complete(batch.id, "Finished")
+        page = self.request("GET", f"/api/room?after={interim}")[2]
+        self.assertEqual([final], [e["id"] for e in page["events"]])
+        self.assertFalse(page["status"]["working"])
+        self.assertEqual(cli_event, self.store.read_cursor())
+
+    def test_history_pages_and_invalid_inputs(self):
+        for i in range(PAGE_SIZE + 3):
+            self.store.submit(str(i))
+        page = self.request("GET", "/api/room")[2]
+        self.assertTrue(page["more"])
+        first = page["events"][0]["id"]
+        older = self.request("GET", f"/api/room?before={first}")[2]
+        self.assertFalse(older["more"])
+        self.assertEqual(["0", "1", "2"], [row["text"] for row in older["events"]])
+        initial = self.request("GET", "/api/room?after=0")[2]
+        self.assertTrue(initial["more"])
+        self.assertEqual(PAGE_SIZE, len(initial["events"]))
+        for query in ("after=-1", "key=4", "before=9999999999999999999", "after=1&after=2", "before="):
+            self.assertEqual(400, self.request("GET", "/api/room?" + query)[0])
+        good_id = str(uuid.uuid4())
+        for bad in ({"text": "", "client_id": good_id}, {"text": "x" * 16001, "client_id": good_id},
+                    {"text": "\ud800", "client_id": good_id}, {"text": "x", "client_id": "?"}, {}):
+            self.assertEqual(400, self.request("POST", "/api/messages", body=bad)[0])
+
+    def test_published_key_is_private_and_rotates(self):
+        self.room.publish_key()
+        path = self.state / "web-key"
+        self.assertEqual(self.room.key, path.read_text().strip())
+        if os.name == "posix":
+            self.assertEqual(0o600, path.stat().st_mode & 0o777)
+        with RoomServer(self.state, port=0) as replacement:
+            replacement.publish_key()
+            self.assertNotEqual(self.room.key, path.read_text().strip())
+
+
+if __name__ == "__main__":
+    unittest.main()
