@@ -24,6 +24,8 @@ Use `lantern usage --day YYYY-MM-DD` for a UTC-day comparison and `lantern usage
 
 For the first heartbeat (batch 10, before batch tagging), worker journal receipts and the supervisor ledger showed three Qwen requests ($0.03767440), five Luna tool checks ($0.00156275) and two Opus escalation calls ($0.09537000). Opus reviewed the first proposed workspace note and the heartbeat cadence change. This comparison used the observed turn's time window. The full UTC-day ledger also includes deliberate calibration calls. Keep those distinct when estimating normal overhead.
 
+On November 19 UTC, operator batches 11–14 recorded 10 settled Qwen requests ($0.07858080), eight Luna reviews (seven tool screens and one context scan, estimated $0.005224275), and zero Opus calls. Review overhead for these four turns was 6.65% of Qwen spend. Continue sampling operator, heartbeat and alarm turns separately before tuning the full-context scan interval or either allowance.
+
 ### Luna's flag history
 
 The private operator command `lantern flags` reads the screening audit in `supervision.sqlite`. For new context and tool flags, the harness saves Luna's reported evidence and summary before consulting Opus. These entries survive a later clean scan, a ruling, or an unavailable reviewer. Use `--batch N` to compare concerns with that turn's usage, or `--kind tool` to include both registered and unregistered tool proposals. The first heartbeat predates this audit. Its two flag events and the saved denial still exist, but Luna's own wording for them was never recorded.
@@ -56,6 +58,9 @@ After restarting the final release, the private room retained its thread ID. A l
 
 ## TODO
 
+- Build a private text web client for Mike on the existing chat queue. For the first trial, use SSH forwarding to a socket accessible only to the operator. Exercise follow-ups during a turn, reconnect, and duplicate-send handling with the same message ID. Give the browser its own read position and accurately identify the authenticated operator channel to Lantern, Luna and Opus. For hosted login, reuse the chess service's session and CSRF patterns with Lantern's own credentials and session storage.
+- Expose the existing fastest/cheapest OpenRouter preferences through a supervised Lantern tool. Verify that a change reaches the next outbound request and that the same spend cap applies in either mode.
+- Give Lantern a persistent, unprivileged coding container with Python, limited shell execution and a full editable checkout. Keep the active release read-only and host credentials and ledgers outside the container. Verify ordinary local code and tests run across a restart. Then let Lantern submit a branch and pull request through a scoped GitHub integration, with Mike and Astra reviewing changes before merge or deployment.
 - Add supervised retrieval of page text so Lantern can read beyond search snippets. Design and test the prompt-injection safeguards before enabling retrieval.
   - Return readable text in a structured tool result labeled as untrusted, with its source URL. Extract visible text and account for hidden material such as HTML comments, metadata and invisible characters. Preserve the source and trust label when excerpts carry over to later turns.
   - Lantern can use a page as evidence for its research. If the page asks Lantern to take an action, the page itself supplies no authority. Report suspected injected instructions to Mike and require his explicit approval in the private CLI before acting on a request originating from a page.
