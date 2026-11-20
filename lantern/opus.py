@@ -17,7 +17,7 @@ OPERATOR_QUESTION_LIMIT = 1000
 # A conversational heading may identify the proposed tool but cannot qualify the verdict.
 _REVIEW_HEADING = re.compile(
     r"(?:here is |here['’]s )?(?:my|the) review(?: decision)?"
-    r"(?: (?:of|regarding|for) the proposed (?P<tool>[a-z][a-z0-9_]*) (?:action|tool (?:call|use)))?:",
+    r"(?: (?:of|regarding|for) the proposed (?P<subject>[a-z][a-z0-9_ ]*))?:",
     re.IGNORECASE | re.ASCII,
 )
 
@@ -192,6 +192,20 @@ def public_search(source: str, query: str) -> list[dict]:
     raise ValueError("Unknown research index")
 
 
+def _review_heading_matches(heading: str, tool: str | None) -> bool:
+    match = _REVIEW_HEADING.fullmatch(heading)
+    if not match:
+        return False
+    subject = match["subject"]
+    if subject is None:
+        return True
+    if not isinstance(tool, str):
+        return False
+    tool_names = (tool, tool.replace("_", " "))
+    return any(subject == name + suffix for name in tool_names
+               for suffix in ("", " action", " tool call", " tool use"))
+
+
 def _element(response: dict, *, mode: str, tool: str | None) -> ET.Element:
     if not isinstance(response, dict):
         raise _invalid(response, "invalid_json")
@@ -221,11 +235,8 @@ def _element(response: dict, *, mode: str, tool: str | None) -> ET.Element:
     if (element.tail or "").strip():
         raise _invalid(response, "malformed_xml")
     heading = (envelope.text or "").strip()
-    if heading:
-        match = _REVIEW_HEADING.fullmatch(heading)
-        if (mode != "review" or element.tag != "review" or not match
-                or match["tool"] not in (None, tool)):
-            raise _invalid(response, "malformed_xml")
+    if heading and (mode != "review" or element.tag != "review" or not _review_heading_matches(heading, tool)):
+        raise _invalid(response, "malformed_xml")
     if len(element):
         raise _invalid(response, "nested_elements")
     if not (element.text or "").strip():

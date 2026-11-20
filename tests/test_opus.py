@@ -118,6 +118,7 @@ class OpusTests(unittest.TestCase):
         for tool, heading, decision in (
             ("workspace_write", "Here is my review of the proposed workspace_write action:", "allow"),
             ("read_heritage", "Here is my review decision regarding the proposed read_heritage tool use:", "allow"),
+            ("workspace_write", "Here is my review decision regarding the proposed workspace write:", "allow"),
             ("workspace_write", "Here’s my review:", "deny"),
             ("read_heritage", "My review decision:", "ask_operator"),
         ):
@@ -138,6 +139,7 @@ class OpusTests(unittest.TestCase):
         for text in (
             "Allow only after Mike confirms.\n" + verdict,
             "Here is my review of the proposed read_heritage action:\n" + verdict,
+            "Here is my review decision regarding the proposed workspace write pending confirmation:\n" + verdict,
             heading + "\n" + verdict + "\nWait for Mike.",
             heading + "\n" + verdict + '<review decision="deny">Stop.</review>',
             heading + "\n" + verdict + verdict,
