@@ -4,6 +4,7 @@ import codecs
 from contextlib import contextmanager
 from io import UnsupportedOperation
 import os
+import re
 import select
 import shutil
 import sys
@@ -23,10 +24,43 @@ def _display_text(text):
     return "".join(c for c in text if c == "\n" or (ord(c) >= 32 and not 127 <= ord(c) <= 159))
 
 
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _compact_reply(text):
+    """Show one blank line between prose paragraphs, preserving code layout."""
+    lines = []
+    blanks = []
+    fence = ""
+    previous_indented = False
+    for line in text.split("\n"):
+        marker = _FENCE.match(line)
+        if fence:
+            lines.append(line)
+            if marker and marker[1].startswith(fence) and not marker[2].strip():
+                fence = ""
+            continue
+        if not line.strip():
+            blanks.append(line)
+            continue
+        indented = line.startswith("    ")
+        if lines and blanks:
+            lines.extend(blanks if previous_indented and indented else [""])
+        blanks.clear()
+        lines.append(line)
+        previous_indented = indented
+        if marker and (marker[1][0] == "~" or "`" not in marker[2]):
+            fence = marker[1]
+    return "\n".join(lines)
+
+
 def _event_line(event):
     speaker = {"operator": "You", "lantern": "Lantern", "system": "Status"}[event.role]
     timestamp = event.at[:16].replace("T", " ")
-    body = _display_text(event.text).replace("\n", "\n    ")
+    body = _display_text(event.text)
+    if event.role == "lantern":
+        body = _compact_reply(body)
+    body = body.replace("\n", "\n    ")
     return f"[{timestamp} UTC] {speaker} #{event.id}  {body}"
 
 

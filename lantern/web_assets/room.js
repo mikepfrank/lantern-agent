@@ -121,8 +121,18 @@ function messageNode(event) {
   header.append(speaker, time);
   const body = document.createElement("div");
   body.className = "body";
-  // Preserve source formatting, including code, without parsing model or operator HTML.
-  const blocks = event.text.split(/^\x60{3}[^\r\n]*\r?\n([\s\S]*?)^\x60{3}[ \t]*(?:\r?\n|$)/gm);
+  if (role === "lantern" && typeof renderLanternMarkdown === "function") {
+    renderLanternMarkdown(body, event.text);
+  } else {
+    appendPlainMessage(body, event.text);
+  }
+  item.append(header, body);
+  return item;
+}
+
+function appendPlainMessage(body, text) {
+  // Preserve existing literal text and fenced code in operator and service messages.
+  const blocks = text.split(/^\x60{3}[^\r\n]*\r?\n([\s\S]*?)^\x60{3}[ \t]*(?:\r?\n|$)/gm);
   blocks.forEach((part, i) => {
     if (i % 2) {
       const pre = document.createElement("pre");
@@ -134,8 +144,6 @@ function messageNode(event) {
       body.append(document.createTextNode(part));
     }
   });
-  item.append(header, body);
-  return item;
 }
 
 function syncJump() {

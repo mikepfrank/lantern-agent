@@ -102,8 +102,8 @@ h1 { margin: 0; font: normal clamp(1.6rem, 4vw, 2rem)/1.2 "Hedvig Letters Serif"
 .jump-wrap { position: relative; height: 0; }
 #jump { position: absolute; bottom: .65rem; left: 50%; transform: translateX(-50%); white-space: nowrap; box-shadow: 0 3px 14px #141414; }
 .older:hover, #jump:hover { background: #37342e; }
-.message { max-width: min(94%, 44rem); margin: .3rem 0 1.45rem; }
-.message header { display: flex; align-items: baseline; gap: .65rem; padding-bottom: .45rem; }
+.message { max-width: min(94%, 44rem); margin: 0 0 1rem; }
+.message header { display: flex; align-items: baseline; gap: .65rem; padding-bottom: .3rem; }
 .speaker { font-size: .84rem; font-weight: 650; color: var(--amber); }
 time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: .74rem; }
 .message .body { overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.55; }
@@ -113,6 +113,22 @@ time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: .74re
 .system .speaker { color: var(--muted); }
 .body pre { tab-size: 4; overflow: auto; padding: .8rem; margin: .5rem 0; background: #111414; border: 1px solid var(--edge); white-space: pre; border-radius: .4rem; }
 .body code { font: .88em/1.5 "IBM Plex Mono", Consolas, monospace; }
+.lantern .body { white-space: normal; }
+.lantern .body :where(p, ul, ol, blockquote, pre, h1, h2, h3, h4, h5, h6, hr) { margin: 0; }
+.lantern .body > * + *,
+.lantern .body blockquote > * + * { margin-top: .45rem; }
+.lantern .body :is(h1, h2, h3, h4, h5, h6) { font-family: inherit; font-size: 1.06em; font-weight: 650; line-height: 1.35; letter-spacing: normal; }
+.lantern .body :is(h1, h2) { font-size: 1.18em; }
+.lantern .body :is(ol, ul) { padding-inline-start: 1.75em; }
+.lantern .body li + li { margin-top: .15em; }
+.lantern .body blockquote { padding-inline-start: .85em; border-inline-start: 2px solid #726451; color: #d0c9bc; }
+.lantern .body hr { border: 0; border-top: 1px solid var(--edge); }
+.lantern .body a { color: var(--amber); text-underline-offset: .13em; }
+.lantern .body :not(pre) > code { padding: .05em .28em; border-radius: .25em; background: #2b2d2b; color: #e6d4b8; }
+.lantern .table-scroll { max-width: 100%; overflow-x: auto; }
+.lantern table { border-collapse: collapse; font-size: .94em; }
+.lantern :is(th, td) { padding: .25em .65em; border: 1px solid var(--edge); text-align: start; }
+.lantern th { background: #242624; }
 #composer { flex: none; margin-top: .35rem; padding: .8rem .95rem .65rem; background: #252726; border: 1px solid #514c43; border-radius: .8rem; }
 #composer:focus-within { border-color: #a88653; }
 #composer label { font-size: .83rem; font-weight: 600; }

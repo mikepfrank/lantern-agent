@@ -52,4 +52,15 @@ For a new installation, make the seed with `git bundle create lantern.bundle --b
 
 The full editable clone is `/work/lantern`, also available as `~/src/lantern` inside the container. This differs from the operator checkout in the host's `~lantern/src/lantern`. The installer seeds the coding clone once. Subsequent service updates preserve branches and uncommitted work. GitHub publication needs a separate host-side proposal tool. The running service loads the root-owned release under `/opt/lantern/current`.
 
+From the host's normal `ec2-user` shell, `sudo ls -la /var/lib/lanterncode/work/files` lists Lantern's persistent `/work`. Append `/lantern` to browse its checkout. For an interactive read-only view as the workspace owner, start a separate container on that volume.
+
+```sh
+sudo docker run --rm -it --pull=never --network none --cap-drop ALL \
+  --security-opt no-new-privileges --read-only \
+  -v /var/lib/lanterncode/work/files:/work:ro \
+  -w /work/lantern lantern-code:local
+```
+
+Use `exit` to close the inspection shell. The volume remains available between Lantern's own coding commands.
+
 The first worker start with coding enabled backs up the existing native room in `operator-backups/coding-workspace-v1/` before adding the tool. The worker, browser and broker can be inspected separately with `systemctl status lantern-chat lantern-web lantern-code.socket lantern-code.service`. For a coding-only outage, recover the mount and broker before retrying. Check for completed edits if a command lost its response.

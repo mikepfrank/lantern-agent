@@ -10,7 +10,9 @@ To use the browser, run this in a terminal on the laptop. Open the private link 
 ssh -t -o ExitOnForwardFailure=yes -L 127.0.0.1:8765:127.0.0.1:8765 lightsail "sudo -u lantern -H /usr/local/bin/lantern web-link --wait"
 ```
 
-The browser and terminal show the same conversation. Either interface can send a follow-up while Lantern is working. After a browser service restart, obtain a fresh link using the command above. Treat the link as a credential.
+The browser and terminal show the same conversation. Either interface can send a follow-up while Lantern is working. In the browser, everything you send, including `/help`, is a message to Lantern. Terminal commands such as `/help` run locally in the CLI.
+
+After a browser service restart, keep the existing SSH tunnel open and get a fresh link in a second terminal with `ssh -t lightsail "sudo -u lantern -H /usr/local/bin/lantern web-link"`. Open the new link in the same tab. Treat it as a credential.
 
 To use terminal chat directly, run:
 

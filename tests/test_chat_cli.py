@@ -45,6 +45,25 @@ class ChatCLITests(unittest.TestCase):
         self.assertNotIn("\x07", dest.getvalue())
         self.assertIn("Queued messages: 1", dest.getvalue())
 
+    def test_blank_lines_fold_in_lantern_display_and_history(self):
+        operator = "Preserve my spacing.\n\n\nNext line."
+        reply = "\r\n\r\nFirst paragraph.\n\n    \n\nSecond paragraph.\n\n"
+        self.store.submit(operator)
+        self.store.complete(self.store.claim().id, reply)
+        dest = StringIO()
+        chat_cli.attach(self.store, input_stream=StringIO("/history\n/quit\n"), output_stream=dest)
+        # Both initial delivery and /history render through the same view.
+        self.assertEqual(dest.getvalue().count("Lantern #2  First paragraph.\n    \n    Second paragraph.\n"), 2)
+        self.assertEqual(dest.getvalue().count("You #1  Preserve my spacing.\n    \n    \n    Next line."), 2)
+        self.assertEqual([e.text for e in self.store.recent(2)], [operator, reply])
+
+    def test_blank_lines_inside_code_are_literal(self):
+        sample = ("Prose.\n\n\n  ````python\n    first()\n\n\n```\n\n\nsecond()\n````\n\n\n\n"
+                  "    third()\n\n \n\n    fourth()\n\n\n~~~py\ncode\n\n\n")
+        expected = ("Prose.\n\n  ````python\n    first()\n\n\n```\n\n\nsecond()\n````\n\n"
+                    "    third()\n\n \n\n    fourth()\n\n~~~py\ncode\n\n\n")
+        self.assertEqual(chat_cli._compact_reply(sample), expected)
+
     def test_reply_during_edit_is_printed_and_draft_is_preserved(self):
         self.store.submit("start work")
         batch = self.store.claim()

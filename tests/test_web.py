@@ -3,6 +3,8 @@ from http.client import HTTPConnection
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 from tempfile import TemporaryDirectory
 import threading
 import unittest
@@ -10,6 +12,12 @@ import uuid
 
 from lantern.chat_store import ChatStore
 from lantern.web import PAGE_SIZE, RoomServer
+
+
+class MessageFormattingTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "requires Node for the browser renderer")
+    def test_render_saved_markdown(self):
+        subprocess.run(["node", str(Path(__file__).with_name("message_format.cjs"))], check=True, timeout=20)
 
 
 class WebRoomTests(unittest.TestCase):
@@ -40,7 +48,7 @@ class WebRoomTests(unittest.TestCase):
 
     def test_static_shell_and_private_routes(self):
         self.store.submit("private content")
-        for path in ("/", "/room.css", "/room.js"):
+        for path in ("/", "/room.css", "/room.js", "/markdown-it-15.0.3.min.js", "/message-format.js"):
             code, headers, content = self.request("GET", path, auth=False)
             self.assertEqual(200, code)
             self.assertEqual("no-store", headers["Cache-Control"])

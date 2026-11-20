@@ -24,6 +24,8 @@ ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/room.css": ("room.css", "text/css; charset=utf-8"),
     "/room.js": ("room.js", "text/javascript; charset=utf-8"),
+    "/markdown-it-15.0.3.min.js": ("markdown-it-15.0.3.min.js", "text/javascript; charset=utf-8"),
+    "/message-format.js": ("message-format.js", "text/javascript; charset=utf-8"),
 }
 
 
