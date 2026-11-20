@@ -24,7 +24,7 @@ FILES = {"chat": "chat.sqlite", "usage": "usage.sqlite", "review": "review-costs
          "supervision": "supervision.sqlite"}
 TOOLS = set("""chess_analyze message_operator read_heritage consult_opus workspace_list workspace_read
 workspace_write heartbeat set_alarm cancel_alarm schedule_status web_search budget_status coding_run
-harness_logs unregistered""".split())
+harness_logs view_pdf_page unregistered""".split())
 STATUSES = set("""complete failed interrupted deferred pending completed incomplete upstream_http_error
 invalid_upstream_response settled unconfirmed rejected metered ambiguous archive_error context_unavailable
 context_flagged context_clear tool_flagged tool_clear tool_review_unreadable tool_review_unavailable

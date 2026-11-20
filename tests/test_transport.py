@@ -108,6 +108,22 @@ class TransportTests(unittest.TestCase):
         self.reserve.assert_not_called()
         self.assertEqual([], self.wire)
 
+    def test_registry_mismatch_names_only_missing_host_tools_before_reservation(self):
+        chess = {**CHESS, "name": "chess_analyze"}
+        tools = [chess, {**CHESS, "name": "view_pdf_page"}, {**CHESS, "name": "coding_run"}]
+        private_name = "untrusted_client_declaration"
+        offered = [{"type": "function", "name": name} for name in ("chess_analyze", private_name)]
+        with self.gateway("fastest", tools=tools, resuming=True) as gate:
+            status, body = self.request(gate, tools=offered)
+        self.assertEqual(status, 400)
+        self.assertEqual(gate.evidence[-1]["error"],
+                         "Codex did not advertise these configured Lantern tools: coding_run, view_pdf_page")
+        self.assertNotIn(private_name, str(gate.evidence))
+        self.assertNotIn(private_name.encode(), body)
+        self.reserve.assert_not_called()
+        self.observe.assert_not_called()
+        self.assertFalse(self.wire)
+
     def test_unavailable_historical_pixels_do_not_strand_a_later_turn(self):
         original = {"role": "user", "content": [
             {"type": "input_image", "image_url": image_reference(12, "0" * 64)}]}

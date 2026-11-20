@@ -18,7 +18,7 @@ from .supervision import supervised_tools
 
 
 def _update_room_meta(meta, tools, *, independent):
-    changed = _add_specifications(meta, tools)
+    changed = _add_specifications(meta["dynamic_tools"], ({"type": "function", **tool} for tool in tools))
     if independent:
         # Exact base shipped through the private heritage release. Keep custom
         # bases and the separate developer persona intact.
@@ -54,11 +54,9 @@ def _backup(source, backup):
             temp.unlink(missing_ok=True)
 
 
-def _add_specifications(meta, tools):
-    saved = meta["dynamic_tools"]
+def _add_specifications(saved, specifications):
     changed = False
-    for tool in tools:
-        spec = {"type": "function", **tool}
+    for spec in specifications:
         existing = [entry for entry in saved if entry.get("name") == spec["name"]]
         if existing and existing != [spec]:
             raise ValueError("Saved tool has a conflicting definition")
@@ -68,7 +66,16 @@ def _add_specifications(meta, tools):
     return changed
 
 
-def _rewrite(backup, out, thread_id, tools, old_persona, new_persona):
+def _update_checkpoint(payload, thread_id, specifications):
+    # A compacted rollout can carry a registry scoped to a specific thread.
+    # Absent and foreign registries are not overrides for this room.
+    checkpoint = (payload.get("resume_metadata") or {}).get("dynamic_tools")
+    if checkpoint is None or checkpoint.get("thread_id") != thread_id:
+        return False
+    return _add_specifications(checkpoint["tools"], specifications)
+
+
+def _rewrite(backup, out, thread_id, tools, old_persona, new_persona, *, checkpoints=False):
     # Codex persists the first session_meta tool list and stores developer text
     # in rollout messages. Its resume RPC cannot replace either in an old thread.
     matches = 0
@@ -83,10 +90,15 @@ def _rewrite(backup, out, thread_id, tools, old_persona, new_persona):
             if i == 0:
                 if record["type"] != "session_meta" or payload.get("id") != thread_id:
                     raise ValueError("Saved thread identity mismatch")
-                changed = _update_room_meta(payload, tools, independent=old_persona is None)
+                if checkpoints:
+                    specifications = payload["dynamic_tools"]
+                else:
+                    changed = _update_room_meta(payload, tools, independent=old_persona is None)
             if record["type"] == "response_item":
                 items = [payload]
             elif record["type"] == "compacted":
+                if checkpoints:
+                    changed = _update_checkpoint(payload, thread_id, specifications)
                 items = payload.get("replacement_history") or []
             else:
                 items = []
@@ -146,6 +158,14 @@ def install_room_tools(state, thread_id, tools):
         raise ValueError("Invalid private room thread ID")
     home = state / "codex"
     backups = state / "operator-backups"
+    rollout = _room_rollout(home, thread_id)
+    checkpoint_dir = backups / "compaction-tools-v1"
+    # This step can have completed the rename but not the index commit. Repair
+    # from its own source snapshot before attempting a newly configured upgrade.
+    for backup in sorted(checkpoint_dir.glob(f"{thread_id}.before-*.jsonl")):
+        if not backup.with_suffix(".done").exists():
+            _migrate(home, thread_id, [], checkpoint_dir, backup.stem.split(".before-", 1)[1],
+                     checkpoints=True)
     optional = {"coding-workspace": CODING_TOOL, "harness-logs": DIAGNOSTICS_TOOL, "pdf-pages": PDF_TOOL}
     additions = {tool["name"]: label for label, tool in optional.items()}
     stages = {label: [] for label in ("independent-work", *optional)}
@@ -168,10 +188,29 @@ def install_room_tools(state, thread_id, tools):
     for label, specifications in stages.items():
         if specifications:
             report = _migrate(home, thread_id, specifications, backups / f"{label}-v1", label) or report
-    return report
+    # 0.169 prefers the saved compaction checkpoint over the opening registry
+    # on a later resume. A completed earlier rollout migration is still valid:
+    # start any checkpoint repair from the complete current history.
+    with rollout.open("rb") as stream:
+        first = json.loads(stream.readline())
+        if first["type"] != "session_meta" or first["payload"].get("id") != thread_id:
+            raise ValueError("Saved thread identity mismatch")
+        canonical = first["payload"]["dynamic_tools"]
+        for raw in stream:
+            if b'"compacted"' not in raw:
+                continue
+            record = json.loads(raw)
+            if record["type"] == "compacted" and _update_checkpoint(record["payload"], thread_id, canonical):
+                break
+        else:
+            return report
+    # A room may gain more tools after many subsequent turns. A source digest
+    # distinguishes each revision's private backup and crash recovery metadata.
+    label = "checkpoint-" + _digest(rollout)
+    return _migrate(home, thread_id, [], checkpoint_dir, label, checkpoints=True) or report
 
 
-def _migrate(codex_home, thread_id, tools, backup_dir, label, old_persona=None, new_persona=None):
+def _room_rollout(codex_home, thread_id):
     home = codex_home.resolve(strict=True)
     with closing(sqlite3.connect((home / "state_5.sqlite").as_uri() + "?mode=ro", uri=True)) as registry:
         row = registry.execute("SELECT rollout_path FROM threads WHERE id=?", (thread_id,)).fetchone()
@@ -183,9 +222,15 @@ def _migrate(codex_home, thread_id, tools, backup_dir, label, old_persona=None, 
     # in extended-length form. Verify directory identity for either spelling.
     if not rollout.name.endswith(thread_id + ".jsonl") or not any(p.samefile(sessions) for p in rollout.parents):
         raise ValueError("Unexpected native rollout path")
+    return rollout
+
+
+def _migrate(codex_home, thread_id, tools, backup_dir, label, old_persona=None, new_persona=None, *, checkpoints=False):
+    home = codex_home.resolve(strict=True)
+    rollout = _room_rollout(home, thread_id)
     backup = backup_dir / f"{thread_id}.before-{label}.jsonl"
     done = backup.with_suffix(".done")
-    if old_persona is None and (done.exists() or not backup.exists()):
+    if not checkpoints and old_persona is None and (done.exists() or not backup.exists()):
         with rollout.open("rb") as stream:
             meta = json.loads(stream.readline())
         if meta["type"] != "session_meta" or meta["payload"]["id"] != thread_id:
@@ -198,7 +243,7 @@ def _migrate(codex_home, thread_id, tools, backup_dir, label, old_persona=None, 
     with NamedTemporaryFile(dir=rollout.parent, prefix=".heritage-", delete=False) as out:
         staged = Path(out.name)
         try:
-            offsets = _rewrite(backup, out, thread_id, tools, old_persona, new_persona)
+            offsets = _rewrite(backup, out, thread_id, tools, old_persona, new_persona, checkpoints=checkpoints)
             out.flush()
             os.fsync(out.fileno())
             out.close()

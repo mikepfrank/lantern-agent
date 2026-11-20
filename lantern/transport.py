@@ -161,8 +161,10 @@ def _prepare(payload, route, tools, *, resuming=False, image_loader=None, page_i
     if resuming and "chess_analyze" in declared and (names - declared) <= {"consult_opus", "read_heritage"}:
         tools = [tool for tool in tools if tool["name"] in declared]
         names = {tool["name"] for tool in tools}
-    if incoming and not names.issubset(declared):
-        raise ProtocolError("Codex did not advertise all configured Lantern tools")
+    if incoming and (missing := names - declared):
+        # Report only names from the host's registry. Client declarations can
+        # contain private data and aren't needed to diagnose a stale registry.
+        raise ProtocolError("Codex did not advertise these configured Lantern tools: " + ", ".join(sorted(missing)))
     choice = payload.get("tool_choice", "auto")
     if isinstance(choice, dict):
         if choice.get("type") != "function" or choice.get("name") not in names or not incoming:

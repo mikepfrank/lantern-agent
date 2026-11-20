@@ -61,6 +61,17 @@ class DiagnosticsTests(TestCase):
             all_rows.extend(one["records"])
         self.assertEqual([r["ref"] for r in all_rows], [f"screen:{i}" for i in range(41, 0, -1)])
 
+    def test_pdf_review_identifies_tool_without_showing_reviewed_arguments(self):
+        Supervisor(self.state, None, None, None)
+        self.sql("supervision.sqlite", "INSERT INTO events(thread,event,tool,call_id) VALUES(?,?,?,?)",
+                 ("t", "tool_clear", "view_pdf_page", "call-1"))
+        self.sql("supervision.sqlite", "INSERT INTO actions VALUES(?,?,?,?)",
+                 ("t", "call-1", "digest", json.dumps({"path": "/work/private-filename.pdf", "page": 1})))
+        report = read_diagnostics(self.state, {})
+        record, = report["records"]
+        self.assertEqual((record["status"], record["tool"]), ("tool_clear", "view_pdf_page"))
+        self.assertNotIn("private-filename", json.dumps(report))
+
     def test_real_ledgers_show_only_allowlisted_results_and_receipts(self):
         secret = "SECRET_private_material_not_for_a_tool"
         store = ChatStore(self.state)
