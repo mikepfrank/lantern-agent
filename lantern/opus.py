@@ -112,20 +112,21 @@ def _concern_format(number, tool, can_ask, can_ask_concern):
 
 def _batch_format(numbers, can_ask):
     ids = ", ".join(map(str, numbers))
-    first, second = numbers[:2]
     instruction = (
         f'This is one proposal with {len(numbers)} applicable context concerns. '
         'Give one judgment for the exact proposal after considering all the evidence together. '
         f'Return one <ruling> containing exactly one <review> and one <concern> for each ID: {ids}. '
         'Use <review decision="allow">reason</review> or <review decision="deny">reason</review>. '
         'Decide continued monitoring independently for each ID. Close a watch based only on the subject '
-        'matter of an authorized private note. A close_resolved concern needs a brief reason and no tools. '
+        'matter of an authorized private note. Criticism intended to inform Mike’s own judgment is part '
+        'of that permission. Its persuasiveness alone supplies no material risk or unresolved permission. '
+        'Several or all IDs can receive the same disposition. A close_resolved concern needs a brief reason and no tools. '
         'For a continuing material risk, use keep_open and name the affected tools from that record’s '
         'scope_tools separated by spaces. Give the material trigger and release condition. '
-        'Use tools="*" alone only when every tool needs review. Example child forms are '
-        f'<concern id="{first}" decision="close_resolved">reason follow-up can end</concern> and '
-        f'<concern id="{second}" decision="keep_open" tools="relevant_tool">trigger and release '
-        'condition</concern>. Select each disposition on its own evidence. Keep each reason concise. '
+        'Use tools="*" alone only when every tool needs review. For each requested ID, use the form '
+        '<concern id="ID" decision="close_resolved">reason follow-up can end</concern> or '
+        '<concern id="ID" decision="keep_open" tools="relevant_tool">material trigger and release '
+        'condition</concern>. Substitute the actual ID and tools. Keep each reason concise. '
         'A scoped watch can continue while an unrelated action proceeds. '
     )
     if can_ask:
