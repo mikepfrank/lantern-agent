@@ -68,6 +68,12 @@ class PdfRendererTests(unittest.TestCase):
             answer = render_pdf.render(10, 3)
             self.assertEqual(answer["page_count"], 3)
             self.assertEqual(len(calls), 2)
+            for call in calls:
+                self.assertEqual((call[call.index("-f") + 1], call[call.index("-l") + 1]), ("3", "3"))
+            self.assertLess(int(calls[1][calls[1].index("-scale-to") + 1]), 1600)
+            with self.assertRaisesRegex(ValueError, "3 pages"):
+                render_pdf.render(10, 4)
+            self.assertEqual(len(calls), 2)
 
     @unittest.skipUnless(os.name == "posix", "Requires POSIX directory descriptors")
     def test_open_document_accepts_regular_file_but_refuses_symlinks_and_fifo(self):
@@ -88,12 +94,6 @@ class PdfRendererTests(unittest.TestCase):
                     with self.subTest(path=path), self.assertRaises((ValueError, OSError)):
                         with render_pdf.open_document(path):
                             self.fail("An indirect or special file was opened.")
-            for call in calls:
-                self.assertEqual((call[call.index("-f") + 1], call[call.index("-l") + 1]), ("3", "3"))
-            self.assertLess(int(calls[1][calls[1].index("-scale-to") + 1]), 1600)
-            with self.assertRaisesRegex(ValueError, "3 pages"):
-                render_pdf.render(10, 4)
-            self.assertEqual(len(calls), 2)
 
     @unittest.skipUnless(os.name == "posix" and Path("/usr/bin/pdftoppm").exists()
                          and Path("/proc/self/fd").is_dir(), "Requires Linux with Poppler")
