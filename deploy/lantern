@@ -5,7 +5,27 @@ umask 077
 if [ "$#" -eq 0 ]; then
     set -- chat
 fi
-exec /usr/bin/python3.12 -I /opt/lantern/current/lantern.pyz \
+# Locate the subcommand without consuming the operator's original arguments.
+uses_worker_release() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            worker|say|smoke) return 0 ;;
+            --private-lightsail-cli|--*=*) shift ;;
+            --state|--codex|--persona|--heritage-dir)
+                [ "$#" -ge 2 ] || return 1
+                shift 2 ;;
+            *) return 1 ;;
+        esac
+    done
+    return 1
+}
+release=/opt/lantern/current
+if [ -L /opt/lantern/worker-current ] && uses_worker_release "$@"; then
+    release=/opt/lantern/worker-current
+fi
+# Pin the immutable archive before zipimport so later symlink switches are safe.
+archive=$(realpath -e -- "$release/lantern.pyz")
+exec /usr/bin/python3.12 -I "$archive" \
     --private-lightsail-cli \
     --heritage-dir /home/lantern/.local/state/lantern/heritage \
     --state /home/lantern/.local/state/lantern \

@@ -49,6 +49,15 @@ class ToolRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response["result"]["success"])
         self.assertEqual(json.loads(response["result"]["contentItems"][0]["text"]), {"best": "Qg7#"})
 
+    async def test_completed_segments_have_clean_boundaries_and_keep_code(self):
+        for phase, text in ((None, "\r\n\n  First. \t\n"), (None, "\n  \n"),
+                            ("commentary", "Private progress."), (None, "\r\n    line()\n    next()\n"),
+                            ("final_answer", "  \n\n```\na\n\n\nb\n```\n\n")):
+            item = {"type": "agentMessage", "phase": phase, "text": text}
+            await self.peer.handle({"method": "item/completed", "params": {"item": item}})
+            self.assertEqual(item["text"], text)
+        self.assertEqual(self.peer.messages, ["First.", "    line()\n    next()", "```\na\n\n\nb\n```"])
+
     async def test_other_threads_turns_and_unregistered_tools_cannot_dispatch(self):
         for invalid in ({"threadId": "another"}, {"turnId": "another"}, {"tool": "shell"},
                         {"namespace": "another"}, {"arguments": []}, {"callId": None}):

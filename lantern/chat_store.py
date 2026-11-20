@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sqlite3
 
+from .chat_text import trim_reply_segment
 from .scheduler import SCHEMA, next_reset
 
 
@@ -319,11 +320,13 @@ class ChatStore:
         """Publish a message from a running turn, independent of terminal attachment."""
         if not isinstance(text, str) or not text.strip() or not isinstance(call_id, str) or not call_id.strip():
             raise ValueError("A notification needs message text and a tool call ID")
+        text = trim_reply_segment(text)
         with self._connect(write=True) as db:
             known = db.execute("""SELECT e.id,e.text FROM notifications n JOIN events e ON e.id=n.event_id
                 WHERE n.batch_id=? AND n.call_id=?""", (batch_id, call_id)).fetchone()
             if known:
-                if known["text"] != text:
+                # A receipt issued by an older release may contain padding.
+                if trim_reply_segment(known["text"]) != text:
                     raise ValueError("This notification ID already belongs to different text")
                 return known["id"]
             self._active(db, batch_id)

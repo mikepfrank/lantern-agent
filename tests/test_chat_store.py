@@ -93,6 +93,21 @@ class ChatStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no longer active"):
             peer.notify(batch.id, "stale", "different-call")
 
+    def test_padded_notification_is_stored_once_and_old_receipts_remain_valid(self):
+        self.store.submit("Start")
+        batch = self.store.claim()
+        notice = self.store.notify(batch.id, "\r\n  Result.\n\n", "result")
+        self.assertEqual(self.store.recent(1)[0].text, "Result.")
+        self.assertEqual(notice, self.store.notify(batch.id, "Result.", "result"))
+        # Simulate a still-present receipt written by the pre-trimming worker.
+        old = "\n\n\tprint(42)\n\n"
+        with self.store._connect(write=True) as db:
+            db.execute("UPDATE events SET text=? WHERE id=?", (old, notice))
+        self.assertEqual(notice, self.store.notify(batch.id, "\tprint(42)", "result"))
+        self.assertEqual(self.store.recent(1)[0].text, old)
+        with self.assertRaisesRegex(ValueError, "different text"):
+            self.store.notify(batch.id, "print(42)", "result")
+
     def test_transcript_and_read_cursor_are_monotonic(self):
         first = self.store.submit("1")
         second = self.store.submit("2")

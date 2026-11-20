@@ -77,8 +77,9 @@ class NativeIndependentWorker(unittest.TestCase):
                         "name": "harness_logs", "arguments": json.dumps({"batch_id": 2, "limit": 3,
                         "rationale": "Check the recorded outcome of my earlier heartbeat."})}
             else:
+                answer = old_answer if serial == 1 else new_answer
                 item = {"type": "message", "role": "assistant", "id": f"msg_{serial}", "status": "completed",
-                        "content": [{"type": "output_text", "text": old_answer if serial == 1 else new_answer}]}
+                        "content": [{"type": "output_text", "text": "\n\n" + answer + "\n\n"}]}
             yield reply(serial, item)
 
         def reviewer(vendor, key, body):

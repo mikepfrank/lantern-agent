@@ -10,6 +10,8 @@ from typing import Callable
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from .chat_text import trim_reply_segment
+
 
 class CodexError(RuntimeError):
     """An action failed; its persisted thread can still be inspected or resumed."""
@@ -206,7 +208,11 @@ class _Peer:
         elif method == "item/completed":
             item = p["item"]
             if item.get("type") == "agentMessage" and item.get("phase") in (None, "final_answer"):
-                self.messages.append(item["text"])
+                if not isinstance(item.get("text"), str):
+                    raise CodexError("Codex returned a non-text assistant message")
+                segment = trim_reply_segment(item["text"])
+                if segment:
+                    self.messages.append(segment)
         elif method == "model/rerouted" or (method == "error" and not p.get("willRetry", False)):
             raise CodexError("Codex reported a provider or turn error")
 

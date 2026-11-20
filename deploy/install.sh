@@ -4,6 +4,11 @@ set +x
 set -euo pipefail
 umask 022
 
+worker_only=false
+if [[ ${1:-} == --worker-only ]]; then
+    worker_only=true
+    shift
+fi
 revision=${1:?Pass the full Git revision from the staged source archive}
 archive=${2:-/home/ec2-user/chess-security-stage-20261115/codex/codex-package-x86_64-unknown-linux-musl.tar.gz}
 [[ $EUID == 0 && $revision =~ ^[0-9a-f]{40}$ ]] || {
@@ -25,6 +30,10 @@ install -d -m 0755 "$base" "$base/releases" "$base/runtime"
 install -d -m 0700 /etc/lantern
 exec 9>"$base/.install.lock"
 flock -n 9 || { echo "Another Lantern installation is in progress." >&2; exit 1; }
+if $worker_only && [[ ! -L $base/current || ! -f $base/current/lantern.pyz || ! -f /etc/systemd/system/$unit ]]; then
+    echo "A worker-only update requires an existing Lantern installation." >&2
+    exit 1
+fi
 stage=$(mktemp -d "$base/.install.XXXXXXXX")
 trap 'rm -rf -- "$stage"' EXIT
 
@@ -93,7 +102,10 @@ install -m 0600 /dev/null "$stage/worker.env"
     done
 ) > "$stage/worker.env"
 
-ln -s -- "$release" "$stage/current"
+ln -s -- "$release" "$stage/worker-current"
+if ! $worker_only; then
+    ln -s -- "$release" "$stage/current"
+fi
 # Hold queue admission across the idle check and stop. The database connection
 # belongs to lantern and closes when the installer's pipe closes, even on error.
 if systemctl is-active --quiet "$unit"; then
@@ -121,11 +133,18 @@ fi
 install -o root -g root -m 0600 "$stage/worker.env" /etc/lantern/worker.env
 install -o root -g root -m 0755 "$src/deploy/lantern" /usr/local/bin/lantern
 install -o root -g root -m 0644 "$src/deploy/$unit" "/etc/systemd/system/$unit"
-install -o root -g root -m 0644 "$src/deploy/lantern-web.service" /etc/systemd/system/
-mv -Tf -- "$stage/current" "$base/current"
+mv -Tf -- "$stage/worker-current" "$base/worker-current"
+if ! $worker_only; then
+    install -o root -g root -m 0644 "$src/deploy/lantern-web.service" /etc/systemd/system/
+    mv -Tf -- "$stage/current" "$base/current"
+fi
 systemctl daemon-reload
 systemctl enable --now "$unit"
 systemctl is-active --quiet "$unit"
+if $worker_only; then
+    printf 'Lantern worker release %s active.\n' "$revision"
+    exit 0
+fi
 systemctl enable lantern-web.service
 systemctl restart lantern-web.service
 systemctl is-active --quiet lantern-web.service
