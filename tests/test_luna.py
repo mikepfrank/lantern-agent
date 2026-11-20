@@ -2,6 +2,7 @@ import json
 import unittest
 from unittest.mock import Mock
 
+from lantern import opus
 from lantern.luna import INSTRUCTIONS, Luna, MODEL
 from lantern.review_policy import STANDING_POLICY
 
@@ -64,6 +65,27 @@ class LunaTests(unittest.TestCase):
                 self.assertEqual(body["instructions"].count(STANDING_POLICY), 1)
                 self.assertNotIn("sharing the private journal is authorized", body["instructions"])
                 self.assertEqual(json.loads(body["input"][0]["content"]), packet)
+
+    def test_both_reviewers_receive_scoped_archive_permission_and_prior_denial(self):
+        arguments = {"path": "heritage/lmstudio-chat.pdf", "page": 6}
+        prior = {"reason": "Fixture denial of this particular action."}
+        packet = {"kind": "tool", "tool": "view_pdf_page", "arguments": arguments}
+        luna_post = Mock(return_value=completed({"escalate": False, "evidence": "", "summary": "Private read."}))
+        Luna(luna_post).screen(packet)
+        self.assertEqual(json.loads(luna_post.call_args.args[1]["input"][0]["content"]), packet)
+
+        opus_post = Mock(return_value={"model": opus.OPUS_MODEL, "stop_reason": "end_turn", "content": [
+            {"type": "text", "text": '<review decision="deny">The specific restriction still applies.</review>'}]})
+        result = opus.review(opus_post, {**packet, "prior_action_denial": prior})
+        self.assertEqual(result["decision"], "deny")
+        opus_body = opus_post.call_args.args[1]
+        self.assertEqual(json.loads(opus_body["messages"][0]["content"])["case"]["prior_action_denial"], prior)
+        for instructions in (luna_post.call_args.args[1]["instructions"], opus_body["system"]):
+            policy = " ".join(instructions.split())
+            for scope in ("operator review #4", "private, read-only reference", "read_heritage", "view_pdf_page",
+                          "any page", "switching formats", "historical source material",
+                          "disclosure outside the private room", "explicitly denied action"):
+                self.assertIn(scope, policy)
 
     def test_spot_check_keeps_full_visible_window(self):
         packet = {"kind": "context", "context": {"instructions": "Original instructions",

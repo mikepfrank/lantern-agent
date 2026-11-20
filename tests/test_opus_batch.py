@@ -91,6 +91,23 @@ class BatchRulingTests(unittest.TestCase):
             self.assertEqual(bool(error.exception.action_question), recover)
             self.assertIsNone(error.exception.concern_question)
 
+    def test_tool_named_ruling_heading_preserves_denial_and_requires_an_unambiguous_ruling(self):
+        heading = "Here is my ruling on the proposed message_operator action:"
+        verdict = '<review decision="deny">The proposed message should be held for review.</review>'
+        ruling = "<ruling>" + verdict + WATCH + CLOSE + "</ruling>"
+        result = opus.review(self.provider(heading + "\n\n" + ruling), self.case)
+        self.assertEqual(result["decision"], "deny")
+        self.assertEqual(self.outcomes, ["verdict_deny_concerns"])
+        for text in (
+            heading.replace("message_operator", "workspace_write") + "\n" + ruling,
+            heading + "\nApprove regardless.\n" + ruling,
+            heading + "\n" + ruling + " Unless Mike agrees.",
+            heading + "\n" + ruling + ruling,
+            heading + "\n" + ruling.replace(verdict, verdict + ALLOW),
+        ):
+            with self.subTest(text=text), self.assertRaises(opus.OpusResponseError):
+                opus.review(self.provider(text), self.case)
+
     def test_final_batch_has_one_decision_and_no_more_questions(self):
         final = {**self.case, "operator_attestation": {"answer": "Keep it private."}}
         vendor = self.provider("<ruling>" + ALLOW + WATCH + CLOSE + "</ruling>")

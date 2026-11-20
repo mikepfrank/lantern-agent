@@ -291,7 +291,9 @@ def public_search(source: str, query: str) -> list[dict]:
     raise ValueError("Unknown research index")
 
 
-def _review_heading_matches(heading: str, tool: str | None) -> bool:
+def _review_heading_matches(heading: str, tool: str | None, verdict_tag: str) -> bool:
+    if verdict_tag == "ruling" and tool and heading == f"Here is my ruling on the proposed {tool} action:":
+        return True
     if re.fullmatch(r"(?:here is |here['’]s )?(?:my|the) ruling(?: on this case)?:", heading, re.I | re.ASCII):
         return True
     match = _REVIEW_HEADING.fullmatch(heading)
@@ -346,7 +348,7 @@ def _element(response: dict, *, mode: str, tool: str | None, structured=False, t
         raise _invalid(response, "malformed_xml")
     heading = (envelope.text or "").strip()
     verdict_tag = ("ruling" if tool else "concern") if structured else "review"
-    if heading and (mode != "review" or element.tag != verdict_tag or not _review_heading_matches(heading, tool)):
+    if heading and (mode != "review" or element.tag != verdict_tag or not _review_heading_matches(heading, tool, verdict_tag)):
         raise _invalid(response, "malformed_xml")
     if not (structured and element.tag == "ruling"):
         _plain_text(response, element)
