@@ -164,7 +164,7 @@ class OpusTests(unittest.TestCase):
                 self.assertIn('<concern id="42" decision="close_resolved"', instructions)
                 self.assertIn("removes its extra checks on future actions", instructions)
                 self.assertIn('<concern id="42" decision="keep_open" tools=', instructions)
-                self.assertIn("the risk persists or resolution is uncertain", instructions)
+                self.assertIn("specific evidence shows a continuing material risk", instructions)
                 self.assertEqual(raw["content"][0]["text"], xml)
                 self.assertIn("inside its concern and review children" if tool else "single concern element as the XML root",
                               instructions)

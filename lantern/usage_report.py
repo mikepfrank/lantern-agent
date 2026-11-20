@@ -78,6 +78,32 @@ def _call_detail(r):
     }
 
 
+def _room_review_rates(state, day, daily):
+    path = state / "chat.sqlite"
+    if not path.is_file():
+        return None
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"room", "operator_reviews"} <= tables:
+            return None
+        room = db.execute("SELECT thread_id FROM room WHERE id=1").fetchone()
+        if not room or not room[0]:
+            return None
+        questions = db.execute("SELECT COUNT(*) FROM operator_reviews WHERE thread=? AND date(asked_at)=?",
+                               (room[0], day)).fetchone()[0]
+    calls = [r for r in daily if r.get("thread_id") == room[0]]
+    screens = [r.get("tool_call_id") for r in calls if r["vendor"] == "luna" and r["purpose"] == "tool"]
+    proposals = len({call_id for call_id in screens if call_id})
+    missing = sum(call_id is None for call_id in screens)
+    opus_calls = sum(r["vendor"] == "opus" and r["purpose"] in ("escalation", "context_review") for r in calls)
+    return {
+        "screened_proposals_with_id": proposals, "tool_screens_without_id": missing,
+        "operator_questions_opened": questions, "opus_review_calls": opus_calls,
+        "questions_per_100_proposals": round(100 * questions / proposals, 2) if proposals and not missing else None,
+        "opus_review_calls_per_100_proposals": round(100 * opus_calls / proposals, 2) if proposals and not missing else None,
+    }
+
+
 def usage_report(state: Path, day: str | None = None, *, calls: bool = False, batch: int | None = None) -> dict:
     """Report recorded charges on their UTC admission day. Filter only by known batch IDs."""
     now = datetime.now(timezone.utc)
@@ -118,6 +144,10 @@ def usage_report(state: Path, day: str | None = None, *, calls: bool = False, ba
     if batch is not None:
         result["batch_coverage"] = ("Only calls tagged with this batch ID on this UTC day are included."
                                     if rows else "No calls were tagged with this batch ID on this UTC day.")
+    else:
+        rates = _room_review_rates(state, day, daily)
+        if rates is not None:
+            result["room_review_rates"] = rates
     if calls:
         ordered = sorted(rows, key=lambda r: (r.get("at") is None, r.get("at") or "", r["id"]))
         result["calls"] = [_call_detail(r) for r in ordered]

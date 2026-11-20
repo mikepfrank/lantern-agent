@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from .budget import units, UNITS_PER_DOLLAR
 from .luna import MODEL as LUNA_MODEL, MAX_OUTPUT_TOKENS as LUNA_OUTPUT
-from .opus import AuditedReply, OpusResponseError, OPUS_MODEL, MAX_OUTPUT_TOKENS as OPUS_OUTPUT
+from .opus import AuditedReply, OpusResponseError, OPUS_MODEL, MAX_BATCH_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS as OPUS_OUTPUT
 from .opus_audit import OpusCapture
 
 
@@ -151,7 +151,8 @@ class ReviewerVendors:
             env, output_limit = "OPENAI_API_KEY", LUNA_OUTPUT
             output = payload.get("max_output_tokens")
         elif vendor == "opus" and purpose in ("consult", "escalation", "context_review") and payload.get("model") == OPUS_MODEL:
-            env, output_limit = "ANTHROPIC_API_KEY", OPUS_OUTPUT
+            env = "ANTHROPIC_API_KEY"
+            output_limit = MAX_BATCH_OUTPUT_TOKENS if purpose == "escalation" else OPUS_OUTPUT
             output = payload.get("max_tokens")
         else:
             raise VendorError("Invalid supervisor request")

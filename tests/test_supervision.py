@@ -52,10 +52,13 @@ class ReviewTests(unittest.TestCase):
 
     def ruling(self, case, disposition="watch"):
         verdict = dict(self.review.return_value) if "tool" in case else {}
+        def receipt(item):
+            return {"id": item["id"], "decision": disposition, "reason": "Fixture ruling on this evidence.",
+                    "tools": [] if disposition == "retire" else ["*"]}
         if "concern_review" in case:
-            verdict["concern"] = {"id": case["concern_review"]["id"], "decision": disposition,
-                                  "reason": "Fixture ruling on this evidence.",
-                                  "tools": [] if disposition == "retire" else ["*"]}
+            verdict["concern"] = receipt(case["concern_review"])
+        elif "concern_reviews" in case:
+            verdict["concerns"] = [receipt(item) for item in case["concern_reviews"]]
         return verdict
 
     def session(self, *, interval=12, thread="thread", batch_id=None):
@@ -322,8 +325,8 @@ class ReviewTests(unittest.TestCase):
         gate = self.session(interval=1)
         gate.observe(self.payload)
         self.assertIn("move", self.call("registered", gate=gate))
-        cases = [call.args[0]["concern_review"] for call in self.review.call_args_list
-                 if call.args[0].get("tool") == "chess_analyze"]
+        cases, = [call.args[0]["concern_reviews"] for call in self.review.call_args_list
+                  if call.args[0].get("tool") == "chess_analyze"]
         self.assertEqual([case["evidence"] for case in cases], ["Original context concern.", "Unregistered tool concern."])
         self.assertNotEqual(cases[0]["id"], cases[1]["id"])
 
@@ -404,13 +407,13 @@ class ReviewTests(unittest.TestCase):
                     gate.unregistered("outside", "{}")
             finally:
                 release.set()
-            action.result(timeout=5)
+            self.assertIn("held", action.result(timeout=5)["error"])
         self.luna.screen.return_value = report()
         gate.observe({"input": "Clean later context"})
         self.call("later", gate=gate)
         case = self.review.call_args.args[0]
         self.assertEqual("chess_analyze", case["tool"])
-        self.assertIn("Late evidence", case["concern_review"]["evidence"])
+        self.assertEqual([item["evidence"] for item in case["concern_reviews"]], ["Context concern", "Late evidence"])
 
     def test_retry_and_conflicting_call_ids(self):
         self.gate.observe(self.payload)
@@ -454,11 +457,12 @@ class ReviewTests(unittest.TestCase):
         def judge(case):
             self.execute.assert_not_called()
             self.assertLess(len(json.dumps(case, ensure_ascii=False).encode()), 64 * 1024)
-            reviewed.append(case["concern_review"])
+            reviewed.extend(case["concern_reviews"])
             return self.ruling(case, "retire")
 
         self.review.side_effect = judge
         self.assertIn("move", self.call("complete"))
+        self.review.assert_called_once()
         self.assertEqual(len({finding["id"] for finding in reviewed}), 40)
         self.assertEqual([finding["evidence"] for finding in reviewed], [f"Independent concern {i}." for i in range(40)])
         self.execute.assert_called_once()

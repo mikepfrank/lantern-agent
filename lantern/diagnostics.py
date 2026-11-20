@@ -39,6 +39,7 @@ invalid_concern_scope invalid_concern_question""".split())
 for disposition in ("retire", "watch", "ask_operator"):
     OPUS_CODES.add("concern_" + disposition)
     OPUS_CODES.update("verdict_" + decision + "_concern_" + disposition for decision in ("allow","deny","ask_operator"))
+OPUS_CODES.update("verdict_" + decision + "_concerns" for decision in ("allow", "deny", "ask_operator"))
 COVERAGE = ("Times use UTC. Model call times are admission times. OpenRouter's HTTP code, provider "
             "identity and running release revision are absent from these ledgers. Supervision events "
             "without a recorded batch link appear only in the unfiltered view. Luna concern topics "

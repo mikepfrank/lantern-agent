@@ -154,6 +154,8 @@ def _attestation(row):
 
 def _review_excerpt(case):
     evidence = [case["evidence"], case.get("concern_review", {}).get("evidence", "")]
+    for item in case.get("concern_reviews", []):
+        evidence.append(f"#{item['id']}: {item['evidence']}")
     concern = "\n".join(filter(None, evidence)) or case["summary"]
     excerpt = "Review concern\n" + (concern if len(concern) <= 950 else concern[:949] + "…")
     if case["tool"] == "workspace_write" and isinstance(case["arguments"].get("text"), str):
@@ -471,26 +473,49 @@ class Supervisor:
             return {"advice": advice, "research": research, "available_research": sources}
         return execute(name, args)
 
-    def _concern_case(self, item, action=None):
+    def _case_with_concerns(self, items, action=None):
         case = dict(action or {})
-        case["concern_review"] = {**item, "scope_tools": sorted(self.tool_names)}
+        room = self.operator_room
+        if room and "operator_statements" not in case:
+            case["operator_statements"] = room.statements(self.thread, self.batch_id)
+        records = []
+        attestations = []
+        for item in items:
+            record = {**item, "scope_tools": sorted(self.tool_names)}
+            related = self._related_receipt(item)
+            if related:
+                if len(items) == 1:
+                    case["related_concern_receipt"] = related
+                else:
+                    record["related_concern_receipt"] = related
+            records.append(record)
+            if room:
+                prior = room.case(self.thread, f"context-concern:{item['id']}")
+                if prior and prior["answer"]:
+                    attestations.append({"concern_id": item["id"], "operator_attestation": _attestation(prior)})
+                if len(items) == 1:
+                    case["concern_question_available"] = prior is None and "operator_attestation" not in case
+        if len(items) == 1:
+            case["concern_review"] = records[0]
+            if attestations:
+                case["prior_concern_attestation"] = attestations[0]["operator_attestation"]
+        else:
+            case["concern_reviews"] = records
+            if attestations:
+                case["prior_concern_attestations"] = attestations
+        return case
+
+    def _related_receipt(self, item):
         if item["related_id"] is not None:
             with database(self.path) as db:
                 prior = concerns.get(db, self.thread, item["related_id"])
             if prior:
-                case["related_concern_receipt"] = {
+                receipt = {
                     key: prior[key] for key in ("id", "sequence", "version", "status", "tools")}
                 for key in ("evidence", "reason"):
                     value = prior[key]
-                    case["related_concern_receipt"][key] = value if len(value) <= 600 else value[:599] + "…"
-        room = self.operator_room
-        if room:
-            case["operator_statements"] = room.statements(self.thread, self.batch_id)
-            prior = room.case(self.thread, f"context-concern:{item['id']}")
-            if prior and prior["answer"]:
-                case["prior_concern_attestation"] = _attestation(prior)
-            case["concern_question_available"] = prior is None and "operator_attestation" not in case
-        return case
+                    receipt[key] = value if len(value) <= 600 else value[:599] + "…"
+                return receipt
 
     def _record_ruling(self, item, ruling):
         with database(self.path) as db:
@@ -529,7 +554,7 @@ class Supervisor:
         return self._concern_question({**item, "version": version}, error.concern_question)
 
     def _decide_concern(self, item, action=None):
-        case = self._concern_case(item, action)
+        case = self._case_with_concerns([item], action)
         try:
             verdict = self._judgment(case)
         except ReviewUnreadable as exc:
@@ -557,7 +582,7 @@ class Supervisor:
                 if room.claim_final(row["id"], key) != "claimed":
                     continue
                 try:
-                    case = self._concern_case(item)
+                    case = self._case_with_concerns([item])
                     case.pop("prior_concern_attestation", None)
                     case["concern_attestation"] = _attestation(row)
                     ruling = self._judgment(case)["concern"]
@@ -613,90 +638,119 @@ class Supervisor:
                 question = self.operator_room.case(self.thread, f"context-concern:{incomplete[2]}")
                 if question and question["answer"]:
                     case["prior_concern_attestation"] = _attestation(question)
-        reviewed = set(skipped)
         if not (findings or flagged or refusal or incomplete) and (prior is None or prior["final_decision"] == "allow"):
             return None
-        if room and not needs_final:
-            case["operator_question_available"] = True
-        # Each independent finding must clear the exact action. The action-specific
-        # operator receipt gets at most one final verdict, after all other gates.
-        for item in findings or [None]:
-            if item and item["status"] == "question":
+        # No paid decision can clear a pre-existing applicable operator question.
+        for item in findings:
+            if item["status"] == "question":
                 if not self.operator_room:
                     return {"error": "An applicable context concern is awaiting the private operator room."}
-                q = self._concern_question(item, item["reason"])
-                return self._concern_hold(q)
-            batch = self._concern_case(item, case) if item else case
-            if needs_final and item is not None and item != findings[-1]:
-                # Existing context gates use the attested answer as evidence.
-                # Only the last one may consume the action's final-review receipt.
-                batch["prior_operator_attestation"] = batch.pop("operator_attestation")
-                batch["concern_question_available"] = False
-            if needs_final and (item is None or item == findings[-1]):
-                verdict = self._final_judgment(prior, fingerprint, batch)
-            else:
-                try:
-                    verdict = self._judgment(batch)
-                except ReviewUnreadable as exc:
-                    error = exc.__cause__
-                    action_question = batch.get("operator_question_available") and error.action_question
-                    concern_question = item and batch.get("concern_question_available") and error.concern_question
-                    if not (action_question or concern_question):
-                        raise
-                    with database(self.path) as db:
-                        db.execute("INSERT OR REPLACE INTO incomplete_action_reviews VALUES(?,?,?,?,?)",
-                                   (self.thread, proposal_key, call_id, error.code,
-                                    None if action_question else item["id"]))
-                    self._event("tool_review_unreadable", name, call_id)
-                    if action_question:
-                        room.open(self.thread, scope, name, call_id, describe_action(name, args),
-                                  recovered_excerpt(error, _review_excerpt(batch)), action_question)
-                        row = room.case(self.thread, scope)
-                    else:
-                        row = self._recover_concern_question(item, error)
-                    held = self._concern_hold(row)
-                    held["error"] = f"Opus's ruling could not be validated ({error.code}). " + held["error"]
+                return self._concern_hold(self._concern_question(item, item["reason"]))
+        if room and not needs_final:
+            case["operator_question_available"] = True
+        batch = self._case_with_concerns(findings, case) if findings else case
+        if len(findings) > 1 and not incomplete:
+            # A malformed, stale, or interrupted combined reply grants no partial
+            # permission, even if those watches are subsequently closed elsewhere.
+            incomplete = (call_id, "pending_concern_batch", None)
+            with database(self.path) as db:
+                if not db.execute("INSERT OR IGNORE INTO incomplete_action_reviews VALUES(?,?,?,?,?)",
+                                  (self.thread, proposal_key, *incomplete)).rowcount:
+                    raise ReviewUnavailable("The proposal already has an incomplete review. Submit a fresh assessment")
+        if needs_final and room.claim_final(prior["id"], fingerprint) != "claimed":
+            raise ReviewUnavailable(f"The final review for question #{prior['id']} was already claimed")
+        try:
+            verdict = self._judgment(batch)
+            rulings = verdict.get("concerns", []) if len(findings) != 1 else [verdict["concern"]]
+            self._apply_action_verdict(call_id, name, proposal_key, findings, skipped, refusal, incomplete, verdict, rulings)
+        except ReviewUnavailable as exc:
+            if needs_final:
+                if isinstance(exc.__cause__, (ReviewBudgetUnavailable, OpusCaseTooLarge)):
+                    room.release_final(prior["id"], fingerprint)
+                else:
+                    room.finish_final(prior["id"], fingerprint, "unavailable", str(exc))
+            elif isinstance(exc, ReviewUnreadable):
+                held = self._recover_action_question(exc.__cause__, batch, call_id, proposal_key, scope)
+                if held is not None:
                     return held
-            concern_hold = None
-            if item:
-                ruling = verdict["concern"]
-                self._record_ruling(item, ruling)
-                reviewed.add((item["id"], item["version"] + 1))
-                if ruling["decision"] == "ask_operator" and (name in ruling["tools"] or "*" in ruling["tools"]):
-                    concern_hold = self._concern_hold(self._concern_question(item, ruling["reason"]))
-            if verdict["decision"] == "deny":
-                with database(self.path) as db:
-                    db.execute("INSERT OR REPLACE INTO action_refusals VALUES(?,?,?)",
-                               (self.thread, proposal_key, verdict["reason"]))
-                self._event("opus_denied", name, call_id)
-                return {"error": "Claude 3 Opus denied this action.", "judgment": verdict["reason"]}
-            if verdict["decision"] == "ask_operator":
-                question_id = room.open(self.thread, scope, name, call_id, describe_action(name, args),
-                                        _review_excerpt(batch), verdict["reason"])
-                self._event("opus_asked_operator", name, call_id)
-                return self._waiting(question_id, verdict["reason"])
-            if concern_hold:
-                return concern_hold
-        with database(self.path) as db:
-            db.execute("BEGIN IMMEDIATE")
-            if any((f["id"], f["version"]) not in reviewed for f in concerns.list_open(db, self.thread, name)):
-                return {"error": "A context concern changed during review. The proposal was held for a fresh assessment."}
-            latest = db.execute("SELECT call_id,code,concern_id FROM incomplete_action_reviews "
-                                "WHERE thread=? AND proposal=?", (self.thread, proposal_key)).fetchone()
-            if latest != incomplete:
-                return {"error": "The proposal's review changed. The action was held for a fresh assessment."}
-            current_refusal = db.execute("SELECT reason FROM action_refusals WHERE thread=? AND proposal=?",
-                                         (self.thread, proposal_key)).fetchone()
-            if current_refusal != refusal:
-                return {"error": "The proposal's prior denial changed. The action was held for a fresh assessment."}
-            if incomplete:
-                db.execute("DELETE FROM incomplete_action_reviews WHERE thread=? AND proposal=?",
-                           (self.thread, proposal_key))
-            if refusal:
-                db.execute("DELETE FROM action_refusals WHERE thread=? AND proposal=? AND reason=?",
-                           (self.thread, proposal_key, refusal[0]))
+            raise
+        if needs_final:
+            room.finish_final(prior["id"], fingerprint, verdict["decision"], verdict["reason"])
+        concern_hold = None
+        for item, ruling in zip(findings, rulings, strict=True):
+            if ruling["decision"] == "ask_operator":
+                question = self._concern_question(item, ruling["reason"])
+                if name in ruling["tools"] or "*" in ruling["tools"]:
+                    concern_hold = self._concern_hold(question)
+        if verdict["decision"] == "deny":
+            self._event("opus_denied", name, call_id)
+            return {"error": "Claude 3 Opus denied this action.", "judgment": verdict["reason"]}
+        if verdict["decision"] == "ask_operator":
+            question_id = room.open(self.thread, scope, name, call_id, describe_action(name, args),
+                                    _review_excerpt(batch), verdict["reason"])
+            self._event("opus_asked_operator", name, call_id)
+            return self._waiting(question_id, verdict["reason"])
+        if concern_hold:
+            return concern_hold
         self._event("opus_allowed", name, call_id)
         return None
+
+    def _recover_action_question(self, error, batch, call_id, proposal, scope):
+        action_question = batch.get("operator_question_available") and error.action_question
+        concern_question = batch.get("concern_question_available") and error.concern_question
+        if not (action_question or concern_question):
+            return None
+        item = batch.get("concern_review")
+        name = batch["tool"]
+        with database(self.path) as db:
+            db.execute("INSERT OR REPLACE INTO incomplete_action_reviews VALUES(?,?,?,?,?)",
+                       (self.thread, proposal, call_id, error.code, None if action_question else item["id"]))
+        self._event("tool_review_unreadable", name, call_id)
+        if action_question:
+            self.operator_room.open(self.thread, scope, name, call_id, describe_action(name, batch["arguments"]),
+                                    recovered_excerpt(error, _review_excerpt(batch)), action_question)
+            row = self.operator_room.case(self.thread, scope)
+        else:
+            row = self._recover_concern_question(item, error)
+        held = self._concern_hold(row)
+        held["error"] = f"Opus's ruling could not be validated ({error.code}). " + held["error"]
+        return held
+
+    def _apply_action_verdict(self, call_id, name, proposal, findings, skipped, refusal, incomplete, verdict, rulings):
+        """Commit every matching concern disposition and the proposal decision atomically."""
+        reviewed = skipped | {(item["id"], item["version"]) for item in findings}
+        with database(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            if any((item["id"], item["version"]) not in reviewed for item in concerns.list_open(db, self.thread, name)):
+                raise ReviewUnavailable("A context concern changed during review. The proposal needs a fresh assessment")
+            latest = db.execute("SELECT call_id,code,concern_id FROM incomplete_action_reviews WHERE thread=? AND proposal=?",
+                                (self.thread, proposal)).fetchone()
+            current_refusal = db.execute("SELECT reason FROM action_refusals WHERE thread=? AND proposal=?",
+                                         (self.thread, proposal)).fetchone()
+            if latest != incomplete or current_refusal != refusal:
+                raise ReviewUnavailable("The proposal's prior review changed. The proposal needs a fresh assessment")
+            for item, ruling in zip(findings, rulings, strict=True):
+                if not concerns.record(db, self.thread, item["id"], item["version"], ruling["decision"],
+                                       ruling["reason"], ruling["tools"]):
+                    raise ReviewUnavailable("A context concern changed during review. The proposal needs a fresh assessment")
+            if verdict["decision"] == "deny":
+                db.execute("INSERT OR REPLACE INTO action_refusals VALUES(?,?,?)",
+                           (self.thread, proposal, verdict["reason"]))
+            elif verdict["decision"] == "ask_operator":
+                # If the process stops before the room saves the popup, a retry
+                # still needs a valid ruling even when this reply retired all watches.
+                db.execute("INSERT OR REPLACE INTO incomplete_action_reviews VALUES(?,?,?,?,NULL)",
+                           (self.thread, proposal, call_id, "pending_operator_question"))
+                return
+            for ruling in rulings:
+                if ruling["decision"] == "ask_operator" and ("*" in ruling["tools"] or name in ruling["tools"]):
+                    db.execute("INSERT OR REPLACE INTO incomplete_action_reviews VALUES(?,?,?,?,?)",
+                               (self.thread, proposal, call_id, "pending_concern_question", ruling["id"]))
+                    return
+            if verdict["decision"] == "allow" and refusal:
+                db.execute("DELETE FROM action_refusals WHERE thread=? AND proposal=?", (self.thread, proposal))
+            if incomplete:
+                db.execute("DELETE FROM incomplete_action_reviews WHERE thread=? AND proposal=?", (self.thread, proposal))
 
     def _concern_hold(self, row):
         if row["status"] == "pending":
@@ -710,27 +764,18 @@ class Supervisor:
                          "Leave this action pending. The host will notify you when Mike answers.",
                 "review_id": question_id, "question": question}
 
-    def _final_judgment(self, prior, fingerprint, batch):
-        room, question_id = self.operator_room, prior["id"]
-        if room.claim_final(question_id, fingerprint) != "claimed":
-            raise ReviewUnavailable(f"The final review for question #{question_id} was already claimed")
-        try:
-            verdict = self._judgment(batch)
-        except ReviewUnavailable as exc:
-            if isinstance(exc.__cause__, (ReviewBudgetUnavailable, OpusCaseTooLarge)):
-                room.release_final(question_id, fingerprint)
-            else:
-                room.finish_final(question_id, fingerprint, "unavailable", str(exc))
-            raise
-        room.finish_final(question_id, fingerprint, verdict["decision"], verdict["reason"])
-        return verdict
-
     def _judgment(self, case):
         try:
             verdict = self.review(case)
+            if not isinstance(verdict, dict):
+                raise OpusResponseError("invalid_verdict")
             if "concern_review" in case:
-                item = case["concern_review"]
-                ruling = verdict.get("concern") if isinstance(verdict, dict) else None
+                items, rulings = [case["concern_review"]], [verdict.get("concern")]
+            else:
+                items, rulings = case.get("concern_reviews", []), verdict.get("concerns", [])
+            if not isinstance(rulings, list) or len(items) != len(rulings):
+                raise OpusResponseError("invalid_concern_ruling")
+            for item, ruling in zip(items, rulings, strict=True):
                 if (not isinstance(ruling, dict) or type(ruling.get("id")) is not int or ruling["id"] != item["id"]
                         or ruling.get("decision") not in ("retire", "watch", "ask_operator")
                         or not isinstance(ruling.get("reason"), str) or not ruling["reason"].strip()
@@ -742,10 +787,10 @@ class Supervisor:
                                             or len(tools) != len(set(tools)))):
                     raise OpusResponseError("invalid_concern_scope")
                 if ruling["decision"] == "ask_operator" and (not case.get("concern_question_available")
-                        or "concern_attestation" in case or len(ruling["reason"]) > OPERATOR_QUESTION_LIMIT):
+                        or len(items) != 1 or "concern_attestation" in case or len(ruling["reason"]) > OPERATOR_QUESTION_LIMIT):
                     raise OpusResponseError("invalid_concern_question")
-                if "tool" not in case:
-                    return verdict
+            if items and "tool" not in case:
+                return verdict
             accepts_question = (case.get("operator_question_available") is True and
                                 "operator_attestation" not in case and self.operator_room is not None)
             decisions = ("allow", "deny", "ask_operator") if accepts_question else ("allow", "deny")

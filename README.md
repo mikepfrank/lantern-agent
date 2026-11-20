@@ -64,6 +64,8 @@ State defaults to `%LOCALAPPDATA%\Lantern` on Windows and `~/.local/state/lanter
 
 ## Supervision
 
+Mike’s standing policy authorizes Lantern to write private notes, inspect filtered diagnostics, and report to Mike in their private room. This includes documenting or criticizing a review and suggesting a fix. Luna screens for concrete actions or plans with material consequences. For example, diagnosing a failed tool call in a private note is ordinary work. Sending that same note to an outside recipient introduces a disclosure that may need review.
+
 When a disputed action depends on what Mike authorized, Opus can send one question to the private browser room. The dialog shows the action, supporting excerpt and question. **Later** leaves it open for another time. Type the scope you intend in your own words. The host records your exact answer with the question ID and timestamp and notifies Lantern in the shared conversation. The host also supplies recent operator messages to Opus on referrals.
 
 Waiting and checking the inbox use no model calls. If Lantern submits a fresh proposal for the disputed action, Opus gets one final call with your answer and the proposal. Its judgment appears in chat. The original tool call stays in the history. For later reviews about the same workspace operation and file, the host can supply your earlier answer as evidence.
@@ -76,6 +78,8 @@ Each new concern from a context scan gets a permanent ID and goes to Opus immedi
 
 A watch can apply to a particular use of a tool. For example, a watch on publishing private notes can coexist with an ordinary chess journal entry. When the watch applies to a proposal, one Opus response decides both whether that action may proceed and whether to keep the watch. Each new proposal still goes through Luna. An exact repeat of an action Opus denied under this protocol requires a fresh Opus allowance before execution.
 
+When several watches apply to a proposal, Opus receives one case with all of them. It returns one action decision and one disposition per watch. An incomplete or stale set of dispositions holds the proposal. Across review types, Opus asks Mike only when a consequential decision turns on a specific fact only he can supply. Existing unanswered questions and individual denials keep their scope.
+
 For a question about a context concern, answer once in the private web room. The host queues a wake, obtains the final disposition, and posts the result in chat. A held tool needs a fresh proposal if Lantern still wants to perform it. If the final concern review was interrupted or unreadable, the chat notice gives the review ID. Run `lantern retry-concern REVIEW_ID` in the operator shell to reopen that question.
 
 Opus decides flagged actions before execution. It sees Luna's evidence, a concise context summary and Lantern's justification. Lantern receives Opus's explanation if the action is denied. When a required reviewer is unavailable the action is held. A voluntary consultation returns advice and a record of any Wikipedia or Crossref searches. Opus can request up to two short public keyword lookups per case. The operator mediates the queries and search results are treated as untrusted text. Codex binds tool names when a thread starts, so milestone 1 threads retain supervised chess, and a new thread adds direct Opus consultation.
@@ -87,6 +91,8 @@ Run `lantern opus-responses` to inspect recent Opus calls, or `lantern opus-resp
 The two supervisory vendors share a default allowance of $5 per UTC day. Set `LANTERN_REVIEW_DAILY_USD` in the operator environment to configure it. Each request reserves funds before dispatch. The ledger estimates spend from reported tokens, including cache reads and writes. An ambiguous billing outcome keeps its reservation for the day. Run `python -m lantern usage` to see spend, holds, token counts and mean latency for spot checks, tool checks, escalations and consultations, alongside the review outcomes. The rate schedules are documented by [OpenAI](https://developers.openai.com/api/docs/models/gpt-6-luna) and [Anthropic](https://www.anthropic.com/news/claude-3-family).
 
 ### Compare model costs
+
+The daily report from `lantern usage --day YYYY-MM-DD` includes `room_review_rates`. It counts questions opened in the private room and metered-ledger review requests to Opus, including context reviews and research rounds, per 100 distinct identified tool proposals screened by Luna. The rates exclude voluntary consultations and separate calibration threads. When a room tool screen lacks an ID, the report shows the counts and leaves the rates blank.
 
 From the Lightsail `lantern` account, use `lantern usage --day YYYY-MM-DD` for a UTC day's totals by model and review purpose, including the ratio of supervisor spend to Qwen spend. Use `lantern usage --calls` for today's individual calls. Combine `--day`, `--batch N` and `--calls` to inspect one turn. Qwen's costs come from OpenRouter. Luna and Opus costs are calculated from vendor-reported token counts. Outstanding reservations appear separately.
 

@@ -32,6 +32,7 @@ from .workspace import WORKSPACE_TOOLS, workspace_tool
 from .persona import ThreadPersonas
 from . import opus
 from .luna import Luna
+from .review_policy import STANDING_POLICY
 from .review_vendors import DEFAULT_DAILY_USD, ReviewBudgetUnavailable, ReviewerVendors
 from .supervision import Supervisor, review_summary, supervised_tools
 from .transport import (
@@ -355,7 +356,7 @@ async def main(args):
                                     unregistered=partial(for_tool, "unregistered", None, supervisor.unregistered),
                                     resuming=bool(thread), managed_registry=store is not None,
                                     reviewed_calls=supervisor.reviewed_calls,
-                                    operator_context=context,
+                                    operator_context=(context + "\n\n" + STANDING_POLICY if private_chat and independent else context),
                                     handoff_due=(lambda: ledger.handoff_reminder_due(supervisor.thread))
                                     if independent else None)
 

@@ -90,3 +90,23 @@ class UsageReportTests(unittest.TestCase):
         for value in (0, True, -1):
             with self.assertRaises(ValueError):
                 usage_report(self.state, DAY, batch=value)
+
+    def test_daily_room_rates_count_each_proposal_and_question_once(self):
+        from lantern.usage_report import _room_review_rates
+
+        with closing(sqlite3.connect(self.state / "chat.sqlite")) as db, db:
+            db.execute("CREATE TABLE room(id INTEGER, thread_id TEXT)")
+            db.execute("INSERT INTO room VALUES(1, 'private')")
+            db.execute("CREATE TABLE operator_reviews(thread TEXT, asked_at TEXT)")
+            db.executemany("INSERT INTO operator_reviews VALUES(?,?)",
+                           [("private", DAY), ("sandbox", DAY), ("private", "2026-11-18")])
+        screens = [{"vendor": "luna", "purpose": "tool", "thread_id": "private", "tool_call_id": call}
+                   for call in ("a", "a", "b")]
+        reviews = [{"vendor": "opus", "purpose": purpose, "thread_id": room}
+                   for purpose, room in [("escalation", "private"), ("context_review", "private"),
+                                         ("consult", "private"), ("escalation", "sandbox")]]
+        rates = _room_review_rates(self.state, DAY, screens + reviews)
+        self.assertEqual((rates["screened_proposals_with_id"], rates["questions_per_100_proposals"],
+                          rates["opus_review_calls_per_100_proposals"]), (2, 50, 100))
+        historical = _room_review_rates(self.state, DAY, screens + [dict(screens[0], tool_call_id=None)])
+        self.assertIsNone(historical["questions_per_100_proposals"])

@@ -9,8 +9,7 @@ fi
 uses_worker_release() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            worker|say|smoke|retry-concern) return 0 ;;
-            usage) test "$#" -eq 1; return ;;
+            worker|say|smoke|retry-concern|usage) return 0 ;;
             --private-lightsail-cli|--*=*) shift ;;
             --state|--codex|--persona|--heritage-dir)
                 [ "$#" -ge 2 ] || return 1
