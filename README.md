@@ -68,6 +68,8 @@ When a disputed action depends on what Mike authorized, Opus can send one questi
 
 Waiting and checking the inbox use no model calls. If Lantern submits a fresh proposal for the disputed action, Opus gets one final call with your answer and the proposal. Its judgment appears in chat. The original tool call stays in the history. For later reviews about the same workspace operation and file, the host can supply your earlier answer as evidence.
 
+If Opus asks a clear question in an otherwise invalid ruling, the host can still deliver that question. The proposed action stays on hold. When Opus asks about both the action and its broader context, the dialog shows the action question first and includes the context question in the supporting excerpt. You can address both in one answer.
+
 Lantern supplies a short justification with each tool call. Luna sees the proposed arguments, justification, and recent conversation. On the first model request in a thread and every 12 requests thereafter, it also screens the full visible context, including instructions, conversation, and tool definitions. Provider-private reasoning items are excluded. The request count and unresolved findings survive restarts. Set `LANTERN_SPOT_EVERY` to change the interval.
 
 Each new concern from a context scan gets a permanent ID and goes to Opus immediately. Opus can close the incident as resolved, keep watch on specified operations and tools, or ask Mike a question. The host records the reason and scope. Luna receives up to 16 recent concern records on later scans. When old text resurfaces, including in a compaction summary, Luna can cite the original ID. Material new evidence receives its own review and can link back to the earlier ruling.

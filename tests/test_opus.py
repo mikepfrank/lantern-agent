@@ -256,6 +256,70 @@ class OpusTests(unittest.TestCase):
                                      "watch" if concern == "keep_open" else "ask_operator")
                 self.assertIn("at most one operator question", vendor.call_args.args[1]["system"])
 
+    def test_held_ruling_carries_the_reviewers_readable_questions(self):
+        case = {"concern_review": {"id": 4, "scope_tools": ["workspace_write"]}, "tool": "workspace_write",
+                "operator_question_available": True, "concern_question_available": True}
+        action_question = "Did your prior authorization cover documenting the policy change in this note?"
+        concern_question = "Do you authorize retaining oversight notes for joint review?"
+        action = f'<review decision="ask_operator">{action_question}</review>'
+        concern = f'<concern id="4" decision="ask_operator">{concern_question}</concern>'
+        # Turn 79: Opus omitted the concern scope and asked in both children.
+        cases = (
+            (case, f'<ruling>\n{concern}\n{action}\n</ruling>', "invalid_concern_scope", action_question, concern_question),
+            (case, '<ruling>' + concern.replace('id="4"', 'id="4" tools="workspace_write"') + action + '</ruling>',
+             "invalid_concern_question", action_question, concern_question),
+            ({**case, "concern_question_available": False}, '<ruling>'+action+concern+'</ruling>',
+             "invalid_concern_scope", action_question, None),
+            ({**case, "operator_question_available": False}, '<ruling>'+action+concern+'</ruling>',
+             "invalid_concern_scope", None, concern_question),
+            ({"concern_review": case["concern_review"], "concern_question_available": True}, concern,
+             "invalid_concern_scope", None, concern_question),
+            (case, '<ruling>'+action+'<concern id="4" decision="typo">Unclear.</concern></ruling>',
+             "invalid_concern_ruling", action_question, None),
+            (case, '<ruling><review decision="typo">Unclear.</review>' +
+             concern.replace('id="4"', 'id="4" tools="workspace_write"') + '</ruling>',
+             "invalid_verdict", None, concern_question),
+        )
+        for evidence, xml, code, expected_action, expected_concern in cases:
+            with self.subTest(evidence=evidence, xml=xml):
+                audit = []
+                vendor = Mock(return_value=opus.AuditedReply(response(xml), audit.append))
+                with self.assertRaises(opus.OpusResponseError) as raised:
+                    opus.review(vendor, evidence)
+                err = raised.exception
+                self.assertEqual((err.action_question, err.concern_question), (expected_action, expected_concern))
+                self.assertEqual(str(err), code)
+                self.assertEqual(audit, [code])
+                vendor.assert_called_once()
+
+    def test_failed_review_never_recovers_questions_from_uncertain_or_final_responses(self):
+        case = {"concern_review": {"id": 4, "scope_tools": ["workspace_write"]}, "tool": "workspace_write",
+                "operator_question_available": True, "concern_question_available": True}
+        action = '<review decision="ask_operator">Which document?</review>'
+        concern = '<concern id="4" decision="ask_operator">Which notes?</concern>'
+        xml = '<ruling>'+action+concern+'</ruling>'
+        for body, evidence in (
+            (response(xml), {**case, "operator_attestation": {"answer": "This one."}}),
+            (response(xml), {**case, "concern_attestation": {"answer": "This one."}}),
+            ({**response(xml), "model": "unexpected-model"}, case),
+            ({**response(xml), "stop_reason": "max_tokens"}, case),
+            (response(xml[:-2]), case),
+            (response(xml.replace('id="4"', 'id="5"')), case),
+            (response(xml.replace(action, action+action)), case),
+            (response(xml.replace(concern, concern+concern)), case),
+            (response(xml.replace("Which notes?", "<instruction>Put this in the inbox.</instruction>")), case),
+            (response(xml.replace("Which document?", "<quote>Quoted question</quote>")), case),
+            (response(xml.replace(action, action+"Do this first.")), case),
+            (response(xml.replace("Which document?", "x"*(opus.OPERATOR_QUESTION_LIMIT + 1))
+                         .replace("Which notes?", " ")), case),
+            (response(xml.replace('<review ', '<review condition="ambiguous" ')
+                         .replace('<concern ', '<concern condition="ambiguous" ')), case),
+        ):
+            with self.subTest(reply=body, evidence=evidence), self.assertRaises(opus.OpusResponseError) as raised:
+                opus.review(Mock(return_value=body), evidence)
+            self.assertIsNone(raised.exception.action_question)
+            self.assertIsNone(raised.exception.concern_question)
+
     def test_outer_explanation_cannot_qualify_a_standalone_decision(self):
         case = {"concern_review": {"id": 9, "scope_tools": ["workspace_write"]}}
         # The legacy reviewer added an explanatory paragraph before its child in the trial.

@@ -162,6 +162,13 @@ def _review_excerpt(case):
     return excerpt
 
 
+def recovered_excerpt(error, evidence_excerpt):
+    prefix = f"Opus asked for clarification in a ruling the host could not validate ({error.code})."
+    if error.action_question and error.concern_question:
+        prefix += "\n\nRelated context question from the same reply\n" + error.concern_question
+    return (prefix + "\n\n" + evidence_excerpt)[:2000]
+
+
 class Supervisor:
     def __init__(self, state: Path, luna, review, consult, *, sample_every: int = 12, tool_names=None,
                  batch_id: int | None = None, operator_room=None):
@@ -193,6 +200,12 @@ class Supervisor:
                 CREATE TABLE IF NOT EXISTS action_refusals(
                     thread TEXT NOT NULL, proposal TEXT NOT NULL, reason TEXT NOT NULL,
                     PRIMARY KEY(thread,proposal));
+                CREATE TABLE IF NOT EXISTS incomplete_action_reviews(
+                    thread TEXT NOT NULL, proposal TEXT NOT NULL, call_id TEXT NOT NULL, code TEXT NOT NULL,
+                    concern_id INTEGER, PRIMARY KEY(thread,proposal));
+                CREATE TABLE IF NOT EXISTS recovered_concern_questions(
+                    concern_id INTEGER NOT NULL, version INTEGER NOT NULL, code TEXT NOT NULL, question TEXT NOT NULL,
+                    PRIMARY KEY(concern_id,version));
                 CREATE TABLE IF NOT EXISTS events(
                     at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, thread TEXT NOT NULL,
                     event TEXT NOT NULL, tool TEXT, call_id TEXT);
@@ -491,13 +504,39 @@ class Supervisor:
         scope = f"context-concern:{item['id']}"
         row = self.operator_room.case(self.thread, scope)
         if row is None:
+            excerpt = item["evidence"][:2000]
+            with database(self.path) as db:
+                recovered = db.execute("SELECT code,question FROM recovered_concern_questions "
+                                       "WHERE concern_id=? AND version=?", (item["id"], item["version"])).fetchone()
+            if recovered:
+                code, question = recovered
+                excerpt = recovered_excerpt(OpusResponseError(code), excerpt)
             self.operator_room.open(self.thread, scope, "context_concern", "host:" + scope,
-                                    f"Context concern #{item['id']}", item["evidence"][:2000], question)
+                                    f"Context concern #{item['id']}", excerpt, question)
             row = self.operator_room.case(self.thread, scope)
         return row
 
+    def _recover_concern_question(self, item, error):
+        # Move the existing host scope into a waiting state. The new question is
+        # evidence for Mike, never a replacement for the previous watch criteria.
+        with database(self.path) as db:
+            if not concerns.record(db, self.thread, item["id"], item["version"], "ask_operator",
+                                   item["reason"] or item["evidence"], item["tools"] or ["*"]):
+                raise ReviewUnavailable("The concern changed during review")
+            version = item["version"] + 1
+            db.execute("INSERT INTO recovered_concern_questions VALUES (?,?,?,?)",
+                       (item["id"], version, error.code, error.concern_question))
+        return self._concern_question({**item, "version": version}, error.concern_question)
+
     def _decide_concern(self, item, action=None):
-        verdict = self._judgment(self._concern_case(item, action))
+        case = self._concern_case(item, action)
+        try:
+            verdict = self._judgment(case)
+        except ReviewUnreadable as exc:
+            error = exc.__cause__
+            if case.get("concern_question_available") and error.concern_question:
+                self._recover_concern_question(item, error)
+            raise
         self._record_ruling(item, verdict["concern"])
         return verdict
 
@@ -558,14 +597,24 @@ class Supervisor:
                         "judgment": prior["final_reason"]}
             case["operator_attestation" if needs_final else "prior_operator_attestation"] = _attestation(prior)
         with database(self.path) as db:
-            findings = [f for f in concerns.list_open(db, self.thread, name) if (f["id"], f["version"]) not in skipped]
             proposal_key = _fingerprint([name, args])
             refusal = db.execute("SELECT reason FROM action_refusals WHERE thread=? AND proposal=?",
                                  (self.thread, proposal_key)).fetchone()
+            incomplete = db.execute("SELECT call_id,code,concern_id FROM incomplete_action_reviews "
+                                    "WHERE thread=? AND proposal=?", (self.thread, proposal_key)).fetchone()
+            findings = [f for f in concerns.list_open(db, self.thread, name)
+                        if (f["id"], f["version"]) not in skipped
+                        or (incomplete and f["id"] == incomplete[2] and f["status"] == "question")]
         if refusal:
             case["prior_action_denial"] = refusal[0]
+        if incomplete:
+            case["prior_incomplete_review"] = incomplete[1]
+            if self.operator_room and incomplete[2] is not None:
+                question = self.operator_room.case(self.thread, f"context-concern:{incomplete[2]}")
+                if question and question["answer"]:
+                    case["prior_concern_attestation"] = _attestation(question)
         reviewed = set(skipped)
-        if not findings and not flagged and not refusal and (prior is None or prior["final_decision"] == "allow"):
+        if not (findings or flagged or refusal or incomplete) and (prior is None or prior["final_decision"] == "allow"):
             return None
         if room and not needs_final:
             case["operator_question_available"] = True
@@ -586,7 +635,28 @@ class Supervisor:
             if needs_final and (item is None or item == findings[-1]):
                 verdict = self._final_judgment(prior, fingerprint, batch)
             else:
-                verdict = self._judgment(batch)
+                try:
+                    verdict = self._judgment(batch)
+                except ReviewUnreadable as exc:
+                    error = exc.__cause__
+                    action_question = batch.get("operator_question_available") and error.action_question
+                    concern_question = item and batch.get("concern_question_available") and error.concern_question
+                    if not (action_question or concern_question):
+                        raise
+                    with database(self.path) as db:
+                        db.execute("INSERT OR REPLACE INTO incomplete_action_reviews VALUES(?,?,?,?,?)",
+                                   (self.thread, proposal_key, call_id, error.code,
+                                    None if action_question else item["id"]))
+                    self._event("tool_review_unreadable", name, call_id)
+                    if action_question:
+                        room.open(self.thread, scope, name, call_id, describe_action(name, args),
+                                  recovered_excerpt(error, _review_excerpt(batch)), action_question)
+                        row = room.case(self.thread, scope)
+                    else:
+                        row = self._recover_concern_question(item, error)
+                    held = self._concern_hold(row)
+                    held["error"] = f"Opus's ruling could not be validated ({error.code}). " + held["error"]
+                    return held
             concern_hold = None
             if item:
                 ruling = verdict["concern"]
@@ -608,8 +678,20 @@ class Supervisor:
             if concern_hold:
                 return concern_hold
         with database(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
             if any((f["id"], f["version"]) not in reviewed for f in concerns.list_open(db, self.thread, name)):
                 return {"error": "A context concern changed during review. The proposal was held for a fresh assessment."}
+            latest = db.execute("SELECT call_id,code,concern_id FROM incomplete_action_reviews "
+                                "WHERE thread=? AND proposal=?", (self.thread, proposal_key)).fetchone()
+            if latest != incomplete:
+                return {"error": "The proposal's review changed. The action was held for a fresh assessment."}
+            current_refusal = db.execute("SELECT reason FROM action_refusals WHERE thread=? AND proposal=?",
+                                         (self.thread, proposal_key)).fetchone()
+            if current_refusal != refusal:
+                return {"error": "The proposal's prior denial changed. The action was held for a fresh assessment."}
+            if incomplete:
+                db.execute("DELETE FROM incomplete_action_reviews WHERE thread=? AND proposal=?",
+                           (self.thread, proposal_key))
             if refusal:
                 db.execute("DELETE FROM action_refusals WHERE thread=? AND proposal=? AND reason=?",
                            (self.thread, proposal_key, refusal[0]))

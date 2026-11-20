@@ -4,10 +4,11 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock
 
+from lantern import concerns, opus
 from lantern.chat_store import ChatStore
 from lantern.opus import OpusCaseTooLarge
 from lantern.operator_review import ReviewRoom
-from lantern.supervision import Supervisor
+from lantern.supervision import Supervisor, database
 
 
 ASK = {"decision": "ask_operator", "reason": "Does your earlier approval cover this private file?"}
@@ -104,6 +105,98 @@ class OperatorSupervisionTests(unittest.TestCase):
         self.assertEqual([], self.room.pending())
         self.assertIn("error", self.write("repeat"))
         self.assertEqual(2, self.review.call_count)
+        self.execute.assert_not_called()
+
+    def watch_writes(self):
+        with database(self.gate.path) as db:
+            number = concerns.create(db, self.thread, 1, "The note quotes Mike.", "Check the note's scope.")
+            concerns.record(db, self.thread, number, 0, "watch", "All notes making claims about this review.",
+                            ["workspace_write"])
+        self.luna.screen.side_effect = lambda packet: (
+            {**CLEAR, "applicable_ids": [number]} if packet.get("scope_checks") else CLEAR)
+        return number
+
+    def use_opus_reply(self, xml):
+        outcomes = []
+        vendor = Mock(return_value=opus.AuditedReply({
+            "model": opus.OPUS_MODEL, "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": xml}]}, outcomes.append))
+        self.review.side_effect = lambda case: opus.review(vendor, case)
+        return outcomes
+
+    def test_invalid_combined_ruling_opens_one_action_question_keeps_watch_and_requires_fresh_review(self):
+        number = self.watch_writes()
+        action, concern = "Did you approve this addition?", "Should the wider policy stay in place?"
+        audit = self.use_opus_reply(f'<ruling><review decision="ask_operator">{action}</review>'
+                                    f'<concern id="{number}" decision="ask_operator">{concern}</concern></ruling>')
+        result = self.write("held")
+        self.assertEqual(audit, ["invalid_concern_scope"])
+        self.assertIn("invalid_concern_scope", result["error"])
+        question, = self.room.pending()
+        self.assertEqual((question["id"], question["tool"], question["question"]),
+                         (result["review_id"], "workspace_write", action))
+        for text in (concern, "invalid_concern_scope", self.text):
+            self.assertIn(text, question["excerpt"])
+        with database(self.gate.path) as db:
+            watch = concerns.get(db, self.thread, number)
+            self.assertEqual((watch["version"], watch["status"]), (1, "watch"))
+        self.assertEqual(self.write("duplicate")["review_id"], question["id"])
+        self.assertEqual(self.review.call_count, 1)
+        self.resume(question["id"])
+        self.assertEqual(self.review.call_count, 1)
+        self.use_opus_reply(f'<ruling><review decision="allow">This draft is approved.</review>'
+                            f'<concern id="{number}" decision="close_resolved">Clarified.</concern></ruling>')
+        self.assertEqual(self.write("fresh"), {"saved": True})
+        self.assertEqual(self.review.call_args.args[0]["operator_attestation"]["answer"], self.answer)
+        self.assertEqual(self.write("held"), result)
+        self.execute.assert_called_once()
+        self.assertEqual(self.review.call_count, 2)
+
+    def test_recovered_concern_question_preserves_scope_and_requires_current_action_ruling_after_retirement(self):
+        number = self.watch_writes()
+        question = "May private observations be saved?"
+        audit = self.use_opus_reply(f'<ruling><review decision="deny">Hold the draft.</review>'
+                                    f'<concern id="{number}" decision="ask_operator">{question}</concern></ruling>')
+        result = self.write("held")
+        row, = self.room.pending()
+        self.assertEqual((row["id"], row["question"], row["tool"]), (result["review_id"], question, "context_concern"))
+        self.assertEqual(audit, ["invalid_concern_scope"])
+        self.assertIn("invalid_concern_scope", row["excerpt"])
+        with database(self.gate.path) as db:
+            held = concerns.get(db, self.thread, number)
+            self.assertEqual((held["status"], held["reason"], held["tools"]),
+                             ("question", "All notes making claims about this review.", ["workspace_write"]))
+        self.luna.screen.side_effect = lambda packet: (
+            {**CLEAR, "applicable_ids": []} if packet.get("scope_checks") else CLEAR)
+        self.assertEqual(self.write("again")["review_id"], row["id"])
+        self.assertEqual(self.review.call_count, 1)
+        self.use_opus_reply(f'<concern id="{number}" decision="close_resolved">Concern resolved.</concern>')
+        self.resume_context_question(row["id"], self.answer)
+        self.assertEqual(self.review.call_count, 2)
+        self.use_opus_reply('<review decision="deny">Do not save this draft.</review>')
+        self.assertIn("denied", self.write("fresh")["error"])
+        self.assertEqual(self.review.call_args.args[0]["prior_concern_attestation"]["answer"], self.answer)
+        self.assertEqual(self.review.call_count, 3)
+        self.execute.assert_not_called()
+        self.assertFalse(self.room.pending())
+
+    def test_invalid_initial_concern_scope_waits_with_full_coverage(self):
+        self.gate = self.context_worker()
+        self.luna.screen.side_effect = lambda packet: FLAG if packet["kind"] == "context" else CLEAR
+        question = "Should the host retain this concern?"
+        self.review.side_effect = lambda case: opus.review(
+            Mock(return_value={"model": opus.OPUS_MODEL, "stop_reason": "end_turn", "content": [{
+                "type": "text", "text": f'<concern id="{case["concern_review"]["id"]}" '
+                                        f'decision="ask_operator">{question}</concern>'}]}), case)
+        self.gate.observe({"input": "Check the private-note policy."})
+        number = self.review.call_args.args[0]["concern_review"]["id"]
+        row, = self.room.pending()
+        with database(self.gate.path) as db:
+            held = concerns.get(db, self.thread, number)
+            self.assertEqual((held["status"], held["tools"]), ("question", ["*"]))
+        self.assertEqual(row["question"], question)
+        self.assertEqual(self.write("held")["review_id"], row["id"])
+        self.assertEqual(self.review.call_count, 1)
         self.execute.assert_not_called()
 
     def test_size_rejection_before_provider_dispatch_releases_final_claim(self):

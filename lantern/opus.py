@@ -35,6 +35,8 @@ class OpusResponseError(ValueError):
 
     def __init__(self, code: str):
         self.code = code
+        self.action_question: str | None = None
+        self.concern_question: str | None = None
         super().__init__(code)
 
 
@@ -94,7 +96,10 @@ def _concern_format(number, tool, can_ask, can_ask_concern):
             instruction += (
                 'Ask at most one operator question across both decisions. If a shared fact is missing, '
                 'ask it once in the concern and decide the present action conservatively, or ask about '
-                'the action and keep the concern open within its scope. '
+                'the action and keep the concern open within its scope. The latter format is '
+                '<ruling><review decision="ask_operator">one question about the proposal</review>'
+                f'<concern id="{number}" decision="keep_open" tools="relevant_tool">trigger and release '
+                'condition</concern></ruling>. Replace the example text and tool with the specifics of this case. '
             )
     else:
         instruction += 'There is no proposed action. Return just the single concern element as the XML root. '
@@ -322,17 +327,7 @@ def _action_decision(reply, element, can_ask):
     return {"decision": decision, "reason": reason}
 
 
-def _ruling(reply, root, concern, *, tool, can_ask, can_ask_concern):
-    if tool:
-        children = {child.tag: child for child in root}
-        if (root.tag != "ruling" or root.attrib or (root.text or "").strip() or set(children) != {"concern", "review"}
-                or len(root) != 2 or any((child.tail or "").strip() for child in root)):
-            raise _invalid(reply, "invalid_concern_ruling")
-        element = children["concern"]
-    elif root.tag == "concern":
-        element = root
-    else:
-        raise _invalid(reply, "invalid_concern_ruling")
+def _concern_decision(reply, element, concern, can_ask_concern):
     reason = _plain_text(reply, element)
     decision = {"close_resolved": "retire", "keep_open": "watch",
                 "ask_operator": "ask_operator"}.get(element.get("decision"))
@@ -348,10 +343,45 @@ def _ruling(reply, root, concern, *, tool, can_ask, can_ask_concern):
         raise _invalid(reply, "invalid_concern_scope")
     if decision == "ask_operator" and (not can_ask_concern or len(reason) > OPERATOR_QUESTION_LIMIT):
         raise _invalid(reply, "invalid_concern_question")
-    result = _action_decision(reply, children["review"], can_ask) if tool else {}
-    if decision == "ask_operator" and result.get("decision") == "ask_operator":
-        raise _invalid(reply, "invalid_concern_question")
-    result["concern"] = {"id": concern["id"], "decision": decision, "reason": reason, "tools": scopes}
+    return {"id": concern["id"], "decision": decision, "reason": reason, "tools": scopes}
+
+
+def _question_text(element, enabled):
+    if not enabled or element is None or element.get("decision") != "ask_operator":
+        return None
+    attrs = {"decision"} if element.tag == "review" else {"id", "decision", "tools"}
+    text = (element.text or "").strip()
+    if set(element.attrib) <= attrs and 0 < len(text) <= OPERATOR_QUESTION_LIMIT:
+        return text
+    return None
+
+
+def _ruling(reply, root, concern, *, tool, can_ask, can_ask_concern):
+    action = None
+    if tool:
+        children = {child.tag: child for child in root}
+        if (root.tag != "ruling" or root.attrib or (root.text or "").strip() or set(children) != {"concern", "review"}
+                or len(root) != 2 or any((child.tail or "").strip() for child in root)):
+            raise _invalid(reply, "invalid_concern_ruling")
+        element, action = children["concern"], children["review"]
+    elif root.tag == "concern":
+        element = root
+    else:
+        raise _invalid(reply, "invalid_concern_ruling")
+    try:
+        disposition = _concern_decision(reply, element, concern, can_ask_concern)
+        result = _action_decision(reply, action, can_ask) if tool else {}
+        if disposition["decision"] == "ask_operator" and result.get("decision") == "ask_operator":
+            raise _invalid(reply, "invalid_concern_question")
+    except OpusResponseError as exc:
+        # Only quote a question whose case and plain-text leaves are unambiguous.
+        # The original error and its audit record still hold the entire ruling.
+        if element.get("id") == str(concern["id"]) and not len(element) and (action is None or not len(action)):
+            exc.action_question = _question_text(action, can_ask)
+            exc.concern_question = _question_text(element, can_ask_concern)
+        raise
+    result["concern"] = disposition
+    decision = disposition["decision"]
     outcome = "concern_" + decision
     if tool:
         outcome = "verdict_" + result["decision"] + "_" + outcome
