@@ -29,6 +29,38 @@ class ReviewVendorTests(unittest.TestCase):
         self.assertEqual(usage_cost("opus", {"input_tokens": 1000, "output_tokens": 20})[-1],
                          Decimal(".0165"))
 
+    def test_one_day_grant_admits_one_more_request_and_expires_with_process_running(self):
+        self.ledger = ReviewerVendors(self.state, Decimal(".001"))
+        day = "2026-12-31"
+        with closing(sqlite3.connect(self.ledger.path)) as db, db:
+            db.executemany("""INSERT INTO calls(id,at,day,vendor,purpose,reserved,cost,status)
+                VALUES(?,?,?,'luna','spot',?,?,?)""",
+                [("prior-cost", day, day, 800000, 750000, "metered"),
+                 ("prior-hold", day, day, 100000, None, "ambiguous")])
+        with patch("lantern.review_vendors.datetime") as clock, \
+                patch("lantern.review_vendors.request_json", side_effect=OSError("lost reply")) as post:
+            clock.now.return_value = datetime(2026, 12, 31, 23, 59, tzinfo=timezone.utc)
+            with self.assertRaises(ReviewBudgetUnavailable):
+                self.call()
+            with closing(sqlite3.connect(self.ledger.path)) as db, db:
+                db.execute("INSERT INTO review_daily_grants VALUES (?,?)", (day, 1500000))
+            with self.assertRaises(VendorError):  # The dispatch reached the provider and left a hold.
+                self.call()
+            post.assert_called_once()
+            self.assertEqual(self.ledger.today()["limit_usd"], "0.0025")
+            self.assertEqual(self.ledger.today()["estimated_spend_usd"], "0.00075")
+            self.assertGreater(Decimal(self.ledger.today()["reserved_usd"]), Decimal(".0001"))
+            with self.assertRaises(ReviewBudgetUnavailable):
+                self.call()
+            clock.now.return_value = datetime(2027, 1, 1, tzinfo=timezone.utc)
+            with self.assertRaises(ReviewBudgetUnavailable) as exhausted:
+                self.call()
+            self.assertEqual(exhausted.exception.day, "2027-01-01")
+            self.assertEqual(self.ledger.today()["limit_usd"], "0.001")
+            post.assert_called_once()
+        restarted = ReviewerVendors(self.state, self.ledger.limit)
+        self.assertEqual(restarted.today(day=day)["limit_usd"], "0.0025")
+
     def test_incomplete_response_stays_reserved_after_restart(self):
         with patch("lantern.review_vendors.request_json", return_value={"model":MODEL, "usage":{}}):
             with self.assertRaises(VendorError):

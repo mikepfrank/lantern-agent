@@ -123,6 +123,9 @@ class ReviewerVendors:
         self.path = state / "review-costs.sqlite"
         with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("BEGIN IMMEDIATE")
+            db.execute("""CREATE TABLE IF NOT EXISTS review_daily_grants (
+                day TEXT PRIMARY KEY NOT NULL, extra_units INTEGER NOT NULL
+                CHECK(typeof(extra_units)='integer' AND extra_units>=0))""")
             db.execute("""CREATE TABLE IF NOT EXISTS calls (
                 id TEXT PRIMARY KEY, at TEXT NOT NULL, day TEXT NOT NULL, vendor TEXT NOT NULL,
                 purpose TEXT NOT NULL, reserved INTEGER NOT NULL, cost INTEGER,
@@ -137,6 +140,10 @@ class ReviewerVendors:
                 request_id TEXT PRIMARY KEY REFERENCES calls(id), http_status INTEGER,
                 capture_status TEXT NOT NULL, body_bytes INTEGER, sha256 TEXT,
                 failure_code TEXT, validation TEXT)""")
+
+    def _limit_for_day(self, db, day):
+        grant = db.execute("SELECT extra_units FROM review_daily_grants WHERE day=?", (day,)).fetchone()
+        return self.limit + Decimal(grant[0]) / UNITS_PER_DOLLAR if grant else self.limit
 
     def call(self, vendor, payload, *, purpose, thread_id=None, batch_id=None, tool=None, tool_call_id=None):
         """Attribute each paid call to the host's active thread, batch and reviewed tool."""
@@ -175,7 +182,7 @@ class ReviewerVendors:
             day = now.date().isoformat()
             used, = db.execute("SELECT COALESCE(SUM(COALESCE(cost,reserved)),0) FROM calls WHERE day=?",
                                (day,)).fetchone()
-            if used + held > units(self.limit):
+            if used + held > units(self._limit_for_day(db, day)):
                 raise ReviewBudgetUnavailable(day)
             db.execute("""INSERT INTO calls(id,at,day,vendor,purpose,reserved,status,thread_id,batch_id,tool,tool_call_id)
                           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
@@ -244,7 +251,9 @@ class ReviewerVendors:
     def today(self, *, day: str | None = None):
         day = day or datetime.now(timezone.utc).date().isoformat()
         with closing(sqlite3.connect(self.path)) as db:
+            db.execute("BEGIN")
             db.row_factory = sqlite3.Row
+            effective_limit = self._limit_for_day(db, day)
             rows = db.execute("""SELECT vendor, purpose, COUNT(*) AS calls, COALESCE(SUM(cost),0) AS cost,
                 COALESCE(SUM(CASE WHEN cost IS NULL THEN reserved ELSE 0 END),0) AS held,
                 COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens,
@@ -258,7 +267,7 @@ class ReviewerVendors:
             entry["reserved_usd"] = str(Decimal(entry.pop("held")) / UNITS_PER_DOLLAR)
             breakdown.append(entry)
         return {
-            "utc_day": day, "limit_usd": str(self.limit),
+            "utc_day": day, "limit_usd": str(effective_limit),
             "estimated_spend_usd": str(Decimal(sum(row["cost"] for row in rows)) / UNITS_PER_DOLLAR),
             "reserved_usd": str(Decimal(sum(row["held"] for row in rows)) / UNITS_PER_DOLLAR),
             "by_purpose": breakdown,

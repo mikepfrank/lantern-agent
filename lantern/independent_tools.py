@@ -64,7 +64,7 @@ def budget_status(arguments: dict, ledger: Budget, vendors: ReviewerVendors, *, 
     reviews = vendors.today(day=day)
     qwen_available = DAILY_USD - Decimal(charges["spent_usd"]) - Decimal(charges["reserved_usd"])
     reserve = Decimal(ledger.reservation) / UNITS_PER_DOLLAR
-    review_available = (vendors.limit - Decimal(reviews["estimated_spend_usd"])
+    review_available = (Decimal(reviews["limit_usd"]) - Decimal(reviews["estimated_spend_usd"])
                         - Decimal(reviews["reserved_usd"]))
     return {
         "as_of_utc": now.isoformat(),
@@ -77,7 +77,7 @@ def budget_status(arguments: dict, ledger: Budget, vendors: ReviewerVendors, *, 
             "can_reserve_next_request": qwen_available >= reserve,
         },
         "supervisors": {
-            "limit_usd": str(vendors.limit), "estimated_spend_usd": reviews["estimated_spend_usd"],
+            "limit_usd": reviews["limit_usd"], "estimated_spend_usd": reviews["estimated_spend_usd"],
             "reserved_usd": reviews["reserved_usd"], "available_usd": str(max(0, review_available)),
         },
     }
