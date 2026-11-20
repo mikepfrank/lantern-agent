@@ -111,14 +111,21 @@ fi
 if systemctl is-active --quiet "$unit"; then
     coproc IDLE {
         sudo -n -u lantern /usr/bin/python3.12 -I -c '
+from datetime import datetime, timezone
 import sqlite3, sys
 with sqlite3.connect(sys.argv[1], timeout=5) as db:
     db.execute("BEGIN IMMEDIATE")
     busy, queued = db.execute("""SELECT EXISTS(SELECT 1 FROM batches WHERE status=?),
                                  EXISTS(SELECT 1 FROM inbox WHERE batch_id IS NULL)""", ("active",)).fetchone()
-    print("busy" if busy or queued else "idle", flush=True)
+    # A budget-paused turn cannot start. Its pending inbox row survives a worker restart.
+    paused = False
+    if queued and sys.argv[2] == "true" and db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type=? AND name=?", ("table", "scheduler")).fetchone():
+        row = db.execute("SELECT budget_until FROM scheduler WHERE id=1").fetchone()
+        paused = bool(row and row[0] and datetime.fromisoformat(row[0]) > datetime.now(timezone.utc))
+    print("busy" if busy or (queued and not paused) else "idle", flush=True)
     sys.stdin.readline()
-' "$state/chat.sqlite"
+' "$state/chat.sqlite" "$worker_only"
     }
     guard_pid=$IDLE_PID
     read -r -t 10 idle <&"${IDLE[0]}"

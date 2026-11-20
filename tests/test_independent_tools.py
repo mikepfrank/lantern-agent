@@ -30,6 +30,7 @@ class IndependentToolsTests(unittest.TestCase):
                                [("held", day, units(Decimal("1")), None),
                                 ("settled", day, units(Decimal("3")), units(Decimal("2.25")))])
             with closing(sqlite3.connect(vendors.path)) as db, db:
+                db.execute("INSERT INTO review_daily_grants VALUES(?,?)", (day, units(Decimal("1.25"))))
                 db.execute("""INSERT INTO calls(id,at,day,vendor,purpose,reserved,status)
                               VALUES('test',?,?,'opus','consult',?,'pending')""",
                            (day, day, units(Decimal(".125"))))
@@ -38,7 +39,8 @@ class IndependentToolsTests(unittest.TestCase):
             self.assertEqual(status["seconds_until_reset"], 1)
             self.assertEqual(status["reset_at_utc"], "2027-01-01T00:00:00+00:00")
             self.assertEqual(status["openrouter"]["available_usd"], "6.75")
-            self.assertEqual(status["supervisors"]["available_usd"], "4.875")
+            self.assertEqual(status["supervisors"]["limit_usd"], "6.25")
+            self.assertEqual(status["supervisors"]["available_usd"], "6.125")
             after = budget_status({}, ledger, vendors, now=datetime(2027, 1, 1, tzinfo=timezone.utc))
             self.assertEqual(after["seconds_until_reset"], 86400)
             self.assertEqual(after["openrouter"]["available_usd"], "10")
