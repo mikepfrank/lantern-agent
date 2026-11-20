@@ -91,6 +91,24 @@ class UsageReportTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 usage_report(self.state, DAY, batch=value)
 
+    def test_trial_charges_are_visible_by_exact_model_and_purpose(self):
+        self.legacy()
+        models = ("claude-3-opus-20240229", "claude-sonnet-4-6", "gpt-5.4")
+        with closing(sqlite3.connect(self.state / "review-costs.sqlite")) as db, db:
+            db.executemany("""INSERT INTO calls(id,day,vendor,purpose,reserved,cost,status)
+                              VALUES(?,?,?,'reviewer_trial',5000000,1000000,'metered')""",
+                           [(model, DAY, model) for model in models])
+        report = usage_report(self.state, DAY)
+        self.assertEqual(report["by_model"]["opus"]["calls"], 2)
+        self.assertEqual(report["supervisor_to_qwen_settled_cost_ratio"], .66)
+        trial_purposes = [p for p in report["reviews_by_purpose"] if p["purpose"] == "reviewer_trial"]
+        self.assertEqual([p["model"] for p in trial_purposes], list(models))
+        for model in models:
+            entry = report["by_model"][model]
+            self.assertEqual((entry["model_id"], entry["settled_spend_usd"], entry["calls"]), (model, "0.001", 1))
+            self.assertEqual(report["calls_without_batch_id_on_day"][model], 1)
+        self.assertEqual(usage_report(self.state, DAY, batch=5)["by_model"], {})
+
     def test_daily_room_rates_count_each_proposal_and_question_once(self):
         from lantern.usage_report import _room_review_rates
 

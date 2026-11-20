@@ -119,11 +119,17 @@ def usage_report(state: Path, day: str | None = None, *, calls: bool = False, ba
     daily = _read_day(state / "usage.sqlite", day, reviews=False)
     daily.extend(_read_day(state / "review-costs.sqlite", day, reviews=True))
     rows = daily if batch is None else [r for r in daily if r.get("batch_id") == batch]
+    # Trial rows carry their exact API model ID in the vendor field. Keep the
+    # established live model keys, even on days with no calls to those models.
+    trial_models = sorted({r["vendor"] for r in daily if r.get("purpose") == "reviewer_trial"})
+    models = MODELS.copy()
+    for model in trial_models:
+        models.setdefault(model, model)
     unassigned = {model: sum(r["vendor"] == model and r.get("batch_id") is None for r in daily)
-                  for model in MODELS}
+                  for model in models}
     by_model = {}
     by_purpose = []
-    for model, model_id in MODELS.items():
+    for model, model_id in models.items():
         matching = [r for r in rows if r["vendor"] == model]
         if batch is None or matching:
             by_model[model] = {"model_id": model_id, **_summarize(matching)}
@@ -138,7 +144,7 @@ def usage_report(state: Path, day: str | None = None, *, calls: bool = False, ba
         "calls_without_batch_id_on_day": unassigned,
         "by_model": by_model, "reviews_by_purpose": by_purpose,
         "supervisor_to_qwen_settled_cost_ratio": round(supervisors / qwen, 4) if qwen else None,
-        "cost_basis": "Qwen uses settled ledger charges. Luna and Opus use estimates from vendor token usage. "
+        "cost_basis": "Qwen uses settled ledger charges. Reviewer costs use estimates from vendor token usage. "
                       "The ratio uses settled amounts only. Token totals sum available counts.",
     }
     if batch is not None:
