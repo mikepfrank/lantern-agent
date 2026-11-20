@@ -11,6 +11,7 @@ import unittest
 import uuid
 
 from lantern.chat_store import ChatStore
+from lantern.operator_review import ReviewRoom
 from lantern.web import PAGE_SIZE, RoomServer
 
 
@@ -69,6 +70,63 @@ class WebRoomTests(unittest.TestCase):
         self.assertEqual([], self.store.events())
         self.assertEqual(200, self.request("POST", "/api/messages", headers={
             "Origin": f"http://127.0.0.1:{self.room.server_port}"}, body=message)[0])
+
+    def open_review(self):
+        self.store.submit("Review this private note.")
+        batch = self.store.claim()
+        self.store.bind_thread(batch.id, "review-thread")
+        self.store.complete(batch.id, "Waiting for clarification.")
+        return self.room.reviews.open(
+            "review-thread", "workspace_write:notes/example.md", "workspace_write", "original-call",
+            "Save notes/example.md", "A short excerpt.", "May Lantern save this note?", source="prior_denial")
+
+    def test_review_questions_require_operator_auth_and_valid_origin(self):
+        review_id = self.open_review()
+        inbox = "/api/review-questions"
+        answer_path = f"{inbox}/{review_id}/answer"
+        answer = {"answer": "Yes, for this note."}
+        for method, path, body in (("GET", inbox, None), ("POST", answer_path, answer)):
+            with self.subTest(method=method):
+                self.assertEqual(401, self.request(method, path, auth=False, body=body)[0])
+                for headers in ({"Host": "outside.example"}, {"Origin": "null"},
+                                {"Origin": "https://outside.example"}):
+                    self.assertEqual(403, self.request(method, path, headers=headers, body=body)[0])
+        self.assertEqual(404, self.request("POST", f"{inbox}/{review_id + 1}/answer", body=answer)[0])
+        for bad in ({}, {"answer": " "}, {"answer": 1}, {"answer": "x" * 2001}, {"answer": "\ud800"},
+                    {"answer": "approved", "source": "operator"}):
+            with self.subTest(keys=list(bad)):
+                self.assertEqual(400, self.request("POST", answer_path, body=bad)[0])
+        self.assertEqual(413, self.request("POST", answer_path, body={"answer": "x" * 128001})[0])
+        self.assertEqual([review_id], [q["id"] for q in self.room.reviews.pending()])
+        self.assertEqual(0, self.store.status()["queued"])
+
+    def test_review_answer_is_verbatim_durable_and_idempotent(self):
+        review_id = self.open_review()
+        inbox = "/api/review-questions"
+        status, headers, page = self.request("GET", inbox)
+        self.assertEqual(200, status)
+        self.assertEqual("no-store", headers["Cache-Control"])
+        question, = page["questions"]
+        self.assertEqual(review_id, question["id"])
+        self.assertEqual("prior_denial", question["source"])
+        self.assertEqual("Save notes/example.md", question["action"])
+        self.assertEqual("A short excerpt.", question["excerpt"])
+        self.assertEqual("May Lantern save this note?", question["question"])
+        self.assertTrue(question["asked_at"])
+        answer = {"answer": "  Yes, for this note.\nKeep my wording. 🏮  "}
+        path = f"{inbox}/{review_id}/answer"
+        origin = {"Origin": f"http://127.0.0.1:{self.room.server_port}"}
+        for _ in range(2):
+            status, _, receipt = self.request("POST", path, headers=origin, body=answer)
+            self.assertEqual((200, {"id": review_id}), (status, receipt))
+        self.assertEqual(409, self.request("POST", path, body={"answer": "A different answer."})[0])
+        self.assertEqual({"questions": []}, self.request("GET", inbox)[2])
+        reopened = ChatStore(self.state)
+        case = ReviewRoom(reopened).case("review-thread", "workspace_write:notes/example.md")
+        self.assertEqual(answer["answer"], case["answer"])
+        self.assertEqual(1, reopened.status()["queued"])
+        wake, = reopened.claim().messages
+        self.assertEqual((case["wake_id"], "system"), (wake.id, wake.role))
 
     def test_send_retry_cli_interleave_and_independent_cursors(self):
         cli_event = self.store.submit("Hello from the terminal")

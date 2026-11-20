@@ -7,6 +7,10 @@ const draft = byId("draft");
 const older = byId("older");
 const send = byId("send");
 const jump = byId("jump");
+const reviewDialog = byId("review-dialog");
+const reviewInbox = byId("review-inbox");
+const reviewAnswer = byId("review-answer");
+const reviewSubmit = byId("review-submit");
 const idleHint = matchMedia("(pointer: fine)").matches ? "Enter to send · Shift + Enter for a new line" : "";
 const storageKey = (name) => "lantern.room." + name;
 
@@ -37,6 +41,13 @@ let sending = false;
 let timer;
 let follow = true;
 let sendError = "";
+let reviewQuestions = [];
+let reviewId = null;
+let reviewSending = false;
+let reviewFetching = false;
+let reviewRevision = 0;
+let nextReviewPoll = 0;
+const deferredReviews = new Set();
 const shortTime = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
 function connection(state, label) {
@@ -65,6 +76,11 @@ function locked() {
   sendError = "Open a fresh link using lantern web-link.";
   if (!feed.childElementCount) byId("empty").textContent = "An operator link is required to open this conversation.";
   older.disabled = true;
+  reviewRevision++;
+  reviewQuestions = [];
+  closeReview();
+  reviewInbox.hidden = true;
+  byId("review-notice").textContent = "";
   controls();
 }
 
@@ -103,6 +119,139 @@ function updateWorker(status) {
   node.dataset.state = status.working ? "working" : "idle";
   if (node.textContent !== label) node.textContent = label;
 }
+
+function closeReview() {
+  reviewId = null;
+  if (reviewDialog.open) reviewDialog.close();
+}
+
+function openReview(item) {
+  reviewId = item.id;
+  const priorDenial = item.source === "prior_denial";
+  byId("review-title").textContent = priorDenial ? "Clarify a previous Opus denial" : "Opus needs clarification";
+  byId("review-about").textContent = (priorDenial ? "The host is asking about an earlier review. " : "")
+    + "Your reply is recorded under your operator identity and quoted to Opus when this action is reviewed. Lantern will be notified.";
+  byId("review-number").textContent = "Question #" + item.id;
+  byId("review-question").textContent = item.question;
+  byId("review-action").textContent = item.action;
+  byId("review-excerpt").textContent = item.excerpt || "";
+  byId("review-evidence").hidden = !item.excerpt;
+  const time = byId("review-time");
+  const date = new Date(item.asked_at);
+  time.dateTime = item.asked_at;
+  time.textContent = Number.isFinite(date.getTime()) ? shortTime.format(date) : "";
+  reviewAnswer.value = stored("review-answer." + item.id) || "";
+  reviewSubmit.disabled = !reviewAnswer.value.trim();
+  byId("review-error").textContent = "";
+  byId("review-notice").textContent = "";
+  if (!reviewDialog.open) reviewDialog.showModal();
+  else reviewAnswer.focus();
+}
+
+function updateReviewQueue(items) {
+  for (const item of reviewQuestions) {
+    if (items.some((current) => current.id === item.id)) continue;
+    deferredReviews.delete(item.id);
+    remember("review-later." + item.id, null);
+    remember("review-answer." + item.id, null);
+    if (reviewId === item.id) {
+      closeReview();
+      byId("review-notice").textContent = "That question is no longer pending.";
+    }
+  }
+  reviewQuestions = items;
+  byId("review-next").hidden = items.length < 2;
+  reviewInbox.hidden = !items.length;
+  reviewInbox.textContent = items.length > 1 ? "Answer Opus (" + items.length + ")" : "Answer Opus";
+  if (!items.length || reviewDialog.open || document.hidden) return;
+  const next = items.find((item) => !deferredReviews.has(item.id) && !stored("review-later." + item.id));
+  if (next && !(document.activeElement === draft && draft.value)) openReview(next);
+}
+
+async function pollReviews() {
+  if (!key || document.hidden || reviewSending || reviewFetching || Date.now() < nextReviewPoll) return;
+  const revision = reviewRevision;
+  reviewFetching = true;
+  try {
+    const page = await request("/api/review-questions");
+    // A fetch started before a submission can still include the answered question.
+    if (revision === reviewRevision && key) {
+      const notice = byId("review-notice");
+      if (notice.dataset.offline) {
+        notice.textContent = "";
+        delete notice.dataset.offline;
+      }
+      updateReviewQueue(page.questions);
+    }
+  } catch {
+    if (key && revision === reviewRevision) {
+      const notice = byId("review-notice");
+      notice.dataset.offline = "true";
+      notice.textContent = "Couldn’t check for Opus questions. Retrying…";
+    }
+  } finally {
+    reviewFetching = false;
+    nextReviewPoll = Date.now() + 8000;
+  }
+}
+
+function deferReview() {
+  deferredReviews.add(reviewId);
+  remember("review-later." + reviewId, "1");
+  closeReview();
+  reviewInbox.focus();
+}
+
+reviewInbox.addEventListener("click", () => {
+  if (reviewQuestions.length) openReview(reviewQuestions[0]);
+});
+byId("review-next").addEventListener("click", () => {
+  const index = reviewQuestions.findIndex((item) => item.id === reviewId);
+  if (index >= 0) openReview(reviewQuestions[(index + 1) % reviewQuestions.length]);
+});
+byId("review-later").addEventListener("click", deferReview);
+reviewDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  if (!reviewSending) deferReview();
+});
+reviewAnswer.addEventListener("input", () => {
+  remember("review-answer." + reviewId, reviewAnswer.value);
+  reviewSubmit.disabled = !reviewAnswer.value.trim();
+});
+byId("review-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (reviewSending || !reviewId || !reviewAnswer.value.trim()) return;
+  const id = reviewId;
+  reviewRevision++;
+  reviewSending = true;
+  reviewAnswer.readOnly = true;
+  byId("review-next").disabled = true;
+  byId("review-later").disabled = true;
+  reviewSubmit.disabled = true;
+  byId("review-error").textContent = "";
+  try {
+    await request("/api/review-questions/" + encodeURIComponent(id) + "/answer", { answer: reviewAnswer.value });
+    if (!key) return;
+    updateReviewQueue(reviewQuestions.filter((item) => item.id !== id));
+    byId("review-notice").textContent = "Your answer to Opus was recorded.";
+  } catch (error) {
+    if (!key) return;
+    if ([404, 409, 410].includes(error.status)) {
+      updateReviewQueue(reviewQuestions.filter((item) => item.id !== id));
+      byId("review-notice").textContent = "That question is no longer pending.";
+    } else {
+      byId("review-error").textContent = error.status === 400 || error.status === 413
+        ? error.message : "Delivery unconfirmed. You can retry your answer.";
+    }
+  } finally {
+    reviewSending = false;
+    reviewAnswer.readOnly = false;
+    byId("review-next").disabled = false;
+    byId("review-later").disabled = false;
+    reviewSubmit.disabled = !reviewAnswer.value.trim();
+    nextReviewPoll = 0;
+  }
+});
 
 function messageNode(event) {
   const speakers = { operator: "You", lantern: "Lantern", system: "Service" };
@@ -199,6 +348,7 @@ async function poll() {
     }
     connection("live", "Connected");
     updateWorker(page.status);
+    void pollReviews();
   } catch {
     if (key) {
       connection("offline", "Reconnecting");

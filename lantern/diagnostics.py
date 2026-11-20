@@ -28,12 +28,12 @@ harness_logs unregistered""".split())
 STATUSES = set("""complete failed interrupted deferred pending completed incomplete upstream_http_error
 invalid_upstream_response settled unconfirmed rejected metered ambiguous archive_error context_unavailable
 context_flagged context_clear tool_flagged tool_clear tool_review_unreadable tool_review_unavailable
-opus_allowed opus_denied opus_advice unregistered_blocked unregistered_clear unregistered_flagged
+opus_allowed opus_denied opus_asked_operator opus_advice unregistered_blocked unregistered_clear unregistered_flagged
 unregistered_review_unreadable unregistered_review_unavailable unregistered_screen_unavailable
 unregistered_opus_allow unregistered_opus_deny""".split())
 OPUS_CODES = set("""invalid_json unexpected_model output_limit incomplete_response invalid_content
 response_text_too_long forbidden_xml malformed_xml nested_elements empty_element invalid_verdict
-invalid_advice search_limit invalid_search verdict_allow verdict_deny advice search invalid_usage
+invalid_advice search_limit invalid_search verdict_allow verdict_deny ask_operator advice search invalid_usage
 archive_error incomplete_body transport_error response_too_large""".split())
 COVERAGE = ("Times use UTC. Model call times are admission times. OpenRouter's HTTP code, provider "
             "identity and running release revision are absent from these ledgers. Supervision events "

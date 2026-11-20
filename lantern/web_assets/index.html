@@ -21,8 +21,34 @@
   <main>
     <div class="room-heading">
       <h1>Conversation</h1>
+      <button id="review-inbox" type="button" aria-haspopup="dialog" hidden>Answer Opus</button>
       <span class="worker" id="worker" aria-live="polite"></span>
     </div>
+    <p id="review-notice" role="status"></p>
+    <dialog id="review-dialog" aria-labelledby="review-title" aria-describedby="review-about">
+      <form id="review-form">
+        <h2 id="review-title">Opus needs clarification</h2>
+        <p id="review-about"></p>
+        <div class="review-details">
+          <div class="review-meta"><span id="review-number"></span><time id="review-time"></time></div>
+          <strong>Action under review</strong>
+          <code id="review-action"></code>
+          <div id="review-evidence" hidden>
+            <strong>Supporting excerpt</strong>
+            <blockquote id="review-excerpt"></blockquote>
+          </div>
+          <p id="review-question"></p>
+        </div>
+        <label for="review-answer">Your answer to Opus</label>
+        <textarea id="review-answer" rows="3" maxlength="2000" required autofocus></textarea>
+        <p id="review-error" role="alert"></p>
+        <div class="review-buttons">
+          <button id="review-next" type="button" hidden>Next question</button>
+          <button id="review-later" type="button">Later</button>
+          <button id="review-submit" type="submit" disabled>Send answer</button>
+        </div>
+      </form>
+    </dialog>
     <section class="history" aria-label="Conversation history" tabindex="0" id="history">
       <button class="older" id="older" type="button" hidden>Load earlier messages</button>
       <div class="empty" id="empty">Loading conversation…</div>

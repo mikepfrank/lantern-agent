@@ -9,7 +9,7 @@ import sqlite3
 from threading import Condition, local
 from typing import NamedTuple
 
-from .opus import OpusCaseTooLarge, OpusResponseError
+from .opus import OPERATOR_QUESTION_LIMIT, OpusCaseTooLarge, OpusResponseError
 from .review_vendors import HTTPRejection, OpusTransportError, ReviewBudgetUnavailable
 
 
@@ -133,9 +133,49 @@ def review_cases(case, findings):
     yield {**case, "context_concern": packet}, sequence
 
 
+def _fingerprint(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False,
+                                     separators=(",", ":")).encode()).hexdigest()
+
+
+def question_scope(name, args):
+    # Reading another page or revising a draft can raise the same question about
+    # intent. The actual tool arguments are always reviewed before dispatch.
+    path = args.get("path")
+    if name in ("workspace_read", "workspace_write") and isinstance(path, str) and 0 < len(path) <= 512:
+        return f"{name}:{path}"
+    return f"{name}:{_fingerprint(args)}"
+
+
+def describe_action(name, args):
+    if name in ("workspace_read", "workspace_write") and isinstance(args.get("path"), str):
+        path = args["path"][:512]
+        if name == "workspace_write" and isinstance(args.get("text"), str):
+            return f"Write {len(args['text']):,} characters to {path}"
+        if name == "workspace_read":
+            return f"Read {path} from offset {args.get('offset', 0)}"
+    text = json.dumps(args, ensure_ascii=False, sort_keys=True)
+    return f"{name} {text[:900]}" + ("…" if len(text) > 900 else "")
+
+
+def _attestation(row):
+    return {key: row[key] for key in ("id", "source", "call_id", "asked_at", "action", "excerpt",
+                                      "question", "answered_at", "answer")}
+
+
+def _review_excerpt(case):
+    concerns = [case["evidence"], *(item["evidence"] for item in case["context_concern"])]
+    concern = "\n".join(filter(None, concerns)) or case["summary"]
+    excerpt = "Review concern\n" + (concern if len(concern) <= 950 else concern[:949] + "…")
+    if case["tool"] == "workspace_write" and isinstance(case["arguments"].get("text"), str):
+        draft = case["arguments"]["text"]
+        excerpt += "\n\nProposed text" + (" (ending)\n…" + draft[-700:] if len(draft) > 700 else "\n" + draft)
+    return excerpt
+
+
 class Supervisor:
     def __init__(self, state: Path, luna, review, consult, *, sample_every: int = 12, tool_names=None,
-                 batch_id: int | None = None):
+                 batch_id: int | None = None, operator_room=None):
         if type(sample_every) is not int or sample_every < 1:
             raise ValueError("Sample interval must be a positive integer")
         self.path = state / DATABASE
@@ -143,6 +183,7 @@ class Supervisor:
         self.sample_every = sample_every
         self.tool_names = frozenset(TOOLS if tool_names is None else tool_names)
         self.batch_id = batch_id
+        self.operator_room = operator_room
         self.thread = None
         self._observations = Condition()
         self._received = self._processed = 0
@@ -350,25 +391,11 @@ class Supervisor:
             if scan["escalate"]:
                 self._retain_finding(context.sequence, scan["evidence"], scan["summary"])
             return {"error": f"Provide a nonempty public rationale of at most {RATIONALE_LIMIT} characters for this action."}
-        with database(self.path) as db:
-            findings = db.execute("SELECT sequence,evidence,summary FROM findings WHERE thread=? ORDER BY sequence",
-                                  (self.thread,)).fetchall()
         case = {"tool": name, "arguments": args, "rationale": rationale,
                 "evidence": scan["evidence"], "summary": scan["summary"]}
-        if scan["escalate"] or findings:
-            for batch, sequences in review_cases(case, findings):
-                verdict = self._judgment(batch)
-                if sequences:
-                    with database(self.path) as db:
-                        # A delayed proposal can append evidence while Opus is
-                        # reviewing. Mark only the exact evidence it received.
-                        db.executemany("UPDATE findings SET heard=1 WHERE thread=? AND sequence=? AND evidence=? AND summary=?",
-                                       [(self.thread, i, item["evidence"], item["summary"])
-                                        for i, item in zip(sequences, batch["context_concern"])])
-                if verdict["decision"] == "deny":
-                    self._event("opus_denied", name, call_id)
-                    return {"error": "Claude 3 Opus denied this action.", "judgment": verdict["reason"]}
-            self._event("opus_allowed", name, call_id)
+        held = self._adjudicate(call_id, case, scan["escalate"])
+        if held is not None:
+            return held
         if name == CONSULT:
             if (set(args) != {"question"} or not isinstance(args["question"], str)
                     or not args["question"].strip() or len(args["question"]) > 2400):
@@ -389,11 +416,96 @@ class Supervisor:
             return {"advice": advice, "research": research, "available_research": sources}
         return execute(name, args)
 
+    def _adjudicate(self, call_id, case, flagged):
+        """Return a tool error for a held action, or None to proceed with its dispatch."""
+        name, args = case["tool"], case["arguments"]
+        room = self.operator_room if name != CONSULT else None
+        scope = question_scope(name, args) if room else None
+        prior = room.case(self.thread, scope) if room else None
+        # A fresh Luna scan can clear retained findings while Mike is still deciding.
+        # Resolve the durable question independently of those findings.
+        if prior and prior["status"] == "pending":
+            return self._waiting(prior["id"], prior["question"])
+        if prior and not prior["final_decision"] and prior["final_fingerprint"]:
+            return {"error": f"The final review for question #{prior['id']} is in progress or its outcome is unknown. "
+                             "Leave the action held and report it to Mike."}
+        with database(self.path) as db:
+            findings = db.execute("SELECT sequence,evidence,summary FROM findings WHERE thread=? ORDER BY sequence",
+                                  (self.thread,)).fetchall()
+        if not flagged and not findings and (prior is None or prior["final_decision"] == "allow"):
+            return None
+
+        if room:
+            case["operator_statements"] = room.statements(self.thread, self.batch_id)
+        needs_final = prior is not None and not prior["final_decision"]
+        if prior:
+            # New operator statements can change the evidence after a refusal.
+            # Merely rephrasing the public rationale leaves this fingerprint unchanged.
+            fingerprint = _fingerprint([name, args, [s["event_id"] for s in case["operator_statements"]]])
+            if prior["final_fingerprint"] == fingerprint and prior["final_decision"] in ("deny", "unavailable"):
+                return {"error": f"Review #{prior['id']} held this proposal. Mike can supply new information.",
+                        "judgment": prior["final_reason"]}
+            case["operator_attestation" if needs_final else "prior_operator_attestation"] = _attestation(prior)
+        packets = list(review_cases(case, findings))
+        if needs_final and len(packets) != 1:
+            return {"error": f"Review #{prior['id']} exceeds a single final review packet. "
+                             "Leave the action held and ask Mike to narrow the proposal."}
+        for batch, sequences in packets:
+            if needs_final:
+                verdict = self._final_judgment(prior, fingerprint, batch)
+            else:
+                if room:
+                    batch["operator_question_available"] = True
+                verdict = self._judgment(batch)
+            if sequences:
+                with database(self.path) as db:
+                    # A delayed proposal can append evidence during review.
+                    # Mark only the exact findings Opus received.
+                    db.executemany("UPDATE findings SET heard=1 WHERE thread=? AND sequence=? AND evidence=? AND summary=?",
+                                   [(self.thread, i, item["evidence"], item["summary"])
+                                    for i, item in zip(sequences, batch["context_concern"])])
+            if verdict["decision"] == "deny":
+                self._event("opus_denied", name, call_id)
+                return {"error": "Claude 3 Opus denied this action.", "judgment": verdict["reason"]}
+            if verdict["decision"] == "ask_operator":
+                question_id = room.open(self.thread, scope, name, call_id, describe_action(name, args),
+                                        _review_excerpt(batch), verdict["reason"])
+                self._event("opus_asked_operator", name, call_id)
+                return self._waiting(question_id, verdict["reason"])
+        self._event("opus_allowed", name, call_id)
+        return None
+
+    @staticmethod
+    def _waiting(question_id, question):
+        return {"error": f"Action held for Mike's direct answer to review #{question_id} in the private web room. "
+                         "Leave this action pending. The host will notify you when Mike answers.",
+                "review_id": question_id, "question": question}
+
+    def _final_judgment(self, prior, fingerprint, batch):
+        room, question_id = self.operator_room, prior["id"]
+        if room.claim_final(question_id, fingerprint) != "claimed":
+            raise ReviewUnavailable(f"The final review for question #{question_id} was already claimed")
+        try:
+            verdict = self._judgment(batch)
+        except ReviewUnavailable as exc:
+            if isinstance(exc.__cause__, (ReviewBudgetUnavailable, OpusCaseTooLarge)):
+                room.release_final(question_id, fingerprint)
+            else:
+                room.finish_final(question_id, fingerprint, "unavailable", str(exc))
+            raise
+        room.finish_final(question_id, fingerprint, verdict["decision"], verdict["reason"])
+        return verdict
+
     def _judgment(self, case):
         try:
             verdict = self.review(case)
-            if (not isinstance(verdict, dict) or verdict.get("decision") not in ("allow", "deny")
+            accepts_question = (case.get("operator_question_available") is True and
+                                "operator_attestation" not in case and self.operator_room is not None)
+            decisions = ("allow", "deny", "ask_operator") if accepts_question else ("allow", "deny")
+            if (not isinstance(verdict, dict) or verdict.get("decision") not in decisions
                     or not isinstance(verdict.get("reason"), str) or not verdict["reason"].strip()):
+                raise OpusResponseError("invalid_verdict")
+            if verdict["decision"] == "ask_operator" and len(verdict["reason"]) > OPERATOR_QUESTION_LIMIT:
                 raise OpusResponseError("invalid_verdict")
             return verdict
         except Exception as exc:

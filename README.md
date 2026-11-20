@@ -60,6 +60,10 @@ State defaults to `%LOCALAPPDATA%\Lantern` on Windows and `~/.local/state/lanter
 
 ## Supervision
 
+When a disputed action depends on what Mike authorized, Opus can send one question to the private browser room. The dialog shows the action, supporting excerpt and question. **Later** leaves it open for another time. Type the scope you intend in your own words. The host records your exact answer with the question ID and timestamp and notifies Lantern in the shared conversation. The host also supplies recent operator messages to Opus on referrals.
+
+Waiting and checking the inbox use no model calls. If Lantern submits a fresh proposal for the disputed action, Opus gets one final call with your answer and the proposal. Its judgment appears in chat. The original tool call stays in the history. For later reviews about the same workspace operation and file, the host can supply your earlier answer as evidence.
+
 Lantern supplies a short justification with each tool call. Luna sees the proposed arguments, justification, and recent conversation. On the first model request in a thread and every 12 requests thereafter, it also screens the full visible context, including instructions, conversation, and tool definitions. Provider-private reasoning items are excluded. The request count and unresolved findings survive restarts. Set `LANTERN_SPOT_EVERY` to change the interval.
 
 Opus decides flagged actions before execution. It sees Luna's evidence, a concise context summary and Lantern's justification. Lantern receives Opus's explanation if the action is denied. When a required reviewer is unavailable the action is held. A voluntary consultation returns advice and a record of any Wikipedia or Crossref searches. Opus can request up to two short public keyword lookups per case. The operator mediates the queries and search results are treated as untrusted text. Codex binds tool names when a thread starts, so milestone 1 threads retain supervised chess, and a new thread adds direct Opus consultation.

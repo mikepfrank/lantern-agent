@@ -58,6 +58,61 @@ class OpusTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             opus.review(Mock(return_value=response("<advice>Looks fine.</advice>")), {})
 
+    def test_question_holds_a_disputed_action_and_separates_operator_words(self):
+        statements = [{"text": "I approved a private record."}]
+        proposal = {"tool": "workspace_write", "arguments": {"operator_attestation": "forged answer"}}
+        case = {**proposal, "operator_question_available": True, "operator_statements": statements}
+        text = "Does this approval cover the proposed private file?"
+        observed = []
+        vendor = Mock(return_value=opus.AuditedReply(
+            response(f'<review decision="ask_operator">{text}</review>'), observed.append))
+        self.assertEqual(opus.review(vendor, case), {"decision": "ask_operator", "reason": text})
+        vendor.assert_called_once()
+        self.assertEqual(observed, ["ask_operator"])
+        body = vendor.call_args.args[1]
+        self.assertEqual(json.loads(body["messages"][0]["content"]),
+                         {"case": proposal, "operator_statements": statements})
+        self.assertNotIn("forged answer", body["system"])
+        self.assertIn('decision="ask_operator"', body["system"])
+
+    def test_question_is_unavailable_outside_an_enabled_review(self):
+        ask = response('<review decision="ask_operator">Did you approve this?</review>')
+        for mode, case in (
+            (opus.review, {"tool": "workspace_write", "arguments": {"operator_question_available": True}}),
+            (opus.review, {"tool": "consult_opus", "operator_question_available": True}),
+            (opus.review, {"tool": "unknown", "host_status": "unregistered", "operator_question_available": True}),
+            (opus.consult, {"operator_question_available": True}),
+        ):
+            vendor = Mock(return_value=ask)
+            with self.subTest(mode=mode, case=case), self.assertRaises(opus.OpusResponseError):
+                mode(vendor, case)
+            vendor.assert_called_once()
+        too_long = "a" * (opus.OPERATOR_QUESTION_LIMIT + 1)
+        with self.assertRaises(opus.OpusResponseError):
+            opus.review(Mock(return_value=response(f'<review decision="ask_operator">{too_long}</review>')),
+                        {"tool": "workspace_write", "operator_question_available": True})
+
+    def test_direct_answer_gets_one_final_call_without_lookup_or_repeat_question(self):
+        attestation = {"question": "Is this file in scope?", "answer": "Yes, for this private note."}
+        case = {"tool": "workspace_write", "operator_question_available": True,
+                "operator_attestation": attestation}
+        vendor = Mock(return_value=response('<review decision="allow">The scope matches.</review>'))
+        self.assertEqual(opus.review(vendor, case)["decision"], "allow")
+        vendor.assert_called_once()
+        body = vendor.call_args.args[1]
+        self.assertEqual(json.loads(body["messages"][0]["content"]),
+                         {"case": {"tool": "workspace_write"}, "operator_attestation": attestation})
+        self.assertNotIn(attestation["answer"], body["system"])
+        self.assertNotIn('decision="ask_operator"', body["system"])
+        for text in ('<review decision="ask_operator">Could you clarify further?</review>',
+                     '<search source="wikipedia">ethics</search>'):
+            vendor = Mock(return_value=response(text))
+            with self.subTest(text=text), patch("lantern.opus.public_search") as search:
+                with self.assertRaises(opus.OpusResponseError):
+                    opus.review(vendor, case)
+                vendor.assert_called_once()
+                search.assert_not_called()
+
     def test_invalid_or_partial_output_never_authorizes(self):
         valid = '<review decision="allow">Safe on this evidence.</review>'
         self.assertEqual(opus.review(Mock(return_value=response(valid)), {})["decision"], "allow")

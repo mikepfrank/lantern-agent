@@ -10,11 +10,13 @@ import re
 import secrets
 import sqlite3
 from tempfile import NamedTemporaryFile
+from time import monotonic
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
 from .chat_store import ChatStore
 from .chat_worker import worker_online
+from .operator_review import MAX_ANSWER, ReviewRoom
 
 
 DEFAULT_PORT = 8765
@@ -33,6 +35,7 @@ class RoomServer(ThreadingHTTPServer):
     def __init__(self, state: Path, port: int):
         self.state = state
         self.store = ChatStore(state)
+        self.reviews = ReviewRoom(self.store)
         self.key = secrets.token_urlsafe(32)
         directory = files("lantern").joinpath("web_assets")
         self.assets = {path: (directory.joinpath(name).read_bytes(), mime)
@@ -117,6 +120,13 @@ class RoomHandler(BaseHTTPRequestHandler):
         if self.path in self.server.assets:
             self._reply(200, *self.server.assets[self.path])
             return
+        if self.path == "/api/review-questions":
+            if self._authorized():
+                try:
+                    self._json(200, {"questions": self.server.reviews.pending()})
+                except sqlite3.Error:
+                    self._json(503, {"error": "The review store is temporarily unavailable."})
+            return
         if self.path.partition("?")[0] != "/api/room":
             self._json(404, {"error": "Unknown route."})
             return
@@ -164,6 +174,21 @@ class RoomHandler(BaseHTTPRequestHandler):
             return
         if int(lengths[0]) > 128000:
             self._json(413, {"error": "Message is too large."})
+            # Windows may reset a socket closed with unread upload data. Give
+            # ordinary clients time to receive the 413 without waiting on a
+            # very large or stalled upload.
+            self.close_connection = True
+            remaining = min(int(lengths[0]), 256 * 1024)
+            deadline = monotonic() + 0.25
+            try:
+                while remaining and (timeout := deadline - monotonic()) > 0:
+                    self.connection.settimeout(timeout)
+                    chunk = self.rfile.read1(min(remaining, 32 * 1024))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            except OSError:
+                pass
             return
         try:
             content = self.rfile.read(int(lengths[0]))
@@ -171,7 +196,8 @@ class RoomHandler(BaseHTTPRequestHandler):
             return
         if not self._check_host():
             return
-        if self.path != "/api/messages":
+        answer_route = re.fullmatch(r"/api/review-questions/([1-9][0-9]{0,18})/answer", self.path)
+        if self.path != "/api/messages" and not answer_route:
             self._json(404, {"error": "Unknown route."})
             return
         if not self._authorized():
@@ -183,6 +209,24 @@ class RoomHandler(BaseHTTPRequestHandler):
             if len(content) != int(lengths[0]):
                 raise ValueError
             body = json.loads(content.decode("utf-8"))
+            if answer_route:
+                review_id = int(answer_route[1])
+                if (review_id > 2**63 - 1 or not isinstance(body, dict) or set(body) != {"answer"}
+                        or not isinstance(body["answer"], str) or not body["answer"].strip()
+                        or len(body["answer"]) > MAX_ANSWER):
+                    raise ValueError
+                body["answer"].encode("utf-8")
+                try:
+                    self.server.reviews.answer(review_id, body["answer"])
+                except KeyError:
+                    self._json(404, {"error": "Unknown review question."})
+                except ValueError:
+                    self._json(409, {"error": "A different answer was already recorded."})
+                except sqlite3.Error:
+                    self._json(503, {"error": "The review store is temporarily unavailable."})
+                else:
+                    self._json(200, {"id": review_id})
+                return
             if not isinstance(body, dict) or set(body) != {"text", "client_id"}:
                 raise ValueError
             message, client_id = body["text"], body["client_id"]
@@ -192,7 +236,9 @@ class RoomHandler(BaseHTTPRequestHandler):
             if not isinstance(client_id, str) or str(UUID(client_id)) != client_id:
                 raise ValueError
         except (ValueError, OSError, RecursionError):
-            self._json(400, {"error": f"Send text up to {MAX_MESSAGE} characters and a valid message ID."})
+            error = (f"Send one answer of 1 to {MAX_ANSWER} characters." if answer_route else
+                     f"Send text up to {MAX_MESSAGE} characters and a valid message ID.")
+            self._json(400, {"error": error})
             return
         try:
             receipt = self.server.store.submit(message, client_id="web:" + client_id)
