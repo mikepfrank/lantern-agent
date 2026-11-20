@@ -72,6 +72,15 @@ class BatchRulingTests(unittest.TestCase):
                 self.assertEqual(self.outcomes, [error.exception.code])
                 vendor.assert_called_once()
 
+    def test_neutral_ruling_heading_from_hosted_calibration(self):
+        ruling = "<ruling>" + CLOSE + ALLOW + WATCH + "</ruling>"
+        result = opus.review(self.provider("Here is my ruling on this case:\n\n" + ruling), self.case)
+        self.assertEqual(result["decision"], "allow")
+        for text in ("Here is my ruling if Mike agrees:\n" + ruling,
+                     "Here is my ruling on this case:\n" + ruling + " pending Mike's approval."):
+            with self.subTest(text=text), self.assertRaises(opus.OpusResponseError):
+                opus.review(self.provider(text), self.case)
+
     def test_clean_question_recovery_only_in_initial_action_channel(self):
         xml = "<ruling>" + CLOSE + ASK + WATCH.replace(' tools="message_operator"', "") + "</ruling>"
         for case, recover in [(self.case, True), ({**self.case, "operator_question_available": False}, False),

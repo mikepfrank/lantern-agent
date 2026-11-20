@@ -291,6 +291,8 @@ def public_search(source: str, query: str) -> list[dict]:
 
 
 def _review_heading_matches(heading: str, tool: str | None) -> bool:
+    if re.fullmatch(r"(?:here is |here['’]s )?(?:my|the) ruling(?: on this case)?:", heading, re.I | re.ASCII):
+        return True
     match = _REVIEW_HEADING.fullmatch(heading)
     if not match:
         return False
