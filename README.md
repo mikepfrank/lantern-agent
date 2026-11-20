@@ -4,7 +4,7 @@ Lantern is a private browser and terminal chat with Qwen3.8 27B. Each turn runs 
 
 ## Talk to Lantern on Lightsail
 
-To use the browser, run this in a terminal on the laptop. Open the private link printed there and leave the terminal open while chatting.
+To start or re-establish the browser connection, run this in a terminal on the laptop. The `-L` option opens the port forward and `--wait` keeps the SSH session alive. Open the private link printed there and leave that terminal open while chatting.
 
 ```sh
 ssh -t -o ExitOnForwardFailure=yes -L 127.0.0.1:8765:127.0.0.1:8765 lightsail "sudo -u lantern -H /usr/local/bin/lantern web-link --wait"
@@ -12,7 +12,7 @@ ssh -t -o ExitOnForwardFailure=yes -L 127.0.0.1:8765:127.0.0.1:8765 lightsail "s
 
 The browser and terminal show the same conversation. Either interface can send a follow-up while Lantern is working. In the browser, everything you send, including `/help`, is a message to Lantern. Terminal commands such as `/help` run locally in the CLI.
 
-After a browser service restart, keep the existing SSH tunnel open and get a fresh link in a second terminal with `ssh -t lightsail "sudo -u lantern -H /usr/local/bin/lantern web-link"`. Open the new link in the same tab. Treat it as a credential.
+If the forwarding terminal is still connected after a browser service restart, the tunnel is already available. Run `ssh -t lightsail "sudo -u lantern -H /usr/local/bin/lantern web-link"` in a second terminal to print a fresh link for the same tab. If the forwarding terminal closed, use the full command above. Treat the link as a credential.
 
 To use terminal chat directly, run:
 

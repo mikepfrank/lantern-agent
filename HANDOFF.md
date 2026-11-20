@@ -52,7 +52,7 @@ Use `readlink -f /opt/lantern/worker-current` to identify the active worker rele
 
 The Lightsail launcher selects `--private-lightsail-cli`. On each model request for this channel, the harness identifies Michael P. Frank as Lantern's developer, the host's administrator, and its only interactive human user. It supplies the same channel information to Luna and Opus. This applies when resuming an existing room independently of its pinned persona. Before adding any other human users or input sources, give each channel its own operator context and separate its conversation history from Mike's private room.
 
-The pilot uses the host account's persistent state at `~lantern/.local/state/lantern`. A full writable Git checkout lives in `~lantern/src/lantern` outside the worker's filesystem view. Its fetch source is the operator-owned `/opt/lantern/source/lantern.bundle`. The writable in-container checkout, GitHub remote and PR workflow are future work. The chess and GPT-2 services run independently of the Lantern deployment.
+The pilot uses the host account's persistent state at `~lantern/.local/state/lantern`. The host checkout in `~lantern/src/lantern` fetches from the operator-owned `/opt/lantern/source/lantern.bundle`. Lantern already has a separate writable clone in the coding container at `/work/lantern`. GitHub publication, pull requests and importing upstream changes into that clone are open work. The chess and GPT-2 services run independently of the Lantern deployment.
 
 For routine inspection, log in as `lantern` and open `~/.local/state/lantern`. The running pilot uses a systemd mount namespace. To inspect its exact filesystem view, an administrator can enter the main PID's mount namespace with `nsenter` and use `setpriv` to drop to the `lantern` user and group before opening a shell. In that view the state directory contains `workspace/` and the read-only `heritage/` mount. Lantern itself reads the archive through the supervised tool.
 
@@ -74,7 +74,11 @@ After restarting the final release, the private room retained its thread ID. A l
 
 ## TODO
 
-- For hosted browser login, consider the chess service's session and CSRF patterns with Lantern's own credentials and session storage. The current text browser pilot uses SSH and a private per-service key.
+Mike's next feature priority is native image input. The current SSH-forwarded room can host the first test. PDF page inspection can then reuse the image path.
+
+- **Native image input.** First exercise the installed Codex, Lantern gateway and selected OpenRouter route in a disposable conversation. Use a small image with a visual detail absent from its caption and filename. Then add a `+` attachment control and private message storage. Verify image and caption arrive together, survive reconnect, and go through supervision and spend accounting without copying encoded image data into text reports.
+- **Supervised PDF reading.** Extract text and render a selected page on demand so Lantern can inspect diagrams and illustrations via the same image path. The illustrated heritage PDF provides a private acceptance case.
+- **Hosted browser authentication.** Give Mike an HTTPS sign-in with revocable sessions so routine browser use can work without opening an SSH tunnel or copying a fresh link after each web service restart. Keep the operator room private and answers to Opus attributable to Mike. Evaluate the chess service's session and CSRF patterns with Lantern's own credentials and session storage.
 - Expose the existing fastest/cheapest OpenRouter preferences through a supervised Lantern tool. Verify that a change reaches the next outbound request and that the same spend cap applies in either mode.
 - Add a host-side, supervised GitHub proposal tool and a way to import upstream revisions into the coding clone while preserving Lantern's work. Keep GitHub credentials separate from every process that runs model-supplied code or Git hooks. Mike and Astra review proposals before merge and deployment.
 - Add supervised retrieval of page text so Lantern can read beyond search snippets. Design and test the prompt-injection safeguards before enabling retrieval.
@@ -82,9 +86,9 @@ After restarting the final release, the private room retained its thread ID. A l
   - Lantern can use a page as evidence for its research. If the page asks Lantern to take an action, the page itself supplies no authority. Report suspected injected instructions to Mike and require his explicit approval in the private CLI before acting on a request originating from a page.
   - Test a benign article and a controlled page containing a harmless canary instruction. Verify that Lantern can answer a question from the article, reports the suspicious instruction to Mike, and leaves the canary marker out of outbound queries. Check the tool-call log for unintended actions. Repeat after resuming the thread.
 - Polish the SSH terminal as a fallback for times when the web UI is unavailable. Revisit the interaction in a real tmux session when working on the web interface.
-- Once the web interface is available, let Mike attach images and let Lantern inspect them natively. Verify that the selected Qwen endpoint receives the image alongside Mike's accompanying text.
-- Give Lantern a supervised PDF workflow in the live agent, including on-demand text extraction and rendering a selected page for visual inspection of diagrams and illustrations through the same image-input path.
 - As a lower-priority experiment, trial a rolling context window with supervised lookup of older turns. Keep the persona, handoff and recent complete exchanges in view, including matched tool calls and results. The private `chat.sqlite` event log preserves operator messages, visible replies and status events independently of compaction. Codex also saves a native thread rollout under `codex/sessions/`. Before switching methods, verify which historical items can be recovered verbatim after compaction and restart. Test retrieval by turn or search phrase, preserve authorship and source labels, and keep both history stores intact when changing the active window.
+
+Alongside development, use ordinary pilot turns to compare Luna and Opus cost, referral frequency and the outcomes of Mike's direct clarifications. Use those measurements to decide whether to adjust spot checks or evaluate another supervisor.
 
 ## Milestone 2
 
@@ -117,7 +121,7 @@ At milestone 1, Lantern's own shell access, general web search, scheduled wakeup
 
 The coding broker gives Lantern a full writable clone at `/work/lantern`, also reachable as `~/src/lantern` inside each command. The initial seed includes the reviewed project's branches, tags, and history. Both commits and uncommitted files live on the persistent volume.
 
-The worker loads the operator-owned release from `/opt/lantern/current` on the host. The coding container mounts its own volume. Lantern can read the running revision's source from its initial checkout, run tests, edit files and commit proposals within that clone.
+The worker loads the operator-owned release from `/opt/lantern/worker-current` on the host. The coding container mounts its own volume. Lantern can inspect its seeded revision, run tests, edit files and commit proposals within that clone.
 
 The [coding installer](deploy/install-coding.sh) verifies the seed revision, creates the clone inside an offline container and preserves it on later installations. The operator keeps the canonical source bundle separately in `/opt/lantern/source/lantern.bundle`.
 
