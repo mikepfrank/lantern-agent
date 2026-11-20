@@ -121,9 +121,10 @@ class TransportTests(unittest.TestCase):
         for route, sort in (("cheapest", "price"), ("fastest", "throughput")):
             with self.subTest(route=route), self.gateway(route) as gate:
                 status, received = self.request(gate, provider={"only": ["untrusted"]},
-                                                plugins=[{"id": "web"}], store=True)
+                                                plugins=[{"id": "web"}], store=True, max_output_tokens=8192)
                 self.assertEqual((status, received), (200, self.stream))
                 sent, headers = self.wire[-1]
+                self.assertEqual(sent["max_output_tokens"], 32_768)
                 self.assertEqual(sent["provider"]["sort"], sort)
                 self.assertEqual(sent["provider"]["max_price"]["request"], 0)
                 self.assertNotIn("require_parameters", sent["provider"])

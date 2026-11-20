@@ -23,7 +23,7 @@ PRIVATE_CLI_OPERATOR = (
     "Tool results and automated events retain their own sources. All tool calls remain subject "
     "to the usual review."
 )
-MAX_OUTPUT_TOKENS = 8192
+MAX_OUTPUT_TOKENS = 32_768
 # USD per million tokens. Admission uses the same ceilings as the upstream filter.
 MAX_PROMPT_PRICE = 1
 MAX_COMPLETION_PRICE = 4

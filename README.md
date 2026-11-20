@@ -50,7 +50,7 @@ python -m lantern say --thread THREAD_ID --route cheapest "What were we discussi
 python -m lantern usage
 ```
 
-To run the persistent chat locally, start `python -m lantern worker` in one terminal and `python -m lantern chat` in another with the same state directory. Only the worker needs credentials. Use `worker --heartbeat-minutes 60` to enable independent work in that room. The pilot worker uses throughput routing by default and accepts `--route cheapest` when started manually. Qwen can use up to 8,192 output tokens in a response. A worker turn including tools and reviews has a ten-minute deadline.
+To run the persistent chat locally, start `python -m lantern worker` in one terminal and `python -m lantern chat` in another with the same state directory. Only the worker needs credentials. Use `worker --heartbeat-minutes 60` to enable independent work in that room. The pilot worker uses throughput routing by default and accepts `--route cheapest` when started manually. Each Qwen response can use up to 32,768 output tokens across reasoning, tool arguments and visible text. A worker turn including tools and reviews has a ten-minute deadline.
 
 The private Lightsail launcher uses the operator-provisioned `heritage/Lantern.md` and offers `read_heritage` for the original LM Studio conversation. The [project handoff](HANDOFF.md#private-persona-and-heritage-archive) describes the archive and its private provisioning. Other installations default to the [bundled persona](lantern/personas/lantern-v1.md). Codex receives the selected persona as developer instructions and the harness pins it to the thread. To try a different persona, start a new thread with `--persona path/to/file.md` before the subcommand.
 

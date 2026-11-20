@@ -46,7 +46,7 @@ The November 19 note edits in batches 23 and 24 produced three metered Opus resp
 
 ### Lightsail pilot
 
-Use `readlink -f /opt/lantern/current` to identify the active release. The root-owned service `lantern-chat.service` runs as `lantern` and starts on boot. The operator can run `lantern` in that account. The installed Codex is 0.169.0 and the worker defaults to OpenRouter throughput routing. An interactive turn has ten minutes for generation, tools and review, and each Qwen request allows 8,192 output tokens. The shared UTC budgets are $10 for Qwen and $5 for Luna and Opus combined.
+Use `readlink -f /opt/lantern/worker-current` to identify the active worker release and `readlink -f /opt/lantern/current` for the web and CLI release. The root-owned service `lantern-chat.service` runs as `lantern` and starts on boot. The operator can run `lantern` in that account. The installed Codex is 0.169.0 and the worker defaults to OpenRouter throughput routing. An interactive turn has ten minutes for generation, tools and review. Each Qwen request allows 32,768 output tokens across reasoning, tool arguments and visible text. The shared UTC budgets are $10 for Qwen and $5 for Luna and Opus combined.
 
 The Lightsail launcher selects `--private-lightsail-cli`. On each model request for this channel, the harness identifies Michael P. Frank as Lantern's developer, the host's administrator, and its only interactive human user. It supplies the same channel information to Luna and Opus. This applies when resuming an existing room independently of its pinned persona. Before adding any other human users or input sources, give each channel its own operator context and separate its conversation history from Mike's private room.
 
