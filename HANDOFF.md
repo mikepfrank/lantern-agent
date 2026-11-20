@@ -2,6 +2,8 @@
 
 ## Current state
 
+**Opus review formatting, November 20.** In turns 61 and 63, complete replies approving a chess journal write and a heritage page read each started with a conversational heading before the XML. The host held both proposals. The updated parser accepts a single review with a neutral introduction. If the heading names a tool, it must match the proposal. Multiple verdicts, outside qualifications and truncated replies still hold the action. Opus receives explicit opening- and closing-tag instructions. An unreadable ruling now tells Lantern to leave the action pending and report the original turn to Mike, who can inspect it with `lantern opus-responses --batch N`.
+
 **The running worker owns the room's tool definitions.** Codex 0.169 on Lightsail accepts `dynamicTools` at thread creation. Its resume protocol has no field for a replacement list. In a private offline replay, supplying a different list on resume left the old declarations in effect. Before accepting work, Lantern's worker synchronizes the saved header and same-thread compaction checkpoints with the exact active list, including argument schemas. Five fresh processes on a copy of Mike's room verified the PDF tool across initial resume, restart, removal, schema revision and restoration. Historical page pixels remained available in all five phases. The gateway checks prior reviews when replaying calls to retired tools. See the [deployment guide](deploy/README.md#chat) for backups and resumption.
 
 **Resuming a compacted room after adding a tool.** Turn 57 of Mike's conversation stopped before model admission. The rollout header listed `view_pdf_page`, while its compaction checkpoint still held the previous tool list. Codex 0.169 used the checkpoint on resume and the gateway rejected the request. A new conversation and a comparison limited to the first rollout record had both missed this case. The worker now reconciles same-thread tool declarations in saved compaction checkpoints under the worker lock and keeps a private pre-repair backup in `operator-backups/compaction-tools-v1/`. Two fresh Codex processes on a copy of Mike's actual room reproduced the original 15-of-16 tool list. After repair, both advertised all 16 tools, and the gateway verified a PDF image on the follow-up and subsequent resume. The rehearsal used a loopback fixture and incurred no API charges.
@@ -86,7 +88,10 @@ After restarting the final release, the private room retained its thread ID. A l
 
 ## TODO
 
-Mike confirmed that Lantern could see both personal images he uploaded. Page 2 of the 23-page illustrated heritage PDF has two embedded pictures and provides a private follow-up test.
+Mike confirmed both uploaded images were visible to Lantern and the live PDF-page test on page 2 of the heritage transcript worked.
+
+For November 20, start with a short review of overnight heartbeats, Luna and Opus referrals, and each model's spend. Then prioritize private browser sign-in. Test it by reopening the existing conversation in a fresh browser session, answering an Opus question as Mike, and revoking that session. The remaining features below are in proposed order.
+
 - **Hosted browser authentication.** Give Mike an HTTPS sign-in with revocable sessions so routine browser use can work without opening an SSH tunnel or copying a fresh link after each web service restart. Keep the operator room private and answers to Opus attributable to Mike. Evaluate the chess service's session and CSRF patterns with Lantern's own credentials and session storage.
 - Expose the existing fastest/cheapest OpenRouter preferences through a supervised Lantern tool. Verify that a change reaches the next outbound request and that the same spend cap applies in either mode.
 - Add a host-side, supervised GitHub proposal tool and a way to import upstream revisions into the coding clone while preserving Lantern's work. Keep GitHub credentials separate from every process that runs model-supplied code or Git hooks. Mike and Astra review proposals before merge and deployment.

@@ -38,6 +38,7 @@ class OpusTests(unittest.TestCase):
         self.assertIn("March 4, 2024", body["system"])
         self.assertIn(datetime.now(timezone.utc).date().isoformat(), body["system"])
         self.assertIn("Michael P. Frank", body["system"])
+        self.assertIn("Begin your response with the opening XML tag", body["system"])
         self.assertEqual(json.loads(body["messages"][0]["content"]), {"case": case})
 
     def test_optional_research_is_separate_from_advisory_authority(self):
@@ -110,6 +111,45 @@ class OpusTests(unittest.TestCase):
             with self.subTest(text=text), patch("lantern.opus.public_search") as search:
                 with self.assertRaises(opus.OpusResponseError):
                     opus.review(vendor, case)
+                vendor.assert_called_once()
+                search.assert_not_called()
+
+    def test_review_accepts_neutral_headings_without_another_call(self):
+        for tool, heading, decision in (
+            ("workspace_write", "Here is my review of the proposed workspace_write action:", "allow"),
+            ("read_heritage", "Here is my review decision regarding the proposed read_heritage tool use:", "allow"),
+            ("workspace_write", "Here’s my review:", "deny"),
+            ("read_heritage", "My review decision:", "ask_operator"),
+        ):
+            with self.subTest(tool=tool, decision=decision):
+                original = f'{heading}\n\n<review decision="{decision}">First line.\n\nSecond &amp; last.</review>'
+                outcomes = []
+                reply = opus.AuditedReply(response(original), outcomes.append)
+                vendor = Mock(return_value=reply)
+                result = opus.review(vendor, {"tool": tool, "operator_question_available": True})
+                self.assertEqual(result, {"decision": decision, "reason": "First line.\n\nSecond & last."})
+                self.assertEqual(outcomes, ["ask_operator" if decision == "ask_operator" else "verdict_" + decision])
+                self.assertEqual(reply["content"][0]["text"], original)
+                vendor.assert_called_once()
+
+    def test_heading_cannot_hide_conditions_or_supply_another_instruction(self):
+        verdict = '<review decision="allow">The request is in scope.</review>'
+        heading = "Here is my review of the proposed workspace_write action:"
+        for text in (
+            "Allow only after Mike confirms.\n" + verdict,
+            "Here is my review of the proposed read_heritage action:\n" + verdict,
+            heading + "\n" + verdict + "\nWait for Mike.",
+            heading + "\n" + verdict + '<review decision="deny">Stop.</review>',
+            heading + "\n" + verdict + verdict,
+            heading + "\n<search source=\"wikipedia\">ethics</search>",
+            heading + '\n<response>' + verdict + '</response>',
+            heading + '\n<review decision="allow">' + verdict + '</review>',
+            heading + '\n<!-- pending -->' + verdict,
+        ):
+            with self.subTest(text=text), patch("lantern.opus.public_search") as search:
+                vendor = Mock(return_value=response(text))
+                with self.assertRaises(opus.OpusResponseError):
+                    opus.review(vendor, {"tool": "workspace_write"})
                 vendor.assert_called_once()
                 search.assert_not_called()
 

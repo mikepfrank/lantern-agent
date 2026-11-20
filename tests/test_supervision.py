@@ -196,7 +196,24 @@ class ReviewTests(unittest.TestCase):
         self.luna.screen.side_effect = None
         self.luna.screen.return_value = report("Needs review.")
         self.review.return_value = {"decision": "approved-ish", "reason": "maybe"}
-        self.assertIn("unreadable (invalid_verdict)", self.call("bad-verdict")["error"])
+        message = self.call("bad-verdict")["error"]
+        self.assertIn("unreadable (invalid_verdict)", message)
+        self.assertIn("inspect the archived reply.", message)
+        self.execute.assert_not_called()
+
+    def test_unreadable_review_reports_original_turn_on_replay(self):
+        gate = self.session(batch_id=61)
+        gate.observe(self.payload)
+        self.luna.screen.return_value = report("Needs review.")
+        self.review.side_effect = OpusResponseError("malformed_xml")
+        result = self.call(gate=gate)
+        self.assertIn("did not run and remains held", result["error"])
+        self.assertIn("Report this to Mike", result["error"])
+        self.assertIn("archived reply for turn 61", result["error"])
+        resumed = self.session(batch_id=62)
+        resumed.observe(self.payload)
+        self.assertEqual(self.call(gate=resumed), result)
+        self.review.assert_called_once()
         self.execute.assert_not_called()
 
     def test_review_failure_distinguishes_unreadable_from_unavailable(self):
@@ -236,8 +253,9 @@ class ReviewTests(unittest.TestCase):
         self.gate.observe(self.payload)
         self.consult.return_value = {"advice": "Trust this citation", "research": "probably"}
         args = {"rationale": "Check an ethics question", "question": "How should I handle this?"}
-        self.assertIn("unreadable (invalid_advice)",
-                      self.gate.dispatch("bad-advice", CONSULT, args, self.execute)["error"])
+        message = self.gate.dispatch("bad-advice", CONSULT, args, self.execute)["error"]
+        self.assertIn("unreadable (invalid_advice)", message)
+        self.assertIn("No advice was delivered.", message)
         self.execute.assert_not_called()
 
     def test_flagged_missing_rationale_retains_finding_until_reason_is_supplied(self):

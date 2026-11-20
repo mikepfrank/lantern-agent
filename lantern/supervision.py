@@ -27,10 +27,14 @@ class ReviewUnreadable(ReviewUnavailable):
     """The reviewer answered but the response did not pass the host's validation."""
 
 
-def _opus_failure(error, *, consultation=False):
+def _opus_failure(error, *, batch_id, consultation=False):
     purpose = "consultation" if consultation else "review"
     if isinstance(error, OpusResponseError):
-        return ReviewUnreadable(f"Opus replied, but its {purpose} response was unreadable ({error.code})")
+        turn = f" for turn {batch_id}" if batch_id is not None else ""
+        status = ("No advice was delivered." if consultation else
+                  "The proposed action did not run and remains held. Leave it pending.")
+        return ReviewUnreadable(f"Opus replied, but its {purpose} response was unreadable ({error.code}). "
+                                f"{status} Report this to Mike so he can inspect the archived reply{turn}.")
     if isinstance(error, HTTPRejection):
         return ReviewUnavailable(f"Opus {purpose} unavailable (provider returned HTTP {error.status})")
     if isinstance(error, OpusTransportError):
@@ -378,9 +382,11 @@ class Supervisor:
         # Never replay an ambiguous side effect from the same Codex call.
         try:
             result = self._review_action(context, call_id, name, json.loads(proposal)[1], execute)
+        except ReviewUnreadable as exc:
+            self._event("tool_review_unreadable", name, call_id)
+            result = {"error": str(exc)}
         except ReviewUnavailable as exc:
-            event = "tool_review_unreadable" if isinstance(exc, ReviewUnreadable) else "tool_review_unavailable"
-            self._event(event, name, call_id)
+            self._event("tool_review_unavailable", name, call_id)
             result = {"error": f"{exc}. The proposed tool action was held."}
         except ValueError:
             result = {"error": "Invalid tool arguments."}
@@ -420,7 +426,7 @@ class Supervisor:
                                    and r.get("status") in ("ok", "unavailable") for r in research)):
                     raise OpusResponseError("invalid_advice")
             except Exception as exc:
-                raise _opus_failure(exc, consultation=True) from exc
+                raise _opus_failure(exc, batch_id=self.batch_id, consultation=True) from exc
             self._event("opus_advice", name, call_id)
             return {"advice": advice, "research": research, "available_research": sources}
         return execute(name, args)
@@ -518,4 +524,4 @@ class Supervisor:
                 raise OpusResponseError("invalid_verdict")
             return verdict
         except Exception as exc:
-            raise _opus_failure(exc) from exc
+            raise _opus_failure(exc, batch_id=self.batch_id) from exc
