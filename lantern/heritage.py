@@ -102,8 +102,8 @@ def _pdf_page(directory, pdf, size, page):
     return pages[page - 1], len(pages)
 
 
-def read_heritage(directory: Path, arguments: dict) -> dict:
-    """Return a passage with a continuation cursor and information about its source."""
+def read_parameters(arguments: dict):
+    """Validate the archive operation without opening any document."""
     if not isinstance(arguments, dict) or set(arguments) - {"filename", "offset", "length", "page"}:
         raise ValueError("read_heritage accepts filename, offset, length and PDF page.")
     name = arguments.get("filename", MARKDOWN)
@@ -115,6 +115,12 @@ def read_heritage(directory: Path, arguments: dict) -> dict:
         raise ValueError("Use a positive page number with the PDF edition.")
     if type(offset) is not int or offset < 0 or type(length) is not int or not 1 <= length <= MAX_LENGTH:
         raise ValueError(f"Use a nonnegative character offset and a length of 1 to {MAX_LENGTH}.")
+    return name, page, offset, length
+
+
+def read_heritage(directory: Path, arguments: dict) -> dict:
+    """Return a passage with a continuation cursor and information about its source."""
+    name, page, offset, length = read_parameters(arguments)
     try:
         with _open_document(directory, name) as (source, path, size):
             result = {"filename": name, "path": str(path), "size_bytes": size,

@@ -11,6 +11,7 @@ from typing import NamedTuple
 
 from . import concerns
 from .opus import OPERATOR_QUESTION_LIMIT, OpusCaseTooLarge, OpusResponseError
+from .review_policy import action_facts, concern_refs
 from .review_vendors import HTTPRejection, OpusTransportError, ReviewBudgetUnavailable
 
 
@@ -424,10 +425,18 @@ class Supervisor:
 
     def _review_action(self, context, call_id, name, args, execute):
         rationale = args.pop("rationale", None)
-        packet = {"kind": "tool", "tool": name, "arguments": args, "rationale": rationale,
-                  "recent_context": context.recent}
         with database(self.path) as db:
             matching = concerns.list_open(db, self.thread, name)
+            prior = db.execute("SELECT reason FROM action_refusals WHERE thread=? AND proposal=?",
+                               (self.thread, _fingerprint([name, args]))).fetchone()
+        room = self.operator_room if name != CONSULT else None
+        facts = action_facts(name, args,
+                             operator_statements=room.statements(self.thread, self.batch_id) if room else [],
+                             open_concerns=matching, prior_denial=prior[0] if prior else None,
+                             archive_receipt=room.archive_receipt(self.thread)
+                             if room and name in ("read_heritage", "view_pdf_page") else None)
+        packet = {"kind": "tool", "host_facts": facts, "tool": name, "arguments": args,
+                  "rationale": rationale, "recent_context": context.recent}
         # Only a version actually inspected and found irrelevant may skip Opus.
         # Pending, broad, and excess scopes remain applicable by default.
         checks = [item for item in matching if item["status"] != "pending" and "*" not in item["tools"]][:12]
@@ -448,7 +457,7 @@ class Supervisor:
             if scan["escalate"]:
                 self._retain_finding(context.sequence, scan["evidence"], scan["summary"])
             return {"error": f"Provide a nonempty public rationale of at most {RATIONALE_LIMIT} characters for this action."}
-        case = {"tool": name, "arguments": args, "rationale": rationale,
+        case = {"host_facts": facts, "tool": name, "arguments": args, "rationale": rationale,
                 "evidence": scan["evidence"], "summary": scan["summary"]}
         held = self._adjudicate(call_id, case, scan["escalate"], skipped)
         if held is not None:
@@ -458,6 +467,7 @@ class Supervisor:
                     or not args["question"].strip() or len(args["question"]) > 2400):
                 return {"error": "Provide one nonempty question of at most 2400 characters."}
             try:
+                del case["host_facts"]
                 report = self.consult(case)
                 if not isinstance(report, dict):
                     raise OpusResponseError("invalid_advice")
@@ -611,7 +621,7 @@ class Supervisor:
             return {"error": f"The final review for question #{prior['id']} is in progress or its outcome is unknown. "
                              "Leave the action held and report it to Mike."}
         if room:
-            case["operator_statements"] = room.statements(self.thread, self.batch_id)
+            case["operator_statements"] = case["host_facts"]["operator_statements"]
         needs_final = prior is not None and not prior["final_decision"]
         if prior:
             # New operator statements can change the evidence after a refusal.
@@ -627,9 +637,14 @@ class Supervisor:
                                  (self.thread, proposal_key)).fetchone()
             incomplete = db.execute("SELECT call_id,code,concern_id FROM incomplete_action_reviews "
                                     "WHERE thread=? AND proposal=?", (self.thread, proposal_key)).fetchone()
-            findings = [f for f in concerns.list_open(db, self.thread, name)
+            matching = concerns.list_open(db, self.thread, name)
+            findings = [f for f in matching
                         if (f["id"], f["version"]) not in skipped
                         or (incomplete and f["id"] == incomplete[2] and f["status"] == "question")]
+        # A concurrent ruling can change the ledger during Luna's call. Keep Opus's
+        # factual record current and recheck the versions when committing its verdict.
+        case["host_facts"] = {**case["host_facts"], "prior_exact_denial": refusal[0] if refusal else None,
+                              "open_concerns_for_tool": concern_refs(matching)}
         if refusal:
             case["prior_action_denial"] = refusal[0]
         if incomplete:

@@ -148,11 +148,12 @@ class NativeCodexSmoke(unittest.TestCase):
             if vendor != "opus":
                 raise AssertionError("Unexpected reviewer")
             self.assertEqual(key, "offline-opus-key")
-            case = json.loads(payload["messages"][0]["content"])["case"]
+            packet = json.loads(payload["messages"][0]["content"])
+            case = packet["case"]
             review_calls.append((vendor, case["tool"]))
             if case["tool"] == "chess_analyze":
                 self.assertEqual(case["arguments"], {"fen": private_fen})
-                if case.get("prior_action_denial") == denial:
+                if packet["host_facts"]["prior_exact_denial"] == denial:
                     self.assertEqual(case["summary"], authorization)
                     self.assertEqual(case["evidence"], "")  # Luna cleared the exact retry.
                     text = '<review decision="allow">The author directly authorized this puzzle.</review>'

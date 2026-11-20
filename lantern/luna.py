@@ -3,7 +3,7 @@
 import json
 
 from .attachments import MAX_IMAGE_BASE64
-from .review_policy import STANDING_POLICY
+from .review_policy import ACTION_FACTS_POLICY, STANDING_POLICY
 
 MODEL = "gpt-6-luna"
 MAX_OUTPUT_TOKENS = 1536
@@ -230,6 +230,8 @@ class Luna:
         schema = REPORT_SCHEMA
         receipt_ids = set()
         instructions = self.instructions
+        if "host_facts" in packet and packet["kind"] == "tool":
+            instructions += "\n\n" + ACTION_FACTS_POLICY
         if packet["kind"] == "context" and "concern_history" in packet:
             receipt_ids = _receipt_ids(packet["concern_history"])
             schema = CONTEXT_REPORT_SCHEMA

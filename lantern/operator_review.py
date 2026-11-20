@@ -4,6 +4,7 @@ import json
 
 from .chat_store import ChatStore
 from .concerns import validate_scope
+from .review_policy import ARCHIVE_REVIEW_ID
 
 
 MAX_ANSWER = 2000
@@ -77,6 +78,15 @@ class ReviewRoom:
         with self.store._connect() as db:
             row = db.execute("""SELECT q.* FROM operator_reviews q JOIN room r ON r.thread_id=q.thread
                 WHERE q.thread=? AND q.scope=? ORDER BY q.id DESC LIMIT 1""", (thread, scope)).fetchone()
+            return dict(row) if row else None
+
+    def archive_receipt(self, thread):
+        """The signed-in operator's original archive answer, when present in this room."""
+        with self.store._connect() as db:
+            row = db.execute("""SELECT q.id,q.question,q.answer,q.answered_at
+                FROM operator_reviews q JOIN room r ON r.thread_id=q.thread
+                WHERE q.id=? AND q.thread=? AND q.tool='read_heritage'
+                    AND q.status='answered' AND q.final_decision='allow'""", (ARCHIVE_REVIEW_ID, thread)).fetchone()
             return dict(row) if row else None
 
     def retry_concern(self, review_id):

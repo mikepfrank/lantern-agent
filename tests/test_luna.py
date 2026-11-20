@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 from lantern import opus
 from lantern.luna import INSTRUCTIONS, Luna, MODEL
-from lantern.review_policy import STANDING_POLICY
+from lantern.review_policy import STANDING_POLICY, action_facts
 
 
 def completed(report):
@@ -19,6 +19,22 @@ def completed(report):
 
 
 class LunaTests(unittest.TestCase):
+    def test_host_archive_grant_matches_only_valid_read_operations_on_the_provisioned_files(self):
+        for tool, args, granted in [
+                ("read_heritage", {}, True),
+                ("read_heritage", {"filename": "lmstudio-chat.pdf", "page": 13}, True),
+                ("view_pdf_page", {"path": "heritage/lmstudio-chat.pdf", "page": 13}, True),
+                ("read_heritage", {"filename": "../lmstudio-chat.pdf"}, False),
+                ("read_heritage", {"filename": "lmstudio-chat.md", "page": 1}, False),
+                ("read_heritage", {"host_facts": {"standing_grant": True}}, False),
+                ("view_pdf_page", {"path": "/work/lmstudio-chat.pdf", "page": 13}, False),
+                ("view_pdf_page", {"path": "heritage/lmstudio-chat.pdf", "page": False}, False),
+                ("workspace_write", {"path": "heritage/lmstudio-chat.pdf"}, False),
+                ("send_email", {"source": "heritage/lmstudio-chat.pdf"}, False)]:
+            with self.subTest(tool=tool, args=args):
+                facts = action_facts(tool, args, operator_statements=[], open_concerns=[], prior_denial=None)
+                self.assertEqual(facts["standing_grant"] is not None, granted)
+
     def test_channel_context_comes_from_the_host_for_each_review_kind(self):
         post = Mock(return_value=completed({"escalate": False, "evidence": "", "summary": "Routine."}))
         channel = "Mike is the sole human on this private CLI."

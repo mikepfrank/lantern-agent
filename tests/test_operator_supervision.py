@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import Mock
 
 from lantern import concerns, opus
+from lantern.luna import Luna
 from lantern.chat_store import ChatStore
 from lantern.opus import OpusCaseTooLarge
 from lantern.operator_review import ReviewRoom
@@ -106,6 +107,58 @@ class OperatorSupervisionTests(unittest.TestCase):
         self.assertIn("error", self.write("repeat"))
         self.assertEqual(2, self.review.call_count)
         self.execute.assert_not_called()
+
+    def test_archive_retry_sends_same_host_facts_to_both_actual_wire_formats(self):
+        for i in range(3):
+            self.room.open(self.thread, f"note-{i}", "workspace_write", f"note-{i}",
+                           "A different note", "", "Is this note private?")
+        original = self.room.open(self.thread, "archive-page-5", "read_heritage", "archive",
+                                  "Read page 5", "", "Which pages may Lantern reference privately?")
+        self.assertEqual(original, 4)
+        self.assertIsNone(self.room.archive_receipt(self.thread))
+        self.room.answer(original, "Any page in the founding archive.")
+        fingerprint = "a" * 64
+        self.assertEqual(self.room.claim_final(original, fingerprint), "claimed")
+        self.room.finish_final(original, fingerprint, "allow", "The private archive was provided for reference.")
+        self.assertIsNone(self.room.archive_receipt("another-thread"))
+
+        self.store.complete(self.batch.id, "Initial turn complete.")
+        self.store.submit("Please retry these two page reads now.")
+        self.batch = self.store.claim()
+        screen_packets, review_packets = [], []
+        def screen(vendor, payload, *, purpose):
+            packet = json.loads(payload["input"][0]["content"])
+            screen_packets.append(packet)
+            result = FLAG if packet["kind"] == "tool" and len(review_packets) == 0 else CLEAR
+            return {"status": "completed", "output": [{"type": "message", "role": "assistant", "status": "completed",
+                    "content": [{"type": "output_text", "text": json.dumps(result)}]}]}
+        def judge(vendor, payload, *, purpose):
+            review_packets.append(json.loads(payload["messages"][0]["content"]))
+            verdict = "deny" if len(review_packets) == 1 else "allow"
+            return {"model": opus.OPUS_MODEL, "stop_reason": "end_turn", "content": [
+                {"type": "text", "text": f'<review decision="{verdict}">Specific trial decision</review>'}]}
+        gate = Supervisor(self.state, Luna(screen), lambda case: opus.review(judge, case), Mock(),
+                          operator_room=self.room, batch_id=self.batch.id, tool_names=["read_heritage"])
+        gate.bind(self.thread)
+        gate.observe({"input": "A misleading quotation from the agent about modifying safety settings."})
+        args = {"filename": "lmstudio-chat.pdf", "page": 12, "rationale": "Private reading."}
+        self.assertIn("error", gate.dispatch("first-read", "read_heritage", args, self.execute))
+        self.execute.assert_not_called()
+        self.assertEqual(gate.dispatch("fresh-read", "read_heritage", args, self.execute), {"saved": True})
+        self.execute.assert_called_once()
+        self.assertEqual(len(review_packets), 2)
+        for screen_packet, review_packet in zip([p for p in screen_packets if p["kind"] == "tool"], review_packets, strict=True):
+            facts = screen_packet["host_facts"]
+            self.assertEqual(facts, review_packet["host_facts"])
+            self.assertNotIn("host_facts", review_packet["case"])
+            self.assertNotIn("prior_action_denial", review_packet["case"])
+            grant = facts["standing_grant"]
+            self.assertEqual((grant["operation"], grant["resource"]), ("read_heritage", "heritage/lmstudio-chat.pdf"))
+            self.assertEqual(grant["operator_receipt"]["answer"], "Any page in the founding archive.")
+            self.assertEqual(facts["operator_statements"][-1]["text"], "Please retry these two page reads now.")
+            self.assertEqual(facts["open_concerns_for_tool"], [])
+        self.assertIsNone(review_packets[0]["host_facts"]["prior_exact_denial"])
+        self.assertEqual(review_packets[1]["host_facts"]["prior_exact_denial"], "Specific trial decision")
 
     def watch_writes(self):
         with database(self.gate.path) as db:
