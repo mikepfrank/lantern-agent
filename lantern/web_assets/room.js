@@ -217,9 +217,12 @@ function closeReview() {
 function openReview(item) {
   reviewId = item.id;
   const priorDenial = item.source === "prior_denial";
+  const concern = item.tool === "context_concern";
   byId("review-title").textContent = priorDenial ? "Clarify a previous Opus denial" : "Opus needs clarification";
   byId("review-about").textContent = (priorDenial ? "The host is asking about an earlier review. " : "")
-    + "Your reply is recorded under your operator identity and quoted to Opus when this action is reviewed. Lantern will be notified.";
+    + "Your reply is recorded under your operator identity and quoted to Opus when this "
+    + (concern ? "context concern" : "action") + " is reviewed. Lantern will be notified.";
+  byId("review-subject").textContent = concern ? "Context concern under review" : "Action under review";
   byId("review-number").textContent = "Question #" + item.id;
   byId("review-question").textContent = item.question;
   byId("review-action").textContent = item.action;

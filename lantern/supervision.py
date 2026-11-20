@@ -9,6 +9,7 @@ import sqlite3
 from threading import Condition, local
 from typing import NamedTuple
 
+from . import concerns
 from .opus import OPERATOR_QUESTION_LIMIT, OpusCaseTooLarge, OpusResponseError
 from .review_vendors import HTTPRejection, OpusTransportError, ReviewBudgetUnavailable
 
@@ -121,24 +122,6 @@ def recent_messages(context: dict) -> str:
     return "\n".join(reversed(excerpts))
 
 
-def review_cases(case, findings):
-    # Opus accepts 64 KiB cases. Preserve each unresolved finding; a long
-    # thread can accrue many full-window reports before its next real tool call.
-    base_size = len(json.dumps(case, ensure_ascii=False).encode())
-    limit = 60_000
-    packet, sequence, size = [], [], base_size
-    for number, evidence, summary in findings:
-        concern = {"evidence": evidence, "summary": summary}
-        item_size = len(json.dumps(concern, ensure_ascii=False).encode()) + 2
-        if packet and size + item_size > limit:
-            yield {**case, "context_concern": packet}, sequence
-            packet, sequence, size = [], [], base_size
-        packet.append(concern)
-        sequence.append(number)
-        size += item_size
-    yield {**case, "context_concern": packet}, sequence
-
-
 def _fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False,
                                      separators=(",", ":")).encode()).hexdigest()
@@ -170,8 +153,8 @@ def _attestation(row):
 
 
 def _review_excerpt(case):
-    concerns = [case["evidence"], *(item["evidence"] for item in case["context_concern"])]
-    concern = "\n".join(filter(None, concerns)) or case["summary"]
+    evidence = [case["evidence"], case.get("concern_review", {}).get("evidence", "")]
+    concern = "\n".join(filter(None, evidence)) or case["summary"]
     excerpt = "Review concern\n" + (concern if len(concern) <= 950 else concern[:949] + "…")
     if case["tool"] == "workspace_write" and isinstance(case["arguments"].get("text"), str):
         draft = case["arguments"]["text"]
@@ -199,12 +182,17 @@ class Supervisor:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS threads(
                     thread TEXT PRIMARY KEY, requests INTEGER NOT NULL, sampled INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS context_scan_cursors(
+                    thread TEXT PRIMARY KEY, last_event INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS findings(
                     thread TEXT, sequence INTEGER, evidence TEXT NOT NULL, summary TEXT NOT NULL,
                     heard INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(thread, sequence));
                 CREATE TABLE IF NOT EXISTS actions(
                     thread TEXT, call_id TEXT, digest TEXT NOT NULL, result TEXT,
                     PRIMARY KEY(thread, call_id));
+                CREATE TABLE IF NOT EXISTS action_refusals(
+                    thread TEXT NOT NULL, proposal TEXT NOT NULL, reason TEXT NOT NULL,
+                    PRIMARY KEY(thread,proposal));
                 CREATE TABLE IF NOT EXISTS events(
                     at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, thread TEXT NOT NULL,
                     event TEXT NOT NULL, tool TEXT, call_id TEXT);
@@ -215,6 +203,7 @@ class Supervisor:
                     kind TEXT NOT NULL, tool TEXT, call_id TEXT,
                     evidence TEXT NOT NULL, summary TEXT NOT NULL);
             """)
+            concerns.initialize(db)
 
     def bind(self, thread: str) -> None:
         if not thread or (self.thread and self.thread != thread):
@@ -285,37 +274,60 @@ class Supervisor:
 
     def _observe_context(self, payload: dict) -> ReviewedContext:
         context = visible_context(payload)
+        recent = recent_messages(context)
         with database(self.path) as db:
             db.execute("UPDATE threads SET requests=requests+1 WHERE thread=?", (self.thread,))
             sequence, sampled = db.execute("SELECT requests,sampled FROM threads WHERE thread=?",
                                            (self.thread,)).fetchone()
         if not sampled or sequence - sampled >= self.sample_every:
+            with database(self.path) as db:
+                history = concerns.history(db, self.thread)
+                prior = db.execute("SELECT last_event FROM context_scan_cursors WHERE thread=?", (self.thread,)).fetchone()
+                through = db.execute("SELECT COALESCE(MAX(rowid),0) FROM events WHERE thread=?", (self.thread,)).fetchone()[0]
+                new_events = [] if not prior else db.execute("""SELECT rowid,tool,call_id FROM events
+                    WHERE thread=? AND rowid>? AND rowid<=? AND event IN ('tool_flagged','tool_clear','unregistered_blocked')
+                    ORDER BY rowid DESC LIMIT 41""", (self.thread, prior[0], through)).fetchall()
+            packet = {"kind": "context", "context": context}
+            if history:
+                packet["concern_history"] = history
+            if new_events:
+                packet["new_tool_events"] = [
+                    {"id": event_id, "tool": tool, "call_id": call_id}
+                    for event_id, tool, call_id in reversed(new_events[:40])]
+                packet["earlier_tool_events_omitted"] = len(new_events) > 40
             try:
-                scan = self._screen({"kind": "context", "context": context})
+                scan = self._screen(packet)
+                related = scan.get("repeat_id")
+                if related is not None and (type(related) is not int or related not in {h["id"] for h in history}):
+                    raise ReviewUnavailable("Luna returned an unknown concern reference")
             except ReviewUnavailable:
                 self._event("context_unavailable")
                 raise
             with database(self.path) as db:
                 db.execute("UPDATE threads SET sampled=MAX(sampled,?) WHERE thread=?", (sequence, self.thread))
+                db.execute("""INSERT INTO context_scan_cursors VALUES (?,?) ON CONFLICT(thread) DO UPDATE
+                              SET last_event=MAX(last_event,excluded.last_event)""", (self.thread, through))
+                finding = None
                 if scan["escalate"]:
-                    db.execute("INSERT INTO findings(thread,sequence,evidence,summary) VALUES (?,?,?,?)",
-                               (self.thread, sequence, scan["evidence"], scan["summary"]))
-                else:
-                    # Only clear issues Opus has already considered on a concrete action.
-                    db.execute("DELETE FROM findings WHERE thread=? AND sequence<? AND heard=1",
-                               (self.thread, sequence))
+                    new_id = concerns.create(db, self.thread, sequence, scan["evidence"], scan["summary"], related)
+                    finding = concerns.get(db, self.thread, new_id)
+                elif related is not None:
+                    concerns.repeat_seen(db, self.thread, sequence, related)
+                    db.execute("INSERT INTO events(thread,event) VALUES (?, 'context_repeat')", (self.thread,))
                 self._record_screen(db, scan, sequence, "context")
-        return ReviewedContext(sequence, recent_messages(context))
+            if finding is not None:
+                # No action has been proposed yet. A failed review remains pending for tool admission.
+                try:
+                    self._decide_concern(finding, {"recent_context": recent[-2400:]})
+                except ReviewUnavailable:
+                    self._event("context_review_unavailable")
+        self._sync_concern_questions()
+        return ReviewedContext(sequence, recent)
 
     def _retain_finding(self, sequence, evidence, summary):
-        # A context scan and a rejected proposal can both flag the same request.
+        # A rejected proposal can arrive after the scan or another verdict on the same request.
         with database(self.path) as db:
-            db.execute("""
-                INSERT INTO findings(thread,sequence,evidence,summary) VALUES (?,?,?,?)
-                ON CONFLICT(thread,sequence) DO UPDATE SET
-                    evidence=findings.evidence || char(10) || excluded.evidence,
-                    summary=findings.summary || char(10) || excluded.summary, heard=0
-                """, (self.thread, sequence, evidence, summary))
+            concerns.create(db, self.thread, sequence, evidence, summary)
 
     def unregistered(self, name, arguments) -> None:
         """Audit a forbidden wire proposal. No decision here can run a tool."""
@@ -399,7 +411,22 @@ class Supervisor:
         rationale = args.pop("rationale", None)
         packet = {"kind": "tool", "tool": name, "arguments": args, "rationale": rationale,
                   "recent_context": context.recent}
+        with database(self.path) as db:
+            matching = concerns.list_open(db, self.thread, name)
+        # Only a version actually inspected and found irrelevant may skip Opus.
+        # Pending, broad, and excess scopes remain applicable by default.
+        checks = [item for item in matching if item["status"] != "pending" and "*" not in item["tools"]][:12]
+        if checks:
+            packet["scope_checks"] = checks
         scan = self._screen(packet)
+        skipped = set()
+        if checks:
+            ids = scan.get("applicable_ids")
+            known = {item["id"] for item in checks}
+            if (not isinstance(ids, list) or any(type(i) is not int or i not in known for i in ids)
+                    or len(set(ids)) != len(ids)):
+                raise ReviewUnavailable("Luna returned an invalid scope assessment")
+            skipped = {(i["id"], i["version"]) for i in checks if i["id"] not in ids}
         with database(self.path) as db:
             self._record_screen(db, scan, context.sequence, "tool", name, call_id)
         if not isinstance(rationale, str) or not rationale.strip() or len(rationale) > RATIONALE_LIMIT:
@@ -408,7 +435,7 @@ class Supervisor:
             return {"error": f"Provide a nonempty public rationale of at most {RATIONALE_LIMIT} characters for this action."}
         case = {"tool": name, "arguments": args, "rationale": rationale,
                 "evidence": scan["evidence"], "summary": scan["summary"]}
-        held = self._adjudicate(call_id, case, scan["escalate"])
+        held = self._adjudicate(call_id, case, scan["escalate"], skipped)
         if held is not None:
             return held
         if name == CONSULT:
@@ -431,25 +458,94 @@ class Supervisor:
             return {"advice": advice, "research": research, "available_research": sources}
         return execute(name, args)
 
-    def _adjudicate(self, call_id, case, flagged):
+    def _concern_case(self, item, action=None):
+        case = dict(action or {})
+        case["concern_review"] = {**item, "scope_tools": sorted(self.tool_names)}
+        if item["related_id"] is not None:
+            with database(self.path) as db:
+                prior = concerns.get(db, self.thread, item["related_id"])
+            if prior:
+                case["related_concern_receipt"] = {
+                    key: prior[key] for key in ("id", "sequence", "version", "status", "tools")}
+                for key in ("evidence", "reason"):
+                    value = prior[key]
+                    case["related_concern_receipt"][key] = value if len(value) <= 600 else value[:599] + "…"
+        room = self.operator_room
+        if room:
+            case["operator_statements"] = room.statements(self.thread, self.batch_id)
+            prior = room.case(self.thread, f"context-concern:{item['id']}")
+            if prior and prior["answer"]:
+                case["prior_concern_attestation"] = _attestation(prior)
+            case["concern_question_available"] = prior is None and "operator_attestation" not in case
+        return case
+
+    def _record_ruling(self, item, ruling):
+        with database(self.path) as db:
+            if not concerns.record(db, self.thread, item["id"], item["version"], ruling["decision"],
+                                   ruling["reason"], ruling["tools"]):
+                raise ReviewUnavailable("The concern changed during review")
+        if ruling["decision"] == "ask_operator":
+            self._concern_question(item, ruling["reason"])
+
+    def _concern_question(self, item, question):
+        scope = f"context-concern:{item['id']}"
+        row = self.operator_room.case(self.thread, scope)
+        if row is None:
+            self.operator_room.open(self.thread, scope, "context_concern", "host:" + scope,
+                                    f"Context concern #{item['id']}", item["evidence"][:2000], question)
+            row = self.operator_room.case(self.thread, scope)
+        return row
+
+    def _decide_concern(self, item, action=None):
+        verdict = self._judgment(self._concern_case(item, action))
+        self._record_ruling(item, verdict["concern"])
+        return verdict
+
+    def _sync_concern_questions(self):
+        room = self.operator_room
+        if room is None:
+            return
+        with database(self.path) as db:
+            questions = [f for f in concerns.list_open(db, self.thread) if f["status"] == "question"]
+        for item in questions:
+            row = self._concern_question(item, item["reason"])
+            if row["status"] != "answered" or row["final_decision"] == "unavailable":
+                continue
+            # The operator receipt commits first. On restart, apply its stored
+            # disposition without paying again or interpreting the prose as a ruling.
+            key = _fingerprint([item["id"], item["version"], row["id"]])
+            if not row["final_decision"]:
+                if room.claim_final(row["id"], key) != "claimed":
+                    continue
+                try:
+                    case = self._concern_case(item)
+                    case.pop("prior_concern_attestation", None)
+                    case["concern_attestation"] = _attestation(row)
+                    ruling = self._judgment(case)["concern"]
+                except ReviewUnavailable as exc:
+                    if isinstance(exc.__cause__, (ReviewBudgetUnavailable, OpusCaseTooLarge)):
+                        room.release_final(row["id"], key)
+                    else:
+                        room.finish_final(row["id"], key, "unavailable", str(exc))
+                    continue
+                room.finish_final(row["id"], key, ruling["decision"], ruling["reason"], tools=ruling["tools"])
+            else:
+                ruling = {"decision": row["final_decision"], "reason": row["final_reason"],
+                          "tools": json.loads(row["final_tools"])}
+            self._record_ruling(item, ruling)
+
+    def _adjudicate(self, call_id, case, flagged, skipped):
         """Return a tool error for a held action, or None to proceed with its dispatch."""
         name, args = case["tool"], case["arguments"]
         room = self.operator_room if name != CONSULT else None
         scope = question_scope(name, args) if room else None
         prior = room.case(self.thread, scope) if room else None
-        # A fresh Luna scan can clear retained findings while Mike is still deciding.
-        # Resolve the durable question independently of those findings.
+        # Resolve the action's own operator question independently of context rulings.
         if prior and prior["status"] == "pending":
             return self._waiting(prior["id"], prior["question"])
         if prior and not prior["final_decision"] and prior["final_fingerprint"]:
             return {"error": f"The final review for question #{prior['id']} is in progress or its outcome is unknown. "
                              "Leave the action held and report it to Mike."}
-        with database(self.path) as db:
-            findings = db.execute("SELECT sequence,evidence,summary FROM findings WHERE thread=? ORDER BY sequence",
-                                  (self.thread,)).fetchall()
-        if not flagged and not findings and (prior is None or prior["final_decision"] == "allow"):
-            return None
-
         if room:
             case["operator_statements"] = room.statements(self.thread, self.batch_id)
         needs_final = prior is not None and not prior["final_decision"]
@@ -461,25 +557,47 @@ class Supervisor:
                 return {"error": f"Review #{prior['id']} held this proposal. Mike can supply new information.",
                         "judgment": prior["final_reason"]}
             case["operator_attestation" if needs_final else "prior_operator_attestation"] = _attestation(prior)
-        packets = list(review_cases(case, findings))
-        if needs_final and len(packets) != 1:
-            return {"error": f"Review #{prior['id']} exceeds a single final review packet. "
-                             "Leave the action held and ask Mike to narrow the proposal."}
-        for batch, sequences in packets:
-            if needs_final:
+        with database(self.path) as db:
+            findings = [f for f in concerns.list_open(db, self.thread, name) if (f["id"], f["version"]) not in skipped]
+            proposal_key = _fingerprint([name, args])
+            refusal = db.execute("SELECT reason FROM action_refusals WHERE thread=? AND proposal=?",
+                                 (self.thread, proposal_key)).fetchone()
+        if refusal:
+            case["prior_action_denial"] = refusal[0]
+        reviewed = set(skipped)
+        if not findings and not flagged and not refusal and (prior is None or prior["final_decision"] == "allow"):
+            return None
+        if room and not needs_final:
+            case["operator_question_available"] = True
+        # Each independent finding must clear the exact action. The action-specific
+        # operator receipt gets at most one final verdict, after all other gates.
+        for item in findings or [None]:
+            if item and item["status"] == "question":
+                if not self.operator_room:
+                    return {"error": "An applicable context concern is awaiting the private operator room."}
+                q = self._concern_question(item, item["reason"])
+                return self._concern_hold(q)
+            batch = self._concern_case(item, case) if item else case
+            if needs_final and item is not None and item != findings[-1]:
+                # Existing context gates use the attested answer as evidence.
+                # Only the last one may consume the action's final-review receipt.
+                batch["prior_operator_attestation"] = batch.pop("operator_attestation")
+                batch["concern_question_available"] = False
+            if needs_final and (item is None or item == findings[-1]):
                 verdict = self._final_judgment(prior, fingerprint, batch)
             else:
-                if room:
-                    batch["operator_question_available"] = True
                 verdict = self._judgment(batch)
-            if sequences:
-                with database(self.path) as db:
-                    # A delayed proposal can append evidence during review.
-                    # Mark only the exact findings Opus received.
-                    db.executemany("UPDATE findings SET heard=1 WHERE thread=? AND sequence=? AND evidence=? AND summary=?",
-                                   [(self.thread, i, item["evidence"], item["summary"])
-                                    for i, item in zip(sequences, batch["context_concern"])])
+            concern_hold = None
+            if item:
+                ruling = verdict["concern"]
+                self._record_ruling(item, ruling)
+                reviewed.add((item["id"], item["version"] + 1))
+                if ruling["decision"] == "ask_operator" and (name in ruling["tools"] or "*" in ruling["tools"]):
+                    concern_hold = self._concern_hold(self._concern_question(item, ruling["reason"]))
             if verdict["decision"] == "deny":
+                with database(self.path) as db:
+                    db.execute("INSERT OR REPLACE INTO action_refusals VALUES(?,?,?)",
+                               (self.thread, proposal_key, verdict["reason"]))
                 self._event("opus_denied", name, call_id)
                 return {"error": "Claude 3 Opus denied this action.", "judgment": verdict["reason"]}
             if verdict["decision"] == "ask_operator":
@@ -487,8 +605,22 @@ class Supervisor:
                                         _review_excerpt(batch), verdict["reason"])
                 self._event("opus_asked_operator", name, call_id)
                 return self._waiting(question_id, verdict["reason"])
+            if concern_hold:
+                return concern_hold
+        with database(self.path) as db:
+            if any((f["id"], f["version"]) not in reviewed for f in concerns.list_open(db, self.thread, name)):
+                return {"error": "A context concern changed during review. The proposal was held for a fresh assessment."}
+            if refusal:
+                db.execute("DELETE FROM action_refusals WHERE thread=? AND proposal=? AND reason=?",
+                           (self.thread, proposal_key, refusal[0]))
         self._event("opus_allowed", name, call_id)
         return None
+
+    def _concern_hold(self, row):
+        if row["status"] == "pending":
+            return self._waiting(row["id"], row["question"])
+        return {"error": f"Context review #{row['id']} has an operator answer but no confirmed disposition. "
+                         "Leave the action held and report it to Mike.", "review_id": row["id"]}
 
     @staticmethod
     def _waiting(question_id, question):
@@ -514,6 +646,24 @@ class Supervisor:
     def _judgment(self, case):
         try:
             verdict = self.review(case)
+            if "concern_review" in case:
+                item = case["concern_review"]
+                ruling = verdict.get("concern") if isinstance(verdict, dict) else None
+                if (not isinstance(ruling, dict) or type(ruling.get("id")) is not int or ruling["id"] != item["id"]
+                        or ruling.get("decision") not in ("retire", "watch", "ask_operator")
+                        or not isinstance(ruling.get("reason"), str) or not ruling["reason"].strip()
+                        or not isinstance(ruling.get("tools"), list)):
+                    raise OpusResponseError("invalid_concern_ruling")
+                tools = ruling["tools"]
+                if (bool(tools) != (ruling["decision"] != "retire") or
+                        tools != ["*"] and (any(not isinstance(t, str) or t not in self.tool_names for t in tools)
+                                            or len(tools) != len(set(tools)))):
+                    raise OpusResponseError("invalid_concern_scope")
+                if ruling["decision"] == "ask_operator" and (not case.get("concern_question_available")
+                        or "concern_attestation" in case or len(ruling["reason"]) > OPERATOR_QUESTION_LIMIT):
+                    raise OpusResponseError("invalid_concern_question")
+                if "tool" not in case:
+                    return verdict
             accepts_question = (case.get("operator_question_available") is True and
                                 "operator_attestation" not in case and self.operator_room is not None)
             decisions = ("allow", "deny", "ask_operator") if accepts_question else ("allow", "deny")
@@ -522,6 +672,9 @@ class Supervisor:
                 raise OpusResponseError("invalid_verdict")
             if verdict["decision"] == "ask_operator" and len(verdict["reason"]) > OPERATOR_QUESTION_LIMIT:
                 raise OpusResponseError("invalid_verdict")
+            if (verdict["decision"] == "ask_operator" and
+                    verdict.get("concern", {}).get("decision") == "ask_operator"):
+                raise OpusResponseError("invalid_concern_question")
             return verdict
         except Exception as exc:
             raise _opus_failure(exc, batch_id=self.batch_id) from exc

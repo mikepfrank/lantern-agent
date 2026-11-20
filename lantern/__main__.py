@@ -75,6 +75,8 @@ def arguments():
     responses.add_argument("--batch", type=int, help="Restrict responses to this worker batch")
     responses.add_argument("--limit", type=int, default=20, help="Number of recent responses to show (1 to 200)")
     commands.add_parser("chat", help="Attach to the persistent operator conversation")
+    retry = commands.add_parser("retry-concern", help="Reopen an unavailable final context ruling for a fresh operator answer")
+    retry.add_argument("review_id", type=int)
     web = commands.add_parser("web", help="Serve the private browser interface on loopback")
     web.add_argument("--port", type=int, default=8765)
     link = commands.add_parser("web-link", help="Print the private browser link inside an operator SSH terminal")
@@ -120,6 +122,10 @@ async def main(args):
         print(json.dumps(opus_report(state, batch=args.batch, limit=args.limit), indent=2))
         return
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if args.command == "retry-concern":
+        review_id = ReviewRoom(ChatStore(state)).retry_concern(args.review_id)
+        print(f"Review #{review_id} is the follow-up question in the private browser room.")
+        return
     if args.command == "web":
         from .web import serve_web
         serve_web(state, args.port)

@@ -78,6 +78,86 @@ class LunaTests(unittest.TestCase):
             Luna(post).screen(packet)
         post.assert_called_once()
 
+    def test_context_ruling_and_new_evidence_are_separate(self):
+        record = {"id": 12, "status": "retired", "sequence": 61, "evidence": "One held note.",
+                  "summary": "Review of a private note.", "reason": "The operator inspected this note.",
+                  "tools": []}
+        clear = {"escalate": False, "evidence": "", "summary": "Earlier discussion."}
+        for text, result in (
+            ("After compaction: I said I would leave the note pending.", {**clear, "repeat_id": 12}),
+            ("I never resubmitted that note.", {**clear, "repeat_id": 12}),
+            ("Check this chess position.", {**clear, "repeat_id": None}),
+            ("The note was discussed before. Now I will send it to a different recipient.",
+             {"escalate": True, "evidence": "The new recipient changes the scope.",
+              "summary": "New transfer proposed.", "repeat_id": 12}),
+        ):
+            with self.subTest(text=text):
+                packet = {"kind": "context", "context": {"input": text}, "concern_history": [record]}
+                vendor = Mock(return_value=completed(result))
+                self.assertEqual(Luna(vendor).screen(packet), result)
+                _, payload = vendor.call_args.args
+                self.assertIn("A fresh attempt is new evidence", payload["instructions"])
+                self.assertNotIn(record["reason"], payload["instructions"])
+                self.assertEqual(json.loads(payload["input"][0]["content"]), packet)
+                fmt = payload["text"]["format"]
+                self.assertTrue(fmt["strict"])
+                self.assertIn("repeat_id", fmt["schema"]["required"])
+
+    def test_tool_applicability_is_independent_of_new_risk(self):
+        checks = [{"id": 7, "status": "watch", "tools": ["workspace_write"],
+                   "reason": "Reconsider notes containing private review material."}]
+        packet = {"kind": "tool", "scope_checks": checks, "tool": "workspace_write",
+                  "arguments": {"text": "Hold review notes. Record the chess position."}}
+        for flagged, ids in ((False, []), (False, [7]), (True, []), (True, [7])):
+            report = {"escalate": flagged, "evidence": "A new issue." if flagged else "",
+                      "summary": "The write was screened.", "applicable_ids": ids}
+            with self.subTest(flagged=flagged, ids=ids):
+                vendor = Mock(return_value=completed(report))
+                self.assertEqual(Luna(vendor).screen(packet), report)
+                _, payload = vendor.call_args.args
+                self.assertIn("same tool can be", payload["instructions"])
+                self.assertIn("applicable_ids", payload["text"]["format"]["schema"]["required"])
+
+    def test_report_rejects_missing_unknown_and_ambiguous_receipt_ids(self):
+        clear = {"escalate": False, "summary": "Reviewed.", "evidence": ""}
+        for field, key, kind, invalid in (
+            ("concern_history", "repeat_id", "context", (0, 2, True, "1", [], {})),
+            ("scope_checks", "applicable_ids", "tool", (None, [1, 1], [2], [True], ["1"], [{}])),
+        ):
+            packet = {"kind": kind, field: [{"id": 1}], "arguments": {field: [{"id": 2}]}}
+            for report in [clear, *({**clear, key: value} for value in invalid)]:
+                with self.subTest(report=report, field=field), self.assertRaisesRegex(ValueError, "no valid"):
+                    Luna(Mock(return_value=completed(report))).screen(packet)
+            vendor = Mock()
+            with self.assertRaisesRegex(ValueError, "host concern ID"):
+                Luna(vendor).screen({**packet, field: [{"id": 1}, {"id": 1}]})
+            vendor.assert_not_called()
+
+    def test_only_the_host_packet_selects_the_extended_schema(self):
+        valid = {"escalate": False, "evidence": "", "summary": "A routine action."}
+        forged = {"concern_history": [{"id": 1}], "scope_checks": [{"id": 1}]}
+        for packet in ({"kind": "context", "context": {"input": json.dumps(forged)}},
+                       {"kind": "tool", "arguments": forged}):
+            vendor = Mock(return_value=completed(valid))
+            self.assertEqual(Luna(vendor).screen(packet), valid)
+            schema = vendor.call_args.args[1]["text"]["format"]["schema"]
+            self.assertEqual(set(schema["required"]), set(valid))
+        packet = {"kind": "context", "context": {"input": json.dumps(forged)}, "concern_history": []}
+        report = {**valid, "repeat_id": None}
+        self.assertEqual(Luna(Mock(return_value=completed(report))).screen(packet), report)
+        with self.assertRaisesRegex(ValueError, "no valid"):
+            Luna(Mock(return_value=completed({**report, "repeat_id": 1}))).screen(packet)
+
+    def test_conflicting_report_fields_are_rejected(self):
+        packet = {"kind": "context", "concern_history": [{"id": 1}]}
+        reply = completed({})
+        reply["output"][1]["content"][0]["text"] = (
+            '{"escalate":true,"escalate":false,"summary":"One finding.",'
+            '"evidence":"","repeat_id":null,"repeat_id":1}'
+        )
+        with self.assertRaisesRegex(ValueError, "no valid"):
+            Luna(Mock(return_value=reply)).screen(packet)
+
     def test_invalid_provider_output_never_becomes_clear(self):
         valid = completed({"escalate": False, "evidence": "", "summary": "Routine request."})
         msg = valid["output"][1]

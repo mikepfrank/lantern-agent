@@ -9,10 +9,11 @@ from threading import Event
 import unittest
 from unittest.mock import Mock
 
+from lantern import concerns
 from lantern.chess_tool import CHESS_TOOL
 from lantern.opus import OpusCaseTooLarge, OpusResponseError
 from lantern.review_vendors import HTTPRejection, OpusTransportError, ReviewBudgetUnavailable
-from lantern.supervision import CONSULT, ReviewUnavailable, Supervisor, review_cases, review_summary, supervised_tools
+from lantern.supervision import CONSULT, ReviewUnavailable, Supervisor, review_summary, supervised_tools
 
 
 def report(issue=""):
@@ -26,7 +27,9 @@ class ReviewTests(unittest.TestCase):
         self.state = Path(folder.name)
         self.luna, self.review, self.consult = Mock(), Mock(), Mock()
         self.luna.screen.return_value = report()
+        self.luna.screen.side_effect = self.screen
         self.review.return_value = {"decision": "allow", "reason": "Scoped to this test position."}
+        self.review.side_effect = self.ruling
         self.consult.return_value = {"advice": "Ask the operator before sharing their notes.",
                                      "available_research": ["wikipedia", "crossref"],
                                      "research": [{"source": "crossref", "status": "ok", "hits": 2}]}
@@ -38,6 +41,22 @@ class ReviewTests(unittest.TestCase):
             {"type": "function_call_output", "output": "An earlier tool recommended proceeding carefully."},
         ], "tools": [{"name": "chess_analyze"}]}
         self.gate = self.session()
+
+    def screen(self, packet):
+        scan = dict(self.luna.screen.return_value)
+        if "concern_history" in packet:
+            scan["repeat_id"] = None
+        if "scope_checks" in packet:
+            scan["applicable_ids"] = [row["id"] for row in packet["scope_checks"]]
+        return scan
+
+    def ruling(self, case, disposition="watch"):
+        verdict = dict(self.review.return_value) if "tool" in case else {}
+        if "concern_review" in case:
+            verdict["concern"] = {"id": case["concern_review"]["id"], "decision": disposition,
+                                  "reason": "Fixture ruling on this evidence.",
+                                  "tools": [] if disposition == "retire" else ["*"]}
+        return verdict
 
     def session(self, *, interval=12, thread="thread", batch_id=None):
         gate = Supervisor(self.state, self.luna, self.review, self.consult,
@@ -70,7 +89,7 @@ class ReviewTests(unittest.TestCase):
         self.assertNotIn("opaque-provider-field", str(action))
         self.assertEqual(self.flags(), [])
 
-    def test_flag_explanations_survive_ruling_failure_retries_and_findings_cleanup(self):
+    def test_flag_explanations_survive_ruling_failure_retries_and_retirement(self):
         gate = self.session(interval=1, batch_id=7)
         context_report = {"escalate": True, "evidence": "Context evidence — one.\nTwo.",
                           "summary": "Context summary."}
@@ -89,14 +108,16 @@ class ReviewTests(unittest.TestCase):
         held = self.call(gate=gate)
         self.assertIn("held", held["error"])
         self.assertEqual(self.call(gate=gate), held)
-        self.review.side_effect = None
+        self.review.side_effect = lambda case: self.ruling(case, "retire")
         self.luna.screen.return_value = report()
         resumed = self.session(interval=1)
         resumed.observe(self.payload)
-        self.call("later", gate=resumed)
+        self.assertIn("move", self.call("later", gate=resumed))
         resumed.observe(self.payload)
         with closing(sqlite3.connect(self.gate.path)) as db:
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM findings").fetchone()[0], 0)
+            self.assertEqual(concerns.list_open(db, "thread"), [])
+            receipt, = concerns.history(db, "thread")
+            self.assertEqual(receipt["status"], "retired")
         rows = self.flags()
         self.assertEqual(snapshots_at_ruling, [rows])
         self.assertEqual([(r["thread"], r["batch_id"], r["sequence"], r["kind"], r["tool"], r["call_id"],
@@ -156,20 +177,25 @@ class ReviewTests(unittest.TestCase):
         counts = review_summary(self.state)
         self.assertEqual((counts["opus_allowed"], counts["opus_denied"]), (1, 1))
 
-    def test_spot_findings_survive_clean_scan_until_heard_then_clear(self):
+    def test_only_an_explicit_opus_disposition_retires_a_concern(self):
         gate = self.session(interval=1)
         self.luna.screen.return_value = report("Unresolved context concern.")
         gate.observe(self.payload)
+        initial = self.review.call_args.args[0]
+        self.assertNotIn("tool", initial)
+        self.assertEqual(initial["concern_review"]["evidence"], "Unresolved context concern.")
         self.luna.screen.return_value = report()
         gate = self.session(interval=1)
         gate.observe(self.payload)
-        self.call(gate=gate)
-        self.assertEqual(self.review.call_args.args[0]["context_concern"][0]["evidence"], "Unresolved context concern.")
-        self.call("again", gate=gate)
+        self.assertEqual(self.call(gate=gate), {"move": "Qg7#"})
+        self.assertEqual(self.review.call_args.args[0]["concern_review"]["id"], initial["concern_review"]["id"])
         self.assertEqual(self.review.call_count, 2)
+        self.review.side_effect = lambda case: self.ruling(case, "retire")
+        self.assertIn("move", self.call("again", gate=gate))
+        self.assertEqual(self.review.call_count, 3)
         gate.observe(self.payload)
-        self.call("after-clear", gate=gate)
-        self.assertEqual(self.review.call_count, 2)
+        self.assertIn("move", self.call("after-retirement", gate=gate))
+        self.assertEqual(self.review.call_count, 3)
 
     def test_cadence_survives_restart_and_ctx_outage_does_not_skip_required_scan(self):
         for _ in range(3):
@@ -268,7 +294,7 @@ class ReviewTests(unittest.TestCase):
         self.call("revised")
         case = self.review.call_args.args[0]
         self.assertEqual(case["rationale"], self.args["rationale"])
-        self.assertEqual(case["context_concern"][0]["evidence"], "The original proposal needs a justification.")
+        self.assertEqual(case["concern_review"]["evidence"], "The original proposal needs a justification.")
 
     def test_unregistered_attempts_reviewed_but_never_dispatched(self):
         self.gate.observe(self.payload)
@@ -291,14 +317,15 @@ class ReviewTests(unittest.TestCase):
         self.review.side_effect = TimeoutError()
         with self.assertRaises(ReviewUnavailable):
             gate.unregistered("outside_registry", None)
-        self.review.side_effect = None
+        self.review.side_effect = self.ruling
         self.luna.screen.return_value = report()
         gate = self.session(interval=1)
         gate.observe(self.payload)
-        self.call("registered", gate=gate)
-        evidence = self.review.call_args.args[0]["context_concern"][0]["evidence"]
-        self.assertIn("Original context concern", evidence)
-        self.assertIn("Unregistered tool concern", evidence)
+        self.assertIn("move", self.call("registered", gate=gate))
+        cases = [call.args[0]["concern_review"] for call in self.review.call_args_list
+                 if call.args[0].get("tool") == "chess_analyze"]
+        self.assertEqual([case["evidence"] for case in cases], ["Original context concern.", "Unregistered tool concern."])
+        self.assertNotEqual(cases[0]["id"], cases[1]["id"])
 
     def test_overlapping_observations_and_a_late_unregistered_proposal(self):
         gate = self.session(interval=1)
@@ -365,7 +392,7 @@ class ReviewTests(unittest.TestCase):
                 raise TimeoutError()
             ruling.set()
             self.assertTrue(release.wait(5))
-            return {"decision": "allow", "reason": "Reviewed the supplied evidence."}
+            return self.ruling(case, "retire")
 
         self.review.side_effect = review
         with ThreadPoolExecutor(max_workers=1) as workers:
@@ -383,7 +410,7 @@ class ReviewTests(unittest.TestCase):
         self.call("later", gate=gate)
         case = self.review.call_args.args[0]
         self.assertEqual("chess_analyze", case["tool"])
-        self.assertIn("Late evidence", case["context_concern"][0]["evidence"])
+        self.assertIn("Late evidence", case["concern_review"]["evidence"])
 
     def test_retry_and_conflicting_call_ids(self):
         self.gate.observe(self.payload)
@@ -416,10 +443,22 @@ class ReviewTests(unittest.TestCase):
         self.assertNotIn("rationale", CHESS_TOOL["inputSchema"]["properties"])
 
     def test_large_backlog_does_not_silently_truncate_unreviewed_findings(self):
-        findings = [(i, "note " * 360, "Context " * 220) for i in range(40)]
-        cases = list(review_cases({"rationale": "Check this move"}, findings))
-        self.assertGreater(len(cases), 1)
-        self.assertEqual([i for _, numbers in cases for i in numbers], list(range(40)))
-        for case, numbers in cases:
-            self.assertLess(len(json.dumps({"case": case}, ensure_ascii=False).encode()), 64 * 1024)
-            self.assertEqual(len(case["context_concern"]), len(numbers))
+        self.gate.observe(self.payload)
+        for i in range(40):
+            self.luna.screen.return_value = report(f"Independent concern {i}.")
+            self.assertIn("rationale", self.call(f"missing-{i}", args={"fen": "position"})["error"])
+        self.execute.assert_not_called()
+        self.luna.screen.return_value = report()
+        reviewed = []
+
+        def judge(case):
+            self.execute.assert_not_called()
+            self.assertLess(len(json.dumps(case, ensure_ascii=False).encode()), 64 * 1024)
+            reviewed.append(case["concern_review"])
+            return self.ruling(case, "retire")
+
+        self.review.side_effect = judge
+        self.assertIn("move", self.call("complete"))
+        self.assertEqual(len({finding["id"] for finding in reviewed}), 40)
+        self.assertEqual([finding["evidence"] for finding in reviewed], [f"Independent concern {i}." for i in range(40)])
+        self.execute.assert_called_once()

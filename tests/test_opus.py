@@ -133,6 +133,139 @@ class OpusTests(unittest.TestCase):
                 self.assertEqual(reply["content"][0]["text"], original)
                 vendor.assert_called_once()
 
+    def test_standalone_and_combined_concern_rulings(self):
+        concern = {"id": 42, "evidence": "Earlier held note", "scope_tools": ["workspace_write", "harness_logs"]}
+        retire = '<concern id="42" decision="close_resolved">Mike clarified the earlier note.</concern>'
+        watch = '<concern decision="keep_open" id="42" tools="workspace_write harness_logs">Check new copies.</concern>'
+        action = '<review decision="allow">Chess analysis can proceed.</review>'
+        for tool, text, disposition, tools, audit in (
+            (None, retire, "retire", [], "concern_retire"),
+            (None, watch, "watch", ["workspace_write", "harness_logs"], "concern_watch"),
+            ("chess_analyze", action + watch, "watch", ["workspace_write", "harness_logs"], "verdict_allow_concern_watch"),
+            ("chess_analyze", retire + action, "retire", [], "verdict_allow_concern_retire"),
+        ):
+            with self.subTest(tool=tool, disposition=disposition):
+                case = {"concern_review": concern}
+                if tool:
+                    case["tool"] = tool
+                outcomes = []
+                xml = "<ruling>" + text + "</ruling>" if tool else text
+                raw = response(xml)
+                vendor = Mock(return_value=opus.AuditedReply(raw, outcomes.append))
+                result = opus.review(vendor, case)
+                self.assertEqual(result["concern"]["id"], 42)
+                self.assertEqual(result["concern"]["decision"], disposition)
+                self.assertEqual(result["concern"]["tools"], tools)
+                self.assertEqual(result.get("decision"), "allow" if tool else None)
+                self.assertEqual(outcomes, [audit])
+                vendor.assert_called_once()
+                self.assertEqual(vendor.call_args.kwargs["purpose"], "escalation" if tool else "context_review")
+                instructions = vendor.call_args.args[1]["system"]
+                self.assertIn('<concern id="42" decision="close_resolved"', instructions)
+                self.assertIn("removes its extra checks on future actions", instructions)
+                self.assertIn('<concern id="42" decision="keep_open" tools=', instructions)
+                self.assertIn("the risk persists or resolution is uncertain", instructions)
+                self.assertEqual(raw["content"][0]["text"], xml)
+                self.assertIn("inside its concern and review children" if tool else "single concern element as the XML root",
+                              instructions)
+
+    def test_concern_question_uses_a_host_channel_and_final_answer(self):
+        concern = {"id": 7, "scope_tools": ["workspace_write"]}
+        case = {"concern_review": concern, "concern_question_available": True}
+        ask = '<concern id="7" decision="ask_operator" tools="workspace_write">Does this cover reports?</concern>'
+        watch = '<concern id="7" decision="keep_open" tools="*">All work paused until clarification.</concern>'
+        answer = {"answer": "Pause work on this project for now."}
+        self.assertEqual(opus.review(Mock(return_value=response(ask)), case)["concern"]["decision"], "ask_operator")
+        vendor = Mock(return_value=response(watch))
+        result = opus.review(vendor, {**case, "concern_attestation": answer})
+        self.assertEqual(result["concern"]["tools"], ["*"])
+        body = vendor.call_args.args[1]
+        packet = json.loads(body["messages"][0]["content"])
+        self.assertEqual(packet, {"case": {"concern_review": concern}, "concern_attestation": answer})
+        self.assertNotIn("ask_operator", body["system"])
+        prior = {**case, "tool": "workspace_write", "operator_question_available": True,
+                 "prior_concern_attestation": answer}
+        question = '<review decision="ask_operator">Does the earlier answer cover this new file?</review>'
+        vendor = Mock(return_value=response('<ruling>' + watch + question + '</ruling>'))
+        self.assertEqual(opus.review(vendor, prior)["decision"], "ask_operator")
+        packet = json.loads(vendor.call_args.args[1]["messages"][0]["content"])
+        self.assertEqual(packet["prior_concern_attestation"], answer)
+        self.assertNotIn("prior_concern_attestation", packet["case"])
+        for restricted, text in (
+            ({"concern_review": {**concern, "concern_question_available": True}}, ask),
+            ({**case, "concern_attestation": answer}, ask),
+            ({**case, "concern_attestation": answer}, '<search source="crossref">ethics</search>'),
+            ({"concern_review": concern, "tool": "workspace_write", "operator_question_available": True},
+             '<ruling>' + ask + '<review decision="allow">Fine.</review></ruling>'),
+            ({**case, "tool": "workspace_write"},
+             '<ruling>' + watch + '<review decision="ask_operator">Is this covered?</review></ruling>'),
+        ):
+            with self.subTest(restricted=restricted, text=text), patch("lantern.opus.public_search") as search:
+                vendor = Mock(return_value=response(text))
+                with self.assertRaises(opus.OpusResponseError):
+                    opus.review(vendor, restricted)
+                vendor.assert_called_once()
+                search.assert_not_called()
+
+    def test_incomplete_or_ambiguous_concern_judgment_cannot_authorize(self):
+        case = {"concern_review": {"id": 3, "scope_tools": ["workspace_write"]}, "tool": "workspace_write"}
+        allow = '<review decision="allow">Permit this note.</review>'
+        watch = '<concern id="3" decision="keep_open" tools="workspace_write">Review new copies.</concern>'
+        for body in (
+            allow, '<ruling>' + allow + '</ruling>', '<ruling>' + watch + '</ruling>',
+            '<ruling>' + allow + allow + watch + '</ruling>', '<ruling>' + allow + watch + watch + '</ruling>',
+            '<ruling>' + allow + ' only conditionally' + watch + '</ruling>',
+            *('<ruling>' + allow + invalid + '</ruling>' for invalid in (
+                watch.replace('id="3"', 'id="4"'), watch.replace('keep_open', 'resolved'),
+                watch.replace('keep_open', 'watch'),
+                '<concern id="3" decision="retire">The case can be closed.</concern>',
+                watch.replace('keep_open', 'close_resolved'), watch.replace('tools="workspace_write"', ''),
+                watch.replace('workspace_write', 'workspace_read'), watch.replace('workspace_write', '* workspace_write'),
+                watch.replace('workspace_write', 'workspace_write workspace_write'), watch.replace('Review new copies.', ''),
+                watch.replace('Review new copies.', '<review decision="allow">All.</review>'),
+            )),
+            'Only subject to new permission: <ruling>' + allow + watch + '</ruling>',
+        ):
+            with self.subTest(body=body):
+                outcomes = []
+                vendor = Mock(return_value=opus.AuditedReply(response(body), outcomes.append))
+                with self.assertRaises(opus.OpusResponseError) as error:
+                    opus.review(vendor, case)
+                vendor.assert_called_once()
+                self.assertEqual(outcomes, [error.exception.code])
+
+    def test_combined_verdict_allows_one_operator_question(self):
+        case = {"concern_review": {"id": 9, "scope_tools": ["workspace_write"]}, "tool": "workspace_write",
+                "operator_question_available": True, "concern_question_available": True}
+        for action, concern in (("deny", "ask_operator"), ("ask_operator", "keep_open"),
+                                ("ask_operator", "ask_operator")):
+            with self.subTest(action=action, concern=concern):
+                xml = (f'<ruling><review decision="{action}">Can the note be saved?</review>'
+                       f'<concern id="9" decision="{concern}" tools="workspace_write">'
+                       'Which notes are in scope?</concern></ruling>')
+                audit = []
+                vendor = Mock(return_value=opus.AuditedReply(response(xml), audit.append))
+                if action == concern == "ask_operator":
+                    with self.assertRaisesRegex(opus.OpusResponseError, "invalid_concern_question"):
+                        opus.review(vendor, case)
+                    self.assertEqual(audit, ["invalid_concern_question"])
+                else:
+                    verdict = opus.review(vendor, case)
+                    self.assertEqual(verdict["decision"], action)
+                    self.assertEqual(verdict["concern"]["decision"],
+                                     "watch" if concern == "keep_open" else "ask_operator")
+                self.assertIn("at most one operator question", vendor.call_args.args[1]["system"])
+
+    def test_outer_explanation_cannot_qualify_a_standalone_decision(self):
+        case = {"concern_review": {"id": 9, "scope_tools": ["workspace_write"]}}
+        # The legacy reviewer added an explanatory paragraph before its child in the trial.
+        leaf = '<concern id="9" decision="close_resolved">The training note was benign.</concern>'
+        for xml in ('<ruling>This case can be closed. It was a routine progress record.\n'+leaf+'\n</ruling>',
+                    '<ruling>Continue monitoring this concern.\n'+leaf+'\n</ruling>',
+                    '<ruling>'+leaf+'</ruling>', leaf+'\nBut only after operator approval.'):
+            with self.subTest(xml=xml), self.assertRaises(opus.OpusResponseError):
+                opus.review(Mock(return_value=response(xml)), case)
+
     def test_heading_cannot_hide_conditions_or_supply_another_instruction(self):
         verdict = '<review decision="allow">The request is in scope.</review>'
         heading = "Here is my review of the proposed workspace_write action:"

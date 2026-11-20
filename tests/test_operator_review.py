@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -120,6 +121,81 @@ class OperatorReviewTests(unittest.TestCase):
             fresh.release_final(review_id, "exact")
         with self.assertRaises(ValueError):
             fresh.finish_final(review_id, "exact", "allow", "Reverse the completed verdict")
+
+    def test_context_ruling_scope_survives_restart_without_authorizing_action(self):
+        case = self.room.open(self.thread, "concern:7", "context_concern", "ctx:7",
+                              "Past attempts to save an oversight note", "Evidence", "Is that resolved?")
+        self.room.answer(case, "Keep an eye on its next write.")
+        self.assertIn("The host will revisit the context concern", self.store.recent(1)[0].text)
+        self.assertNotIn("submit a fresh proposal", self.store.recent(1)[0].text)
+        self.assertEqual(self.room.claim_final(case, "ruling"), "claimed")
+        for decision, tools in (("allow", []), ("watch", []), ("retire", ["workspace_write"])):
+            with self.subTest(decision=decision), self.assertRaises(ValueError):
+                self.room.finish_final(case, "ruling", decision, "A reason.", tools=tools)
+        self.room.finish_final(case, "ruling", "watch", "Inspect future note changes.", tools=["workspace_write"])
+        self.assertIn("Opus kept the context concern open for workspace_write", self.store.recent(1)[0].text)
+        fresh = ReviewRoom(self.store)
+        self.assertEqual(json.loads(fresh.case(self.thread, "concern:7")["final_tools"]), ["workspace_write"])
+        cursor = self.store.recent(1)[0].id
+        fresh.finish_final(case, "ruling", "watch", "Inspect future note changes.", tools=["workspace_write"])
+        with self.assertRaises(ValueError):
+            fresh.finish_final(case, "ruling", "watch", "Inspect future note changes.", tools=["*"])
+        self.assertEqual(self.store.events(after=cursor), [])
+        normal = self.ask()
+        fresh.answer(normal, "Ordinary action.")
+        fresh.claim_final(normal, "action")
+        with self.assertRaises(ValueError):
+            fresh.finish_final(normal, "action", "retire", "Do not grant an action verdict from a context decision.")
+
+    def test_reopen_only_the_latest_unavailable_context_final_once(self):
+        scope = "concern:42"
+        original = self.room.open(self.thread, scope, "context_concern", "ctx:42",
+                                  "Concern #42", "Source", "What was intended?")
+        with self.assertRaises(ValueError):
+            self.room.retry_concern(original)
+        self.room.answer(original, "Private only.")
+        self.room.claim_final(original, "first")
+        self.room.recover_finals()
+        original_wake = self.store.status()["queued"]
+        with ThreadPoolExecutor(3) as pool:
+            questions = list(pool.map(lambda _: self.room.retry_concern(original), range(3)))
+        self.assertEqual(len(set(questions)), 1)
+        reopened = questions[0]
+        self.assertNotEqual(reopened, original)
+        self.assertEqual([q["id"] for q in self.room.pending()], [reopened])
+        self.assertEqual(self.room.case(self.thread, scope)["id"], reopened)
+        self.assertEqual(self.store.status()["queued"], original_wake)
+        self.room.answer(reopened, "The incident was resolved.")
+        self.room.claim_final(reopened, "second")
+        self.room.finish_final(reopened, "second", "unavailable", "Unusable reply.")
+        newest = self.room.retry_concern(reopened)
+        self.assertNotEqual(newest, reopened)
+        with self.assertRaises(ValueError):
+            self.room.retry_concern(original)
+        self.room.answer(newest, "Yes, the earlier issue is resolved.")
+        self.room.claim_final(newest, "third")
+        self.room.finish_final(newest, "third", "retire", "Closed by Mike.")
+        self.assertEqual(json.loads(self.room.case(self.thread, scope)["final_tools"]), [])
+        with self.assertRaises(ValueError):
+            self.room.retry_concern(newest)
+        normal = self.ask()
+        self.room.answer(normal, "Private only.")
+        self.room.claim_final(normal, "action")
+        self.room.recover_finals()
+        with self.assertRaises(ValueError):
+            self.room.retry_concern(normal)
+
+    def test_migration_keeps_preexisting_final_action_receipt(self):
+        old = ChatStore(Path(self.enterContext(TemporaryDirectory())))
+        with old._connect(write=True) as db:
+            db.execute("""CREATE TABLE operator_reviews (id INTEGER PRIMARY KEY,thread TEXT,scope TEXT,
+                tool TEXT,call_id TEXT,status TEXT,final_fingerprint TEXT,final_decision TEXT,final_reason TEXT)""")
+            db.execute("""INSERT INTO operator_reviews VALUES
+                (1,'old','old-scope','workspace_read','old-call','answered','same','allow','Already decided.')""")
+            db.execute("UPDATE room SET thread_id='old'")
+        migrated = ReviewRoom(old)
+        self.assertIsNone(migrated.case("old", "old-scope")["final_tools"])
+        migrated.finish_final(1, "same", "allow", "Already decided.")
 
     def test_recovery_holds_unknown_outcome_and_publishes_each_final_once(self):
         interrupted = self.ask(call="one", scope="one")

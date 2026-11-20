@@ -30,11 +30,15 @@ invalid_upstream_response settled unconfirmed rejected metered ambiguous archive
 context_flagged context_clear tool_flagged tool_clear tool_review_unreadable tool_review_unavailable
 opus_allowed opus_denied opus_asked_operator opus_advice unregistered_blocked unregistered_clear unregistered_flagged
 unregistered_review_unreadable unregistered_review_unavailable unregistered_screen_unavailable
-unregistered_opus_allow unregistered_opus_deny""".split())
+unregistered_opus_allow unregistered_opus_deny context_repeat context_review_unavailable""".split())
 OPUS_CODES = set("""invalid_json unexpected_model output_limit incomplete_response invalid_content
 response_text_too_long forbidden_xml malformed_xml nested_elements empty_element invalid_verdict
 invalid_advice search_limit invalid_search verdict_allow verdict_deny ask_operator advice search invalid_usage
-archive_error incomplete_body transport_error response_too_large""".split())
+archive_error incomplete_body transport_error response_too_large invalid_concern_ruling
+invalid_concern_scope invalid_concern_question""".split())
+for disposition in ("retire", "watch", "ask_operator"):
+    OPUS_CODES.add("concern_" + disposition)
+    OPUS_CODES.update("verdict_" + decision + "_concern_" + disposition for decision in ("allow","deny","ask_operator"))
 COVERAGE = ("Times use UTC. Model call times are admission times. OpenRouter's HTTP code, provider "
             "identity and running release revision are absent from these ledgers. Supervision events "
             "without a recorded batch link appear only in the unfiltered view. Luna concern topics "
@@ -90,7 +94,7 @@ def _record(kind, row):
         if type(value) is int and value >= 0:
             event[name] = value
     for name, allowed in [
-        ("tool", TOOLS), ("model", {"luna", "opus", "qwen"}), ("purpose", {"tool", "spot", "consult", "escalation"}),
+        ("tool", TOOLS), ("model", {"luna", "opus", "qwen"}), ("purpose", {"tool", "spot", "consult", "escalation", "context_review"}),
         ("trigger", {"operator", "heartbeat", "alarm", "continuation", "turn", "worker"}),
         ("charge_source", {"openrouter", "router_no_eligible_endpoint"}),
         ("flag_kind", {"tool", "context", "unregistered_tool"}),

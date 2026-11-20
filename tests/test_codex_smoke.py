@@ -16,7 +16,7 @@ import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from lantern.__main__ import MATE_FEN, arguments, main
 from lantern.chess_tool import analyze_position
@@ -127,6 +127,8 @@ class NativeCodexSmoke(unittest.TestCase):
         denial = "Wait for permission or switch to an openly shared position."
         advice = "Use the public mate-in-one fixture."
         allowed_reason = "The supplied fixture is public and the operator requests chess analysis."
+        private_fen = "7k/8/5KQ1/8/8/8/P7/8 w - - 0 1"
+        authorization = f"I own this private puzzle and now authorize its analysis: {private_fen}"
 
         def fake_review(vendor, key, body, *, audit=None):
             payload = json.loads(body)
@@ -138,6 +140,8 @@ class NativeCodexSmoke(unittest.TestCase):
                 escalate = packet["kind"] == "tool" and packet["rationale"] == initial_reason
                 report = {"escalate": escalate, "evidence": "The agent reports missing permission." if escalate else "",
                           "summary": "The operator asked Lantern to analyze a chess position."}
+                if f"user: {authorization}" in packet.get("recent_context", ""):
+                    report["summary"] = authorization
                 return {"model": payload["model"], "status": "completed", "usage": usage, "output": [
                     {"type": "message", "role": "assistant", "status": "completed",
                      "content": [{"type": "output_text", "text": json.dumps(report)}]}]}
@@ -147,10 +151,15 @@ class NativeCodexSmoke(unittest.TestCase):
             case = json.loads(payload["messages"][0]["content"])["case"]
             review_calls.append((vendor, case["tool"]))
             if case["tool"] == "chess_analyze":
-                self.assertEqual(case["rationale"], initial_reason)
-                self.assertEqual(case["arguments"], {"fen": MATE_FEN})
-                self.assertIn("permission", case["evidence"])
-                text = f'<review decision="deny">{denial}</review>'
+                self.assertEqual(case["arguments"], {"fen": private_fen})
+                if case.get("prior_action_denial") == denial:
+                    self.assertEqual(case["summary"], authorization)
+                    self.assertEqual(case["evidence"], "")  # Luna cleared the exact retry.
+                    text = '<review decision="allow">The author directly authorized this puzzle.</review>'
+                else:
+                    self.assertEqual(case["rationale"], initial_reason)
+                    self.assertIn("permission", case["evidence"])
+                    text = f'<review decision="deny">{denial}</review>'
             else:
                 self.assertEqual(case["tool"], "consult_opus")
                 self.assertIn("question", case["arguments"])
@@ -188,7 +197,7 @@ class NativeCodexSmoke(unittest.TestCase):
                                 if i.get("type") == "function_call_output"}
                 if serial == 1:
                     self.assertIn(MATE_FEN, users[-1])
-                    tool, args = "chess_analyze", {"fen": MATE_FEN, "rationale": initial_reason}
+                    tool, args = "chess_analyze", {"fen": private_fen, "rationale": initial_reason}
                 elif serial == 2:
                     self.assertIn(denial, tool_outputs["call_1"])
                     self.assertNotIn("Qg7#", tool_outputs["call_1"])
@@ -197,18 +206,24 @@ class NativeCodexSmoke(unittest.TestCase):
                 elif serial == 3:
                     self.assertIn(advice, tool_outputs["call_2"])
                     tool, args = "chess_analyze", {"fen": MATE_FEN, "rationale": allowed_reason}
-                if serial <= 3:
+                elif serial == 6:
+                    self.assertIn(authorization, users[-1])
+                    tool, args = "chess_analyze", {"fen": private_fen, "rationale": "The author now consents."}
+                if serial <= 3 or serial == 6:
                     item = {"type": "function_call", "id": f"fc_{serial}", "call_id": f"call_{serial}",
                             "status": "completed", "name": tool, "arguments": json.dumps(args)}
                 else:
                     self.assertIn("Qg7#", tool_outputs["call_3"])
                     if serial == 4:
                         answer = "Qg7# is checkmate."
-                    else:
-                        self.assertEqual(serial, 5, "unexpected extra API request")
+                    elif serial == 5:
                         self.assertIn("preceding exchange", users[-1])
                         self.assertNotIn(ticket.group(), users[-1])
                         answer = f"{ticket.group()} Qg7#"
+                    else:
+                        self.assertEqual(serial, 7, "unexpected extra API request")
+                        self.assertIn("Qg7#", tool_outputs["call_6"])
+                        answer = "The private puzzle also ends with Qg7#."
                     item = {"type": "message", "role": "assistant", "id": f"msg_fixture_{serial}",
                             "status": "completed", "content": [{"type": "output_text", "annotations": [],
                                                                   "text": answer}]}
@@ -231,23 +246,28 @@ class NativeCodexSmoke(unittest.TestCase):
                  patch("asyncio.create_subprocess_exec", record_process), redirect_stdout(StringIO()) as output:
                 try:
                     asyncio.run(main(args))
+                    tid = re.search(r'"thread": "([0-9a-f-]+)"', output.getvalue()).group(1)
+                    with patch.object(sys, "argv", ["lantern", "--state", str(state), "--codex", binary,
+                                                    "say", authorization, "--thread", tid]):
+                        asyncio.run(main(arguments()))
                 finally:
                     self.assertEqual(errors, [])
             ledger = ReviewerVendors(state, DEFAULT_DAILY_USD).today()
             self.assertEqual({entry["purpose"]: entry["calls"] for entry in ledger["by_purpose"]},
-                             {"spot": 1, "tool": 3, "escalation": 1, "consult": 1})
+                             {"spot": 1, "tool": 4, "escalation": 2, "consult": 1})
             self.assertEqual(ledger["reserved_usd"], "0")
-            tid = re.search(r'"thread": "([0-9a-f-]+)"', output.getvalue()).group(1)
             with closing(sqlite3.connect(state / "review-costs.sqlite")) as db:
                 tagged = db.execute("SELECT thread_id,batch_id,vendor,purpose,tool FROM calls ORDER BY rowid").fetchall()
             self.assertEqual(tagged, [(tid, None, *fields) for fields in [
                 ("luna", "spot", None), ("luna", "tool", "chess_analyze"),
                 ("opus", "escalation", "chess_analyze"), ("luna", "tool", "consult_opus"),
                 ("opus", "consult", "consult_opus"), ("luna", "tool", "chess_analyze"),
+                ("luna", "tool", "chess_analyze"), ("opus", "escalation", "chess_analyze"),
             ]])
-        engine.assert_called_once_with({"fen": MATE_FEN})
+        self.assertEqual(engine.call_args_list, [call({"fen": MATE_FEN}), call({"fen": private_fen})])
         self.assertEqual(review_calls, [("luna", "context"), ("luna", "tool"), ("opus", "chess_analyze"),
-                                       ("luna", "tool"), ("opus", "consult_opus"), ("luna", "tool")])
-        self.assertEqual(routes, ["throughput"] * 4 + ["price"])
-        self.assertEqual(len(set(child_pids)), 2)
+                                       ("luna", "tool"), ("opus", "consult_opus"), ("luna", "tool"),
+                                       ("luna", "tool"), ("opus", "chess_analyze")])
+        self.assertEqual(routes, ["throughput"] * 4 + ["price"] + ["throughput"] * 2)
+        self.assertEqual(len(set(child_pids)), 3)
         self.assertIn('"smoke": "passed"', output.getvalue())

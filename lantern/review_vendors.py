@@ -143,7 +143,7 @@ class ReviewerVendors:
         if vendor == "luna" and purpose in ("tool", "spot") and payload.get("model") == LUNA_MODEL:
             env, output_limit = "OPENAI_API_KEY", LUNA_OUTPUT
             output = payload.get("max_output_tokens")
-        elif vendor == "opus" and purpose in ("consult", "escalation") and payload.get("model") == OPUS_MODEL:
+        elif vendor == "opus" and purpose in ("consult", "escalation", "context_review") and payload.get("model") == OPUS_MODEL:
             env, output_limit = "ANTHROPIC_API_KEY", OPUS_OUTPUT
             output = payload.get("max_tokens")
         else:
