@@ -13,6 +13,7 @@ from uuid import UUID
 from .codex_session import BASE_INSTRUCTIONS
 from .coding_tools import CODING_TOOL
 from .diagnostics import DIAGNOSTICS_TOOL
+from .pdf_tool import PDF_TOOL
 from .supervision import supervised_tools
 
 
@@ -145,7 +146,7 @@ def install_room_tools(state, thread_id, tools):
         raise ValueError("Invalid private room thread ID")
     home = state / "codex"
     backups = state / "operator-backups"
-    optional = {"coding-workspace": CODING_TOOL, "harness-logs": DIAGNOSTICS_TOOL}
+    optional = {"coding-workspace": CODING_TOOL, "harness-logs": DIAGNOSTICS_TOOL, "pdf-pages": PDF_TOOL}
     additions = {tool["name"]: label for label, tool in optional.items()}
     stages = {label: [] for label in ("independent-work", *optional)}
     for tool in tools:

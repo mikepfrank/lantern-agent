@@ -2,6 +2,8 @@
 
 ## Current state
 
+**PDF page inspection.** The private worker registers `view_pdf_page(path, page)` through the normal Luna/Opus review path. Lantern can inspect the illustrated heritage PDF and ordinary PDF files in its coding volume, one page at a time, from either chat interface. Rendering runs in an offline, read-only container. The same native Codex thread receives the pixels as a tool result, including during Luna's sampled reviews. The private room caches up to 64 distinct rendered images and binds each reference to the reviewed thread and call. See the [operator guide](deploy/README.md#coding-environment) for deployment and the source paths.
+
 **Browser image input, November 19, 2026 (US Central).** The shared room supports private image attachments, captions, incoming mid-turn messages and authenticated previews. The browser converts images to a bounded PNG. The host stores its bytes and digest with the operator's event in `chat.sqlite`. Codex 0.169 rejects remote image URLs, so its native history carries a small inline PNG identifying the event and digest. The gateway resolves this reference against the operator store and sends the actual pixels to Qwen and to Luna's sampled full-context checks. Up to four recent images are included in each model input. Older images remain accessible in the web history. Only human message text provides operator instructions.
 
 An isolated, metered Lightsail test used a randomized six-circle diagram. Qwen identified the top row and the connected pair on the fastest route. After restarting the worker, it read the bottom row on the cheapest route. Both requests and Luna's spot check received the exact uploaded PNG. OpenRouter used Nebius for both preferences. The two Qwen calls cost $0.00403 in total, and the one Luna call cost an estimated $0.00070. The test used its own conversation and charged the ordinary daily ledgers.
@@ -70,7 +72,7 @@ The private CLI uses `Lantern.md` as the default persona for new threads. The ac
 
 Codex 0.169 persists its tool registry and the original developer persona in the native thread history. For the existing room, release `288fcef` introduced the reader and replaced the exact old developer persona in the saved thread. An offline rehearsal on a private copy verified the outgoing persona, tool list and original thread ID. The pre-change room files are under the private state directory in `operator-backups/heritage-288fcef/`. Restoring that snapshot after subsequent chat would discard intervening work; use a copy for inspection.
 
-Lantern can call the supervised `read_heritage` tool to read passages on demand. The portable edition is `lmstudio-chat.md`. The verbatim export `lmstudio-chat.txt` preserves LM Studio's role markers on disk and the reader escapes their delimiters. The illustrated original is `lmstudio-chat.pdf`. A private, digest-matched `lmstudio-chat.pdf-pages.json` provides text by page. The current reader returns quotations to the text model; the images remain in the original PDF.
+Lantern can call the supervised `read_heritage` tool to read passages on demand. The portable edition is `lmstudio-chat.md`. The verbatim export `lmstudio-chat.txt` preserves LM Studio's role markers on disk and the reader escapes their delimiters. The illustrated original is `lmstudio-chat.pdf`. A private, digest-matched `lmstudio-chat.pdf-pages.json` provides text by page. For original illustrations and layout, use `view_pdf_page` with `heritage/lmstudio-chat.pdf` and a one-based page number.
 
 The commissioning exchanges remain visible in `/history`. The first delivered an interim greeting, then Opus objected to disclosing a test receipt identifier and the Qwen response hit its old 4,096-token limit. In the second exchange, both test clients disconnected after changing a candle question to ask about an LED. The final answer used the new example. Codex had already received the replacement answer while the obsolete generation was still reporting costs. The current worker releases the validated answer and continues settling the specific superseded request in the background. An acknowledged steer alone never releases a budget reservation.
 
@@ -78,9 +80,7 @@ After restarting the final release, the private room retained its thread ID. A l
 
 ## TODO
 
-Mike's next acceptance step is to try a personal image in the private web room. The next development item is supervised PDF page inspection using the same image path.
-
-- **Supervised PDF reading.** Extract text and render a selected page on demand so Lantern can inspect diagrams and illustrations via the same image path. The illustrated heritage PDF provides a private acceptance case.
+Mike confirmed that Lantern could see both personal images he uploaded. Page 2 of the 23-page illustrated heritage PDF has two embedded pictures and provides a private follow-up test.
 - **Hosted browser authentication.** Give Mike an HTTPS sign-in with revocable sessions so routine browser use can work without opening an SSH tunnel or copying a fresh link after each web service restart. Keep the operator room private and answers to Opus attributable to Mike. Evaluate the chess service's session and CSRF patterns with Lantern's own credentials and session storage.
 - Expose the existing fastest/cheapest OpenRouter preferences through a supervised Lantern tool. Verify that a change reaches the next outbound request and that the same spend cap applies in either mode.
 - Add a host-side, supervised GitHub proposal tool and a way to import upstream revisions into the coding clone while preserving Lantern's work. Keep GitHub credentials separate from every process that runs model-supplied code or Git hooks. Mike and Astra review proposals before merge and deployment.

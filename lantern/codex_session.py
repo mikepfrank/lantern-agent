@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from .chat_text import trim_reply_segment
+from .image_ref import image_reference
 
 
 class CodexError(RuntimeError):
@@ -183,18 +184,28 @@ class _Peer:
                 name, args = p.get("tool"), p.get("arguments")
                 if name not in self.tools or p.get("namespace") or not isinstance(args, dict):
                     raise CodexError("Codex requested a tool outside this session")
+                image_url = None
                 try:
                     call_id = p.get("callId")
                     if not isinstance(call_id, str) or not call_id:
                         raise CodexError("Codex omitted the tool call ID")
                     value = self.dispatch(call_id, name, args)
                     success = "error" not in value
+                    if success and name == "view_pdf_page":
+                        ref = value.get("page_image")
+                        if (not isinstance(ref, dict) or type(ref.get("id")) is not int
+                                or not isinstance(ref.get("sha256"), str)):
+                            raise ValueError("The rendered page is missing its private image reference.")
+                        image_url = image_reference(ref["id"], ref["sha256"], page=True)
+                        value = {k: v for k, v in value.items() if k != "page_image"}
                 except ValueError as exc:
                     value, success = {"error": str(exc)}, False
                 if success:
                     self.tool_calls.append(name)
                 result = {"success": success, "contentItems": [
                     {"type": "inputText", "text": json.dumps(value, ensure_ascii=False, allow_nan=False)}]}
+                if success and image_url:
+                    result["contentItems"].append({"type": "inputImage", "imageUrl": image_url})
             else:
                 await self.send({"id": msg["id"], "error": {"code": -32601, "message": "Capability unavailable"}})
                 raise CodexError("Codex requested an unsupported host capability")

@@ -63,13 +63,14 @@ class UnregisteredCall(ProtocolError):
         self.arguments = item.get("arguments")
 
 
-def _prepare_input(items, names, image_loader):
+def _prepare_input(items, names, image_loader, page_image_loader):
     if isinstance(items, str):
         return items
     if not isinstance(items, list):
         raise ProtocolError("expected a stateless conversation")
     images = []
     latest_user = None
+    page_calls = set()
     for index, item in enumerate(items):
         if not isinstance(item, dict):
             raise ProtocolError("invalid conversation item")
@@ -82,25 +83,30 @@ def _prepare_input(items, names, image_loader):
                 continue
             if not isinstance(content, list):
                 raise ProtocolError("invalid message content")
+            page_call = item.get("call_id") if kind == "function_call_output" else None
             for position, part in enumerate(content):
                 if not isinstance(part, dict):
                     raise ProtocolError("invalid content part")
                 if part.get("type") in ("input_text", "output_text") and isinstance(part.get("text"), str):
                     continue
-                if (part.get("type") != "input_image" or kind != "message" or item.get("role") != "user"
-                        or not image_loader or set(part) - {"type", "image_url", "detail"}):
+                is_page = kind == "function_call_output"
+                if (part.get("type") != "input_image" or set(part) - {"type", "image_url", "detail"}
+                        or (is_page and (not page_image_loader or page_call not in page_calls))
+                        or (not is_page and (not image_loader or item.get("role") != "user"))):
                     raise ProtocolError("unsupported content part")
                 try:
-                    event_id, digest = parse_reference(part.get("image_url"))
+                    event_id, digest = parse_reference(part.get("image_url"), page=is_page)
                 except ValueError:
-                    raise ProtocolError("unknown operator image reference") from None
+                    raise ProtocolError("unknown private image reference") from None
                 detail = part.get("detail") or "auto"
                 if detail not in ("auto", "low", "high", "original"):
                     raise ProtocolError("unsupported image detail")
-                images.append((index, position, event_id, digest, "high" if detail == "original" else detail))
+                images.append((index, position, event_id, digest, "high" if detail == "original" else detail, page_call))
         elif kind == "function_call":
             if item.get("name") not in names:
                 raise ProtocolError("unknown tool in conversation")
+            if item.get("name") == "view_pdf_page" and isinstance(item.get("call_id"), str):
+                page_calls.add(item["call_id"])
         elif kind != "reasoning":
             raise ProtocolError("unsupported conversation item")
     if not images:
@@ -108,33 +114,35 @@ def _prepare_input(items, names, image_loader):
     # Codex persists only short host references in its stateless history. Expand
     # recent images after validation, without exposing a fetchable URL upstream.
     result = list(items)
-    for number, (index, position, event_id, digest, detail) in enumerate(images):
+    for number, (index, position, event_id, digest, detail, page_call) in enumerate(images):
+        field = "output" if page_call is not None else "content"
+        source = f"rendered PDF page (image #{event_id})" if page_call is not None else f"operator image, message #{event_id}"
         if result[index] is items[index]:
-            result[index] = {**items[index], "content": list(items[index]["content"])}
+            result[index] = {**items[index], field: list(items[index][field])}
         if number < len(images) - MAX_TURN_IMAGES:
-            part = {"type": "input_text", "text": f"[Earlier operator image, message #{event_id}. "
+            part = {"type": "input_text", "text": f"[Earlier {source}. "
                     "Its pixels are archived outside the current image window.]"}
         else:
             try:
-                data = image_loader(event_id)
+                data = page_image_loader(event_id, page_call) if page_call is not None else image_loader(event_id)
             except Exception as exc:
-                raise ProtocolError("stored operator image is unavailable") from exc
+                raise ProtocolError("stored image is unavailable") from exc
             if (not isinstance(data, bytes) or not 0 < len(data) <= MAX_IMAGE_BYTES
                     or not data.startswith(SIGNATURE) or hashlib.sha256(data).hexdigest() != digest):
-                if index == latest_user:
-                    raise ProtocolError("stored operator image does not match the message reference")
+                if index == latest_user or (page_call is not None and (latest_user is None or index > latest_user)):
+                    raise ProtocolError("stored image does not match its reference")
                 # A later turn can still discuss the text. Never present unrelated
                 # or corrupt pixels, or silently imply that the reviewer saw them.
-                part = {"type": "input_text", "text": f"[Image from earlier operator message #{event_id} "
+                part = {"type": "input_text", "text": f"[Earlier {source} "
                         "is unavailable. Its pixels could not be verified.]"}
             else:
                 url = "data:image/png;base64," + base64.b64encode(data).decode("ascii")
                 part = {"type": "input_image", "image_url": url, "detail": detail}
-        result[index]["content"][position] = part
+        result[index][field][position] = part
     return result
 
 
-def _prepare(payload, route, tools, *, resuming=False, image_loader=None):
+def _prepare(payload, route, tools, *, resuming=False, image_loader=None, page_image_loader=None):
     if not isinstance(payload, dict) or payload.get("model") != MODEL or payload.get("stream") is not True:
         raise ProtocolError("expected a streaming request for " + MODEL)
     if payload.get("previous_response_id") is not None:
@@ -142,8 +150,8 @@ def _prepare(payload, route, tools, *, resuming=False, image_loader=None):
     names = {tool["name"] for tool in tools}
     # Historical calls remain inert transcript entries when a host tool has
     # been disabled. New replies and tool_choice still use the enabled names.
-    history_names = names | {"coding_run", "harness_logs"} if resuming else names
-    prepared_input = _prepare_input(payload.get("input"), history_names, image_loader)
+    history_names = names | {"coding_run", "harness_logs", "view_pdf_page"} if resuming else names
+    prepared_input = _prepare_input(payload.get("input"), history_names, image_loader, page_image_loader)
     incoming = payload.get("tools", [])
     if not isinstance(incoming, list) or any(not isinstance(tool, dict) for tool in incoming):
         raise ProtocolError("invalid tool declarations")
@@ -349,7 +357,7 @@ class OpenRouterGateway:
     """
 
     def __init__(self, api_key, *, route, tools, reserve, settle, observe, unregistered, resuming=False,
-                 operator_context="", finish=None, handoff_due=None, image_loader=None):
+                 operator_context="", finish=None, handoff_due=None, image_loader=None, page_image_loader=None):
         if route not in ROUTES or not api_key:
             raise ValueError("a valid route and OpenRouter key are required")
         self.route = route
@@ -361,6 +369,7 @@ class OpenRouterGateway:
         self.operator_context = operator_context
         self.handoff_due = handoff_due
         self.image_loader = image_loader
+        self.page_image_loader = page_image_loader
         self._api_key = api_key
         self.token = secrets.token_urlsafe(32)
         self.evidence = []
@@ -447,7 +456,8 @@ class OpenRouterGateway:
                         evidence["error"] = "invalid request size"
                         return self.reject_unread(413, "invalid request size")
                     prepared = _prepare(json.loads(self.rfile.read(length)), gateway.route, gateway.tools,
-                                        resuming=gateway.resuming, image_loader=gateway.image_loader)
+                                        resuming=gateway.resuming, image_loader=gateway.image_loader,
+                                        page_image_loader=gateway.page_image_loader)
                     if gateway.operator_context:
                         # Apply current channel facts even when Codex resumes an older thread.
                         instructions = prepared.get("instructions") or ""

@@ -26,6 +26,10 @@ class Event:
 EVENT_SELECT = """SELECT e.id,e.role,e.text,e.at,im.width,im.height,im.sha256,length(im.data) AS size
     FROM events e LEFT JOIN message_images im ON im.event_id=e.id """
 
+# Each private page raster is at most 1 MiB. Keep recent views across restarts
+# without letting an autonomous reader fill the host volume with derived pages.
+MAX_CACHED_PDF_RASTERS = 64
+
 
 def _event(row):
     image = None
@@ -58,6 +62,13 @@ class ChatStore:
                 CREATE TABLE IF NOT EXISTS message_images (
                     event_id INTEGER PRIMARY KEY REFERENCES events(id), width INTEGER NOT NULL,
                     height INTEGER NOT NULL, sha256 TEXT NOT NULL, data BLOB NOT NULL);
+                CREATE TABLE IF NOT EXISTS pdf_rasters (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, data BLOB NOT NULL);
+                CREATE TABLE IF NOT EXISTS pdf_views (
+                    thread_id TEXT NOT NULL, call_id TEXT NOT NULL,
+                    raster_id INTEGER NOT NULL REFERENCES pdf_rasters(id) ON DELETE CASCADE,
+                    PRIMARY KEY(thread_id, call_id));
+                CREATE INDEX IF NOT EXISTS pdf_views_by_raster ON pdf_views(raster_id);
                 CREATE TABLE IF NOT EXISTS batches (
                     id INTEGER PRIMARY KEY, status TEXT NOT NULL,
                     outcome INTEGER REFERENCES events(id));
@@ -112,6 +123,30 @@ class ChatStore:
     def image_data(self, event_id: int) -> bytes | None:
         with self._connect() as db:
             row = db.execute("SELECT data FROM message_images WHERE event_id=?", (event_id,)).fetchone()
+            return row["data"] if row else None
+
+    def save_page_image(self, thread_id: str, call_id: str, image: ImageAttachment) -> dict:
+        """Keep the reviewed snapshot even if its source PDF is later edited or removed."""
+        with self._connect(write=True) as db:
+            db.execute("INSERT INTO pdf_rasters(sha256,data) VALUES(?,?) ON CONFLICT(sha256) DO NOTHING",
+                       (image.sha256, image.data))
+            raster_id = db.execute("SELECT id FROM pdf_rasters WHERE sha256=?", (image.sha256,)).fetchone()[0]
+            db.execute("INSERT INTO pdf_views VALUES(?,?,?) ON CONFLICT(thread_id,call_id) DO NOTHING",
+                       (thread_id, call_id, raster_id))
+            prior = db.execute("SELECT raster_id FROM pdf_views WHERE thread_id=? AND call_id=?",
+                               (thread_id, call_id)).fetchone()[0]
+            if prior != raster_id:
+                raise ValueError("This call already returned a different PDF page image.")
+            db.execute("""DELETE FROM pdf_rasters WHERE id IN (
+                SELECT raster_id FROM pdf_views GROUP BY raster_id ORDER BY MAX(rowid) DESC LIMIT -1 OFFSET ?)""",
+                       (MAX_CACHED_PDF_RASTERS,))
+        return {"id": raster_id, "sha256": image.sha256}
+
+    def page_image_data(self, raster_id: int, call_id: str, *, thread_id: str) -> bytes | None:
+        with self._connect() as db:
+            row = db.execute("""SELECT r.data FROM pdf_views v JOIN pdf_rasters r ON r.id=v.raster_id
+                                WHERE v.thread_id=? AND v.call_id=? AND r.id=?""",
+                             (thread_id, call_id, raster_id)).fetchone()
             return row["data"] if row else None
 
     def events(self, after: int = 0, limit: int = 100) -> list[Event]:

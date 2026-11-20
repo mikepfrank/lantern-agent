@@ -48,9 +48,13 @@ Use the [SSH command in the project README](../README.md#talk-to-lantern-on-ligh
 
 ## Coding environment
 
+For a PDF viewer upgrade, install the coding broker and image first, then update the chat worker with `deploy/install.sh --worker-only FULL_GIT_REVISION` at an idle boundary. The existing browser connection stays available.
+
 For a new installation, make the seed with `git bundle create lantern.bundle --branches --tags` from the reviewed repository. The coding installer builds a dedicated Python and Git image. Only the broker can reach Docker. The worker sends approved commands over `/run/lantern-code.sock`. Docker uses a pinned local image ID and starts a fresh unprivileged container with its own process namespace, offline networking, a read-only root and a writable coding volume. Each command gets 30 seconds, half a CPU, 256 MiB of RAM, 64 processes and 16 KiB of output. The 256 MiB ext4 volume is backed by `/var/lib/lanterncode/work.ext4` and mounts across boots.
 
 The full editable clone is `/work/lantern`, also available as `~/src/lantern` inside the container. This differs from the operator checkout in the host's `~lantern/src/lantern`. The installer seeds the coding clone once. Subsequent service updates preserve branches and uncommitted work. GitHub publication needs a separate host-side proposal tool. The worker loads the root-owned release under `/opt/lantern/worker-current`, and the browser loads its release under `/opt/lantern/current`.
+
+The same broker accepts a supervised one-page PDF rendering request. Poppler runs in a separate disposable, offline container with one read-only mount. An absolute `/work/` PDF comes from the coding volume. For `heritage/lmstudio-chat.pdf`, the mount contains only the operator-provisioned PDF. The installer verifies its digest against the private page-text companion and stages it under the root-only `/var/lib/lanterncode` directory. Pages fit within 1,600 pixels per side and 1 MiB of PNG data. Rerun the coding installer after replacing or removing the heritage archive. A standalone coding deployment can operate with workspace PDFs alone.
 
 From the host's normal `ec2-user` shell, `sudo ls -la /var/lib/lanterncode/work/files` lists Lantern's persistent `/work`. Append `/lantern` to browse its checkout. For an interactive read-only view as the workspace owner, start a separate container on that volume.
 

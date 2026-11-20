@@ -14,6 +14,8 @@ The browser and terminal show the same conversation. Either interface can send a
 
 Use **+** beside the browser composer to attach one PNG, JPEG or WebP per message. You can add a caption or send the image by itself. The preview shows the dimensions that Lantern will see. The browser reduces large images to fit 1 MiB and 1,600 pixels per side. Click a thumbnail in the conversation to see the saved copy. Qwen receives the four most recent images in its current context. Older uploads remain in chat and can be attached again. Luna receives the pixels during full-context checks. The terminal shows the image dimensions and caption.
 
+To inspect a PDF from either the terminal or browser, tell Lantern which document and page to look at. For example, “Use `view_pdf_page` on page 2 of `heritage/lmstudio-chat.pdf` and describe the two illustrations.” Lantern can also open PDFs saved under its coding volume, such as `/work/diagram.pdf`. The tool counts from page 1 and returns the selected page as an image along with the total page count. PDF pages and chat uploads share the four-image context window. Lantern can request an older PDF page again.
+
 If the forwarding terminal is still connected after a browser service restart, the tunnel is already available. Run `ssh -t lightsail "sudo -u lantern -H /usr/local/bin/lantern web-link"` in a second terminal to print a fresh link for the same tab. If the forwarding terminal closed, use the full command above. Treat the link as a credential.
 
 To use terminal chat directly, run:

@@ -10,6 +10,7 @@ import selectors
 import socket
 import subprocess
 import time
+from typing import NamedTuple
 
 
 DOCKER = "/usr/bin/docker"
@@ -22,10 +23,32 @@ REQUEST_LIMIT = 100 * 1024
 OUTPUT_LIMIT = 16 * 1024
 RUN_SECONDS = 30
 ENGINE_TIMEOUT = 6
+PDF_HERITAGE = "heritage/lmstudio-chat.pdf"
+HERITAGE_COPY = "/var/lib/lanterncode/heritage.pdf"
+ACTION_LOCK = "/var/lib/lanterncode/action.lock"
+PDF_REPLY_LIMIT = 1400000  # One base64-encoded 1 MiB PNG plus its small JSON envelope.
+
+
+class PdfPage(NamedTuple):
+    path: str
+    page: int
 
 
 class BadRequest(ValueError):
     pass
+
+
+def pdf_request(path, page):
+    if (not isinstance(path, str) or len(path) > 512 or type(page) is not int
+            or not 1 <= page <= 1000000):
+        raise BadRequest("Use a PDF path and a one-based page number from 1 to 1000000.")
+    if path != PDF_HERITAGE and (
+        not path.startswith("/work/") or not path.lower().endswith(".pdf")
+        or any(part in ("", ".", "..") for part in path[6:].split("/"))
+        or "\\" in path or not path.isprintable()
+    ):
+        raise BadRequest("Choose heritage/lmstudio-chat.pdf or an absolute PDF path under /work/.")
+    return PdfPage(path, page)
 
 
 def read_command(conn):
@@ -46,6 +69,8 @@ def read_command(conn):
         if raw.index(b"\n") != len(raw) - 1:
             raise ValueError
         body = json.loads(raw.decode("utf-8"))
+        if type(body) is dict and set(body) == {"pdf_path", "page"}:
+            return pdf_request(body["pdf_path"], body["page"])
         if type(body) is not dict or set(body) != {"command"}:
             raise ValueError
         command = body["command"]
@@ -55,14 +80,16 @@ def read_command(conn):
         if len(encoded) > COMMAND_LIMIT:
             raise ValueError
         return encoded
+    except BadRequest:
+        raise
     except (UnicodeError, ValueError, RecursionError) as exc:
         raise BadRequest("Expected one UTF-8 shell command of at most 16 KiB.") from exc
 
 
-def create_args(image):
+def create_args(image, pdf=None):
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
         raise RuntimeError("Invalid operator image pin")
-    return [
+    args = [
         DOCKER, "create", "--name", NAME, "--label", LABEL, "--pull=never",
         "--rm", "--interactive", "--network=none", "--ipc=private",
         "--read-only", "--user=65532:65532", "--cap-drop=ALL",
@@ -70,7 +97,17 @@ def create_args(image):
         "--cpus=0.5", "--memory=256m", "--memory-swap=256m",
         "--ulimit=nofile=256:256", "--ulimit=core=0:0", "--shm-size=8m",
         "--tmpfs=/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777",
-        "--log-driver=none", "--volume", f"{VOLUME}/files:/work:rw,z",
+        "--log-driver=none",
+    ]
+    if pdf is not None:
+        if pdf.path == PDF_HERITAGE:
+            mount, path = f"{HERITAGE_COPY}:/document.pdf:ro,z", "/document.pdf"
+        else:
+            mount, path = f"{VOLUME}/files:/work:ro,z", pdf.path
+        return [*args, "--volume", mount, "--workdir=/", "--ulimit=fsize=12582912:12582912",
+                "--env=HOME=/tmp", "--entrypoint=/usr/local/bin/python3", image,
+                "-I", "/opt/lantern/render_pdf.py", path, str(pdf.page)]
+    return [*args, "--volume", f"{VOLUME}/files:/work:rw,z",
         "--workdir=/", "--env=HOME=/work/.home",
         "--env=GIT_CONFIG_NOSYSTEM=1", "--entrypoint=/bin/sh", image, "-c",
         "cd /work/lantern 2>/dev/null || cd /work 2>/dev/null || :; exec /bin/sh -s",
@@ -98,7 +135,7 @@ def cleanup():
                 raise
 
 
-def stream_command(conn, proc, command):
+def stream_command(conn, proc, command, limit=OUTPUT_LIMIT):
     """Multiplex stdin, output and disconnects without buffering unbounded data."""
     deadline = time.monotonic() + RUN_SECONDS
     output = bytearray()
@@ -140,7 +177,7 @@ def stream_command(conn, proc, command):
                         except subprocess.TimeoutExpired:
                             timed_out = True
                         return result(output, code, timed_out, truncated)
-                    space = OUTPUT_LIMIT - len(output)
+                    space = limit - len(output)
                     output.extend(chunk[:space])
                     if len(chunk) > space:
                         truncated = True
@@ -158,10 +195,12 @@ def result(output, code, timed_out, truncated):
 def execute(conn, command, image):
     if not VOLUME.is_mount():
         raise RuntimeError("Coding storage is not mounted")
-    args = create_args(image)
+    pdf = command if isinstance(command, PdfPage) else None
+    if pdf and pdf.path == PDF_HERITAGE and not Path(HERITAGE_COPY).is_file():
+        raise RuntimeError("Private PDF has not been provisioned")
+    args = create_args(image, pdf)
     try:
-        # Nothing supplied by the client becomes a Docker flag or a host
-        # command. The only user-controlled bytes go to the container's stdin.
+        # No caller controls a Docker flag, image, host command or host path.
         created = engine(args).stdout.decode("ascii").strip()
         if not re.fullmatch(r"[0-9a-f]{64}", created):
             raise RuntimeError("Docker did not return a container ID")
@@ -169,7 +208,14 @@ def execute(conn, command, image):
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, bufsize=0) as proc:
             try:
-                return stream_command(conn, proc, command)
+                if pdf is None:
+                    return stream_command(conn, proc, command)
+                result = stream_command(conn, proc, b"", limit=PDF_REPLY_LIMIT)
+                if result["timed_out"]:
+                    return {"error": "Rendering this PDF page exceeded the 30-second limit."}
+                if result["truncated"] or result["exit_code"] != 0:
+                    return {"error": "The PDF page could not be rendered within the sandbox limits."}
+                return json.loads(result["output"])
             finally:
                 if proc.poll() is None:
                     proc.kill()
@@ -184,16 +230,20 @@ def execute(conn, command, image):
 
 
 def serve_connection(conn, image):
+    command = None
     try:
         command = read_command(conn)
         reply = execute(conn, command, image)
     except BadRequest as exc:
         reply = {"error": str(exc)}
-    except (OSError, subprocess.SubprocessError, RuntimeError, UnicodeError) as exc:
+    except (OSError, subprocess.SubprocessError, RuntimeError, ValueError, RecursionError) as exc:
         # Log only the error class, since stdout/stderr may contain user code.
         logging.warning("Coding request did not finish (%s)", type(exc).__name__)
-        reply = {"error": "Coding sandbox unavailable or interrupted. The command may have run. "
-                          "Inspect the workspace before repeating changes."}
+        if isinstance(command, PdfPage):
+            reply = {"error": "The read-only PDF renderer is unavailable or interrupted."}
+        else:
+            reply = {"error": "Coding sandbox unavailable or interrupted. The command may have run. "
+                              "Inspect the workspace before repeating changes."}
     conn.settimeout(2)
     try:
         conn.sendall(json.dumps(reply, ensure_ascii=True).encode("ascii") + b"\n")
@@ -202,6 +252,7 @@ def serve_connection(conn, image):
 
 
 def main():
+    import fcntl
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cleanup", action="store_true")
     args = parser.parse_args()
@@ -212,11 +263,23 @@ def main():
         raise SystemExit("Expected one socket from systemd")
     image = IMAGE_FILE.read_text(encoding="ascii").strip()
     create_args(image)
-    with socket.socket(fileno=3) as listener:
+    with open(ACTION_LOCK, "rb") as lock, socket.socket(fileno=3) as listener:
         while True:
             conn, _ = listener.accept()
             with conn:
-                serve_connection(conn, image)
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    conn.settimeout(2)
+                    try:
+                        conn.sendall(b'{"error":"Coding sandbox is updating. The request did not run."}\n')
+                    except OSError:
+                        pass
+                    continue
+                try:
+                    serve_connection(conn, image)
+                finally:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 if __name__ == "__main__":

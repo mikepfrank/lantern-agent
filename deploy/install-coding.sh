@@ -31,14 +31,48 @@ if [[ ! -e $base/seeded ]]; then
     }
 fi
 
-# Build in an operator-owned context that contains only the Dockerfile. The
+# Build in a minimal operator-owned context. The
 # resulting content-addressed image ID, not a mutable tag, is used in production.
 install -m 0600 "$src/deploy/coding/Dockerfile" "$temp/Dockerfile"
 install -m 0600 "$src/deploy/coding/.dockerignore" "$temp/.dockerignore"
+install -m 0644 "$src/deploy/coding/render_pdf.py" "$temp/render_pdf.py"
 docker build --build-arg "BASE=${LANTERN_CODING_BASE:-python:3.12-slim-bookworm}" \
     --iidfile "$temp/image-id" --tag lantern-code:local "$temp"
 image=$(cat "$temp/image-id")
 [[ $image =~ ^sha256:[0-9a-f]{64}$ ]]
+
+# Stage the one approved heritage PDF outside user-writable directories.
+# The host-provided index pins the original bytes. The source is opened with
+# the account's ordinary permissions; Docker never follows an account path.
+heritage_pdf=/home/lantern/.local/state/lantern/heritage/lmstudio-chat.pdf
+if sudo -n -u lantern test -e "$heritage_pdf" || sudo -n -u lantern test -L "$heritage_pdf"; then
+    sudo -n -u lantern /usr/bin/python3.12 -I - > "$temp/heritage.pdf" <<'PY'
+import hashlib, json, os, stat, sys
+parent = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+for part in ("home", "lantern", ".local", "state", "lantern", "heritage"):
+    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    os.close(parent)
+    parent = child
+def document(name, limit):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or not 0 < st.st_size <= limit:
+        raise SystemExit("Invalid private heritage document.")
+    return os.fdopen(fd, "rb")
+with document("lmstudio-chat.pdf-pages.json", 16 * 1024 * 1024) as index:
+    expected = json.load(index)["sha256"]
+with document("lmstudio-chat.pdf", 64 * 1024 * 1024) as pdf:
+    size = os.fstat(pdf.fileno()).st_size
+    digest = hashlib.sha256()
+    for remaining in range(size, 0, -65536):
+        chunk = pdf.read(min(65536, remaining))
+        digest.update(chunk)
+        sys.stdout.buffer.write(chunk)
+    if pdf.read(1) or digest.hexdigest() != expected:
+        raise SystemExit("Private PDF does not match the heritage text companion.")
+PY
+    chmod 0444 "$temp/heritage.pdf"
+fi
 
 if [[ ! -f $base/work.ext4 ]]; then
     [[ ! -e $base/seeded && ! -L $base/work.ext4 ]]
@@ -91,7 +125,21 @@ if [[ ! -e $base/seeded ]]; then
     printf '%s\n' "$revision" > "$base/seeded"
 fi
 
+# Never interrupt an admitted action. The additional Docker check covers an
+# older broker which did not yet take this lock. On that release, hold the
+# chat worker's idle admission gate during the initial broker replacement.
+exec 8>>"$base/action.lock"
+flock -nx 8 || { echo "A Lantern sandbox request is active. Retry after it finishes." >&2; exit 1; }
+active_container=$(docker ps -aq --filter 'label=org.lantern.coding-broker=1' --filter 'name=^/lantern-coding-command$')
+[[ -z $active_container ]] || {
+    echo "A Lantern coding container is active. Retry after it finishes." >&2; exit 1;
+}
 install -m 0644 "$src/lantern/coding_broker.py" /opt/lantern/coding/broker.py
+if [[ -f $temp/heritage.pdf ]]; then
+    mv -Tf -- "$temp/heritage.pdf" "$base/heritage.pdf"
+elif [[ -f $base/heritage.pdf ]]; then
+    rm -f -- "$base/heritage.pdf"
+fi
 install -m 0600 "$temp/image-id" /etc/lantern/coding-image
 for file in lantern-code.socket lantern-code.service; do
     install -m 0644 "$src/deploy/coding/$file" "/etc/systemd/system/$file"
