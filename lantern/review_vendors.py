@@ -154,11 +154,16 @@ class ReviewerVendors:
         if type(output) is not int or not 0 < output <= output_limit:
             raise VendorError("Invalid supervisor output limit")
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
-        # One token per serialized byte plus generous framing overhead, limited by
-        # the vendor model window. Only trusted, text-only requests are admitted.
+        # Encoded byte counts bound text tokenization. For images, a small
+        # compressed file can represent many vision tokens. Reserve against the
+        # whole model window and settle from the provider's actual usage.
         byte_bound = len(body) + 4096
         if vendor == "luna":
-            reserve = (min(1_050_000, byte_bound) * Decimal(".25") + output * Decimal(".75")) / MILLION
+            vision = any(isinstance(item.get("content"), list) and
+                         any(part.get("type") == "input_image" for part in item["content"])
+                         for item in payload.get("input", ()))
+            input_bound = 1_050_000 if vision else min(1_050_000, byte_bound)
+            reserve = (input_bound * Decimal(".25") + output * Decimal(".75")) / MILLION
         else:
             reserve = (min(200_000, byte_bound) * 15 + output * 75) / MILLION
         request_id = uuid4().hex

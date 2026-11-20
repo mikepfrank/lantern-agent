@@ -1,4 +1,5 @@
 from contextlib import closing
+import base64
 from http.client import HTTPConnection
 import json
 import os
@@ -148,6 +149,39 @@ class WebRoomTests(unittest.TestCase):
         self.assertEqual([final], [e["id"] for e in page["events"]])
         self.assertFalse(page["status"]["working"])
         self.assertEqual(cli_event, self.store.read_cursor())
+
+    def test_private_image_message_history_preview_and_receipts(self):
+        png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMwLNoFAAI1AV5D0BXUAAAAAElFTkSuQmCC"
+        message = {"text": "", "client_id": str(uuid.uuid4()), "image": {"mime_type": "image/png", "data": png}}
+        self.assertEqual(401, self.request("POST", "/api/messages", auth=False, body=message)[0])
+        self.assertEqual(403, self.request("POST", "/api/messages", headers={"Origin": "null"}, body=message)[0])
+        status, _, receipt = self.request("POST", "/api/messages", body=message)
+        self.assertEqual(200, status)
+        self.assertEqual(receipt, self.request("POST", "/api/messages", body=message)[2])
+        self.assertEqual(409, self.request("POST", "/api/messages", body={**message, "text": "Changed"})[0])
+        self.assertEqual(400, self.request("POST", "/api/messages", body={**message, "image": {"url": "http://x"}})[0])
+        status, _, page = self.request("GET", "/api/room")
+        event, = page["events"]
+        self.assertEqual((200, "", 1, 1), (status, event["text"], event["image"]["width"], event["image"]["height"]))
+        self.assertNotIn(png, json.dumps(page))
+        path = f"/api/messages/{receipt['id']}/image"
+        self.assertEqual(401, self.request("GET", path, auth=False)[0])
+        self.assertEqual(403, self.request("GET", path, headers={"Host": "outside.example"})[0])
+        status, headers, pixels = self.request("GET", path)
+        self.assertEqual((200, "no-store", "image/png"), (status, headers["Cache-Control"], headers["Content-Type"]))
+        self.assertEqual(base64.b64decode(png), pixels)
+        self.assertEqual(404, self.request("GET", "/api/messages/9223372036854775808/image")[0])
+        self.assertEqual(404, self.request("GET", "/api/messages/200/image")[0])
+
+    def test_large_uploads_require_auth_before_using_bounded_capacity(self):
+        body = {"text": " " * 140000, "client_id": str(uuid.uuid4())}
+        slots = self.room.large_uploads
+        with slots, slots:
+            self.assertEqual(401, self.request("POST", "/api/messages", auth=False, body=body)[0])
+            self.assertEqual(403, self.request("POST", "/api/messages", body=body, headers={"Origin": "null"})[0])
+            self.assertEqual(503, self.request("POST", "/api/messages", body=body)[0])
+            self.assertEqual(200, self.request("POST", "/api/messages", body={**body, "text": "Hello"})[0])
+        self.assertEqual(400, self.request("POST", "/api/messages", body=body)[0])
 
     def test_history_pages_and_invalid_inputs(self):
         for i in range(PAGE_SIZE + 3):

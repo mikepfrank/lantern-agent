@@ -160,6 +160,25 @@ time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: .74re
 #composer { flex: none; margin-top: .35rem; padding: .8rem .95rem .65rem; background: #252726; border: 1px solid #514c43; border-radius: .8rem; }
 #composer:focus-within { border-color: #a88653; }
 #composer label { font-size: .83rem; font-weight: 600; }
+.image-draft { display: flex; align-items: center; gap: .6rem; width: fit-content; max-width: 100%; margin: .45rem 0 .1rem; padding: .25rem .4rem .25rem .25rem; background: #1c211f; border: 1px solid #46524b; border-radius: .45rem; }
+#image-preview { height: 2.7rem; width: 3.5rem; object-fit: contain; background: #151817; border-radius: .25rem; }
+.image-details { min-width: 0; font-size: .8rem; line-height: 1.35; }
+.image-details strong, .image-details span { display: block; }
+.image-details strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.image-details span { color: var(--muted); }
+#image-remove, #attach, #image-close { flex: none; border: 1px solid var(--edge); background: #262b28; color: var(--teal); border-radius: .43rem; }
+#image-remove { border: 0; background: transparent; font-size: 1.25rem; padding: .25rem .45rem; color: var(--muted); }
+#attach { width: 2.25rem; height: 2.15rem; padding: 0; font-size: 1.35rem; line-height: 1; }
+#attach:hover:enabled, #image-close:hover { border-color: var(--teal); }
+#attach:disabled, #image-remove:disabled { opacity: .5; }
+#send-state { flex: 1; }
+.message-image { display: block; max-width: 100%; margin: .25rem 0 .35rem; padding: 0; border: 1px solid #46524b; background: #181c1a; color: var(--muted); border-radius: .4rem; overflow: hidden; cursor: zoom-in; }
+.message-image img { display: block; max-width: 100%; object-fit: contain; }
+.message-image span { display: block; padding: .55rem .8rem; font-size: .8rem; }
+#image-dialog { max-width: calc(100vw - 2rem); max-height: calc(100dvh - 2rem); margin: auto; padding: .65rem; background: #1c201e; border: 1px solid #516057; border-radius: .65rem; }
+#image-dialog::backdrop { background: #0a0c0bea; }
+#image-close { display: block; margin: 0 0 .5rem auto; padding: .3rem .65rem; font-size: .85rem; }
+#image-full { display: block; max-width: 100%; max-height: calc(100dvh - 7rem); object-fit: contain; margin: auto; }
 textarea { width: 100%; border: none; outline: none; background: transparent; color: var(--ink); resize: vertical; min-height: 2.8rem; max-height: 18vh; padding: .45rem 0; }
 textarea::placeholder { color: #a09e96; }
 .send-row { display: flex; justify-content: space-between; align-items: center; gap: .6rem; color: var(--muted); min-height: 2.12rem; }

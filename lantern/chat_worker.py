@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 
 from .codex_session import CodexError, SteeringInput
+from .image_ref import image_reference
 from .scheduler import DailyBudgetHold
 
 
@@ -55,11 +56,26 @@ def worker_online(state: Path) -> bool:
         return True
 
 
+def _message_parts(events):
+    """Keep each caption beside its image. Codex persists only the private reference."""
+    if not any(event.image for event in events):
+        return None
+    parts = []
+    for event in events:
+        if event.text:
+            parts.append({"type": "text", "text": event.text})
+        if event.image:
+            url = image_reference(event.id, event.image["sha256"])
+            parts.append({"type": "image", "url": url})
+    return parts
+
+
 async def process_batch(store, batch, turn, route):
     def take_input():
         events = store.claim_steer(batch.id)
         if events:
-            return SteeringInput(tuple(event.id for event in events), "\n\n".join(event.text for event in events))
+            return SteeringInput(tuple(event.id for event in events), "\n\n".join(event.text for event in events),
+                                 _message_parts(events))
         return None
 
     def notify(call_id, arguments):
@@ -72,8 +88,10 @@ async def process_batch(store, batch, turn, route):
 
     prompt = "\n\n".join(event.text for event in batch.messages)
     source = {"scheduled": True} if batch.messages[0].role == "system" else {}
+    if parts := _message_parts(batch.messages):
+        source["input_parts"] = parts
     trigger = "operator"
-    if source:
+    if source.get("scheduled"):
         first = batch.messages[0].text
         if first.startswith("Scheduled heartbeat."):
             trigger = "heartbeat"

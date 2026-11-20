@@ -29,6 +29,7 @@ class TurnResult:
 class SteeringInput:
     ids: tuple[int, ...]
     text: str
+    parts: list[dict] | None = None
 
 
 BASE_INSTRUCTIONS = (
@@ -263,7 +264,7 @@ class _Peer:
                         self.seq += 1
                         await self.send({"id": self.seq, "method": "turn/steer", "params": {
                             "threadId": self.thread_id, "expectedTurnId": self.turn_id,
-                            "input": [{"type": "text", "text": steer.text}],
+                            "input": steer.parts or [{"type": "text", "text": steer.text}],
                         }})
         finally:
             reader.cancel()
@@ -273,6 +274,7 @@ class _Peer:
 async def run_turn(*, codex_bin: str, codex_home: Path, workspace: Path, model: str,
                    provider: str, persona: str, prompt: str, tools: list[dict],
                    dispatch: Callable[[str, str, dict], dict], thread_id: str | None = None,
+                   input_parts: list[dict] | None = None,
                    on_thread: Callable[[str], None] | None = None,
                    take_input: Callable[[], SteeringInput | None] | None = None,
                    return_input: Callable[[tuple[int, ...]], None] | None = None,
@@ -333,7 +335,7 @@ async def run_turn(*, codex_bin: str, codex_home: Path, workspace: Path, model: 
                 "threadId": tid, "model": model, "approvalPolicy": "never",
                 "environments": [], "runtimeWorkspaceRoots": [],
                 "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
-                "input": [{"type": "text", "text": prompt}]})
+                "input": input_parts or [{"type": "text", "text": prompt}]})
             peer.set_turn(resp["turn"]["id"])
             await peer.finish_turn(take_input, return_input, capture_steer, confirm_steer)
             return TurnResult(tid, peer.turn_id, "\n\n".join(peer.messages), tuple(peer.tool_calls))

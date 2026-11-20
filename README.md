@@ -1,6 +1,6 @@
 # Lantern
 
-Lantern is a private browser and terminal chat with Qwen3.8 27B. Each turn runs the Codex CLI app-server with a persistent thread store. A loopback gateway forwards text requests to OpenRouter. Lantern can use the Astra chess engine through `chess_analyze` and ask Claude 3 Opus for ethical guidance through `consult_opus`.
+Lantern is a private browser and terminal chat with Qwen3.8 27B. Each turn runs the Codex CLI app-server with a persistent thread store. A loopback gateway forwards text and operator-attached images to OpenRouter. Lantern can use the Astra chess engine through `chess_analyze` and ask Claude 3 Opus for ethical guidance through `consult_opus`.
 
 ## Talk to Lantern on Lightsail
 
@@ -11,6 +11,8 @@ ssh -t -o ExitOnForwardFailure=yes -L 127.0.0.1:8765:127.0.0.1:8765 lightsail "s
 ```
 
 The browser and terminal show the same conversation. Either interface can send a follow-up while Lantern is working. In the browser, everything you send, including `/help`, is a message to Lantern. Terminal commands such as `/help` run locally in the CLI.
+
+Use **+** beside the browser composer to attach one PNG, JPEG or WebP per message. You can add a caption or send the image by itself. The preview shows the dimensions that Lantern will see. The browser reduces large images to fit 1 MiB and 1,600 pixels per side. Click a thumbnail in the conversation to see the saved copy. Qwen receives the four most recent images in its current context. Older uploads remain in chat and can be attached again. Luna receives the pixels during full-context checks. The terminal shows the image dimensions and caption.
 
 If the forwarding terminal is still connected after a browser service restart, the tunnel is already available. Run `ssh -t lightsail "sudo -u lantern -H /usr/local/bin/lantern web-link"` in a second terminal to print a fresh link for the same tab. If the forwarding terminal closed, use the full command above. Treat the link as a credential.
 

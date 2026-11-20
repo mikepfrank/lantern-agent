@@ -108,7 +108,8 @@ def recent_messages(context: dict) -> str:
         else:
             continue
         if isinstance(content, list):
-            content = "\n".join(p["text"] for p in content if "text" in p)
+            content = "\n".join("[Operator image attached]" if p.get("type") == "input_image" else p["text"]
+                                for p in content if p.get("type") == "input_image" or "text" in p)
         excerpts.append(f"{role}: {content[-1200:]}")
         if len(excerpts) == 4:
             break

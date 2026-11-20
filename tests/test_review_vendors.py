@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from lantern.luna import MODEL
-from lantern.review_vendors import HTTPRejection, ReviewerVendors, VendorError, usage_cost
+from lantern.review_vendors import HTTPRejection, ReviewBudgetUnavailable, ReviewerVendors, VendorError, usage_cost
 
 
 class ReviewVendorTests(unittest.TestCase):
@@ -36,6 +36,21 @@ class ReviewVendorTests(unittest.TestCase):
         today = ReviewerVendors(self.state, Decimal("2")).today()
         self.assertGreater(Decimal(today["reserved_usd"]), 0)
         self.assertEqual(today["estimated_spend_usd"], "0")
+
+    def test_vision_reserves_for_model_window_before_contacting_luna(self):
+        image_packet = {**self.payload, "input": [{"role": "user", "content": [
+            {"type": "input_text", "text": "Operator image 1"}, {"type": "input_image", "image_url": "data:image/png;base64,abcd"}]}]}
+        restricted = ReviewerVendors(self.state, Decimal(".10"))
+        with patch("lantern.review_vendors.request_json") as post:
+            with self.assertRaises(ReviewBudgetUnavailable):
+                restricted.call("luna", image_packet, purpose="spot")
+            post.assert_not_called()
+        with patch("lantern.review_vendors.request_json", return_value={
+                "model": MODEL, "usage": {"input_tokens": 1200, "output_tokens": 15}}):
+            self.ledger.call("luna", image_packet, purpose="spot")
+        usage = self.ledger.today()
+        self.assertEqual(usage["reserved_usd"], "0")
+        self.assertEqual(Decimal(usage["estimated_spend_usd"]), Decimal(".0001275"))
 
     def test_only_known_rejections_release_reservation(self):
         with patch("lantern.review_vendors.request_json", side_effect=HTTPRejection(403)):

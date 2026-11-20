@@ -55,10 +55,21 @@
       <div id="events"></div>
     </section>
     <div class="jump-wrap"><button id="jump" type="button" hidden>Latest messages ↓</button></div>
+    <dialog id="image-dialog" aria-label="Attached image">
+      <button id="image-close" type="button" autofocus>Close</button>
+      <img id="image-full" alt="Image attached to the conversation">
+    </dialog>
     <form id="composer">
       <label for="draft">Message Lantern</label>
+      <div class="image-draft" id="image-draft" hidden>
+        <img id="image-preview" alt="Selected image preview">
+        <div class="image-details"><strong id="image-name"></strong><span id="image-size"></span></div>
+        <button id="image-remove" type="button" aria-label="Remove attached image" title="Remove image">×</button>
+      </div>
       <textarea id="draft" rows="2" maxlength="16000" placeholder="Write a message…" disabled></textarea>
       <div class="send-row">
+        <button id="attach" type="button" aria-label="Attach image" title="Attach image (PNG, JPEG or WebP)" disabled>+</button>
+        <input id="image-file" type="file" accept="image/png,image/jpeg,image/webp" hidden>
         <span id="send-state" role="status"></span>
         <button id="send" type="submit" disabled>Send <span aria-hidden="true">↑</span></button>
       </div>

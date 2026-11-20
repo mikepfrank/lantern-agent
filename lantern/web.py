@@ -10,10 +10,12 @@ import re
 import secrets
 import sqlite3
 from tempfile import NamedTemporaryFile
+from threading import BoundedSemaphore
 from time import monotonic
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
+from .attachments import MAX_IMAGE_BASE64, parse_image
 from .chat_store import ChatStore
 from .chat_worker import worker_online
 from .operator_review import MAX_ANSWER, ReviewRoom
@@ -22,6 +24,7 @@ from .operator_review import MAX_ANSWER, ReviewRoom
 DEFAULT_PORT = 8765
 PAGE_SIZE = 40
 MAX_MESSAGE = 16000
+TEXT_BODY_LIMIT = 128000
 ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/room.css": ("room.css", "text/css; charset=utf-8"),
@@ -36,6 +39,9 @@ class RoomServer(ThreadingHTTPServer):
         self.state = state
         self.store = ChatStore(state)
         self.reviews = ReviewRoom(self.store)
+        # Large JSON uploads need simultaneous buffers for UTF-8, base64, the
+        # verified raster and the SQLite write. Keep room inside MemoryMax.
+        self.large_uploads = BoundedSemaphore(2)
         self.key = secrets.token_urlsafe(32)
         directory = files("lantern").joinpath("web_assets")
         self.assets = {path: (directory.joinpath(name).read_bytes(), mime)
@@ -83,7 +89,7 @@ class RoomHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Security-Policy", "default-src 'none'; "
-                         "script-src 'self'; style-src 'self'; connect-src 'self'; img-src data:; "
+                         "script-src 'self'; style-src 'self'; connect-src 'self'; img-src data: blob:; "
                          "base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.end_headers()
@@ -119,6 +125,21 @@ class RoomHandler(BaseHTTPRequestHandler):
             return
         if self.path in self.server.assets:
             self._reply(200, *self.server.assets[self.path])
+            return
+        image_route = re.fullmatch(r"/api/messages/([1-9][0-9]{0,18})/image", self.path)
+        if image_route:
+            if not self._authorized():
+                return
+            event_id = int(image_route[1])
+            try:
+                data = self.server.store.image_data(event_id) if event_id < 2**63 else None
+            except sqlite3.Error:
+                self._json(503, {"error": "The conversation store is temporarily unavailable."})
+                return
+            if data is None:
+                self._json(404, {"error": "No image on this message."})
+            else:
+                self._reply(200, data, "image/png")
             return
         if self.path == "/api/review-questions":
             if self._authorized():
@@ -172,26 +193,48 @@ class RoomHandler(BaseHTTPRequestHandler):
         if "Transfer-Encoding" in self.headers or len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,9}", lengths[0]):
             self._json(400, {"error": "A valid content length is required."})
             return
-        if int(lengths[0]) > 128000:
+        length = int(lengths[0])
+        max_body = TEXT_BODY_LIMIT + (MAX_IMAGE_BASE64 if self.path == "/api/messages" else 0)
+        if length > max_body:
             self._json(413, {"error": "Message is too large."})
-            # Windows may reset a socket closed with unread upload data. Give
-            # ordinary clients time to receive the 413 without waiting on a
-            # very large or stalled upload.
-            self.close_connection = True
-            remaining = min(int(lengths[0]), 256 * 1024)
-            deadline = monotonic() + 0.25
-            try:
-                while remaining and (timeout := deadline - monotonic()) > 0:
-                    self.connection.settimeout(timeout)
-                    chunk = self.rfile.read1(min(remaining, 32 * 1024))
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-            except OSError:
-                pass
+            self._drain_rejected(length)
+            return
+        if length <= TEXT_BODY_LIMIT:
+            self._post_body(length)
+            return
+        # A large upload has a private route. Authenticate before reserving
+        # memory or reading its payload; small chat/control requests can proceed.
+        if not self._check_host() or not self._authorized():
+            self._drain_rejected(length)
+            return
+        if not self.server.large_uploads.acquire(blocking=False):
+            self._json(503, {"error": "Image uploads are busy. Retry your message shortly."})
+            self._drain_rejected(length)
             return
         try:
-            content = self.rfile.read(int(lengths[0]))
+            self._post_body(length)
+        finally:
+            self.server.large_uploads.release()
+
+    def _drain_rejected(self, length):
+        # Windows may reset sockets closed with unread data. Drain briefly
+        # after sending an error so an ordinary client can receive it.
+        self.close_connection = True
+        remaining = min(length, TEXT_BODY_LIMIT + MAX_IMAGE_BASE64)
+        deadline = monotonic() + 0.25
+        try:
+            while remaining and (timeout := deadline - monotonic()) > 0:
+                self.connection.settimeout(timeout)
+                chunk = self.rfile.read1(min(remaining, 32 * 1024))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            pass
+
+    def _post_body(self, length):
+        try:
+            content = self.rfile.read(length)
         except OSError:
             return
         if not self._check_host():
@@ -206,7 +249,7 @@ class RoomHandler(BaseHTTPRequestHandler):
             self._json(415, {"error": "Send JSON."})
             return
         try:
-            if len(content) != int(lengths[0]):
+            if len(content) != length:
                 raise ValueError
             body = json.loads(content.decode("utf-8"))
             if answer_route:
@@ -227,10 +270,11 @@ class RoomHandler(BaseHTTPRequestHandler):
                 else:
                     self._json(200, {"id": review_id})
                 return
-            if not isinstance(body, dict) or set(body) != {"text", "client_id"}:
+            if (not isinstance(body, dict)
+                    or set(body) not in ({"text", "client_id"}, {"text", "client_id", "image"})):
                 raise ValueError
             message, client_id = body["text"], body["client_id"]
-            if not isinstance(message, str) or not message.strip() or len(message) > MAX_MESSAGE:
+            if not isinstance(message, str) or len(message) > MAX_MESSAGE or (not message.strip() and "image" not in body):
                 raise ValueError
             message.encode("utf-8")  # Reject isolated JSON-escaped surrogates before storing.
             if not isinstance(client_id, str) or str(UUID(client_id)) != client_id:
@@ -241,9 +285,14 @@ class RoomHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": error})
             return
         try:
-            receipt = self.server.store.submit(message, client_id="web:" + client_id)
+            image = parse_image(body["image"]) if "image" in body else None
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        try:
+            receipt = self.server.store.submit(message, client_id="web:" + client_id, image=image)
         except ValueError:
-            self._json(409, {"error": "This message ID already belongs to different text."})
+            self._json(409, {"error": "This message ID already belongs to different text or image."})
             return
         except sqlite3.Error:
             self._json(503, {"error": "The conversation store is temporarily unavailable."})

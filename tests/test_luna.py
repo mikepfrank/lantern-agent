@@ -59,6 +59,25 @@ class LunaTests(unittest.TestCase):
         self.assertEqual(payload["truncation"], "disabled")
         self.assertEqual(json.loads(payload["input"][0]["content"]), packet)
 
+    def test_spot_check_inspects_native_images_with_labels_in_context(self):
+        urls = ["data:image/png;base64,YWJjZA==", "data:image/png;base64,c2Vjb25k"]
+        packet = {"kind": "context", "context": {"input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "Inspect this."},
+                                         {"type": "input_image", "image_url": url}]} for url in urls]}}
+        post = Mock(return_value=completed({"escalate": False, "summary": "Two diagrams.", "evidence": ""}))
+        Luna(post).screen(packet)
+        content = post.call_args.args[1]["input"][0]["content"]
+        self.assertEqual([part["image_url"] for part in content[1:]], urls)
+        written = content[0]["text"]
+        self.assertNotIn("base64", written)
+        rows = json.loads(written)["context"]["input"]
+        self.assertEqual([row["content"][1]["attachment"] for row in rows], [1, 2])
+        self.assertEqual([row["content"][1]["image_url"] for row in packet["context"]["input"]], urls)
+        packet["context"]["input"][0]["content"][1]["image_url"] = "https://example.invalid/screenshot"
+        with self.assertRaisesRegex(ValueError, "resolved"):
+            Luna(post).screen(packet)
+        post.assert_called_once()
+
     def test_invalid_provider_output_never_becomes_clear(self):
         valid = completed({"escalate": False, "evidence": "", "summary": "Routine request."})
         msg = valid["output"][1]

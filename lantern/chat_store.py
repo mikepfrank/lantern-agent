@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sqlite3
 
+from .attachments import ImageAttachment, MAX_TURN_IMAGES
 from .chat_text import trim_reply_segment
 from .scheduler import SCHEMA, next_reset
 
@@ -17,6 +18,21 @@ class Event:
     role: str
     text: str
     at: str
+    image: dict | None = None
+
+
+# The room and CLI read metadata here. Image bytes are loaded only for an
+# authenticated preview or a model request that needs its recent images.
+EVENT_SELECT = """SELECT e.id,e.role,e.text,e.at,im.width,im.height,im.sha256,length(im.data) AS size
+    FROM events e LEFT JOIN message_images im ON im.event_id=e.id """
+
+
+def _event(row):
+    image = None
+    if row["sha256"] is not None:
+        image = {"mime_type": "image/png", "width": row["width"], "height": row["height"],
+                 "sha256": row["sha256"], "size": row["size"]}
+    return Event(row["id"], row["role"], row["text"], row["at"], image)
 
 
 @dataclass(frozen=True)
@@ -39,6 +55,9 @@ class ChatStore:
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY, role TEXT NOT NULL, text TEXT NOT NULL,
                     at TEXT NOT NULL, client_id TEXT UNIQUE);
+                CREATE TABLE IF NOT EXISTS message_images (
+                    event_id INTEGER PRIMARY KEY REFERENCES events(id), width INTEGER NOT NULL,
+                    height INTEGER NOT NULL, sha256 TEXT NOT NULL, data BLOB NOT NULL);
                 CREATE TABLE IF NOT EXISTS batches (
                     id INTEGER PRIMARY KEY, status TEXT NOT NULL,
                     outcome INTEGER REFERENCES events(id));
@@ -68,41 +87,51 @@ class ChatStore:
         return db.execute("INSERT INTO events(role,text,at,client_id) VALUES(?,?,?,?)",
                           (role, text, now, client_id)).lastrowid
 
-    def submit(self, text: str, client_id: str | None = None) -> int:
+    def submit(self, text: str, client_id: str | None = None, *, image: ImageAttachment | None = None) -> int:
         """Accept a message durably. Reusing its client ID returns its original receipt."""
-        if not isinstance(text, str) or not text.strip():
+        if image is not None and not isinstance(image, ImageAttachment):
+            raise ValueError("Invalid message image")
+        if not isinstance(text, str) or (not text.strip() and image is None):
             raise ValueError("The chat message is empty")
         if client_id is not None and (not isinstance(client_id, str) or not client_id.strip()):
             raise ValueError("A supplied message ID must be a nonempty string")
         with self._connect(write=True) as db:
             if client_id is not None:
-                existing = db.execute("SELECT id,text FROM events WHERE client_id=?", (client_id,)).fetchone()
+                existing = db.execute(EVENT_SELECT + "WHERE e.client_id=?", (client_id,)).fetchone()
                 if existing is not None:
-                    if existing["text"] != text:
-                        raise ValueError("This message ID already belongs to different text")
+                    if existing["text"] != text or existing["sha256"] != (image.sha256 if image else None):
+                        raise ValueError("This message ID already belongs to different text or image")
                     return existing["id"]
             event_id = self._append(db, "operator", text, client_id)
+            if image:
+                db.execute("INSERT INTO message_images(event_id,width,height,sha256,data) VALUES(?,?,?,?,?)",
+                           (event_id, image.width, image.height, image.sha256, image.data))
             db.execute("INSERT INTO inbox(event_id) VALUES(?)", (event_id,))
             return event_id
+
+    def image_data(self, event_id: int) -> bytes | None:
+        with self._connect() as db:
+            row = db.execute("SELECT data FROM message_images WHERE event_id=?", (event_id,)).fetchone()
+            return row["data"] if row else None
 
     def events(self, after: int = 0, limit: int = 100) -> list[Event]:
         if after < 0 or limit < 0:
             raise ValueError("Invalid chat event cursor or limit")
         with self._connect() as db:
-            return [Event(**row) for row in db.execute(
-                "SELECT id,role,text,at FROM events WHERE id>? ORDER BY id LIMIT ?", (after, limit))]
+            return [_event(row) for row in db.execute(
+                EVENT_SELECT + "WHERE e.id>? ORDER BY e.id LIMIT ?", (after, limit))]
 
     def recent(self, limit: int = 20, *, before: int | None = None) -> list[Event]:
         if limit < 0 or (before is not None and before < 0):
             raise ValueError("Invalid chat history cursor or limit")
-        query = "SELECT id,role,text,at FROM events"
+        query = EVENT_SELECT
         params = []
         if before is not None:
-            query += " WHERE id < ?"
+            query += "WHERE e.id < ?"
             params.append(before)
         with self._connect() as db:
-            rows = db.execute(query + " ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
-            return [Event(**row) for row in reversed(rows)]
+            rows = db.execute(query + " ORDER BY e.id DESC LIMIT ?", (*params, limit)).fetchall()
+            return [_event(row) for row in reversed(rows)]
 
     def read_cursor(self) -> int | None:
         with self._connect() as db:
@@ -123,12 +152,19 @@ class ChatStore:
             return dict(row)
 
     @staticmethod
-    def _pending(db, limit, role="operator"):
+    def _pending(db, limit, role="operator", *, image_slots=MAX_TURN_IMAGES):
         if limit < 1:
             raise ValueError("Batch size must be positive")
-        rows = db.execute("""SELECT e.id,e.role,e.text,e.at FROM inbox i JOIN events e ON e.id=i.event_id
+        rows = db.execute(EVENT_SELECT + """JOIN inbox i ON e.id=i.event_id
             WHERE i.batch_id IS NULL AND e.role=? ORDER BY i.event_id LIMIT ?""", (role, limit))
-        return tuple(Event(**row) for row in rows)
+        messages = []
+        for row in rows:
+            if row["sha256"] is not None:
+                if image_slots <= 0:
+                    break
+                image_slots -= 1
+            messages.append(_event(row))
+        return tuple(messages)
 
     @staticmethod
     def _validate_minutes(minutes):
@@ -302,7 +338,9 @@ class ChatStore:
         """Claim additions before attempting their delivery into the running turn."""
         with self._connect(write=True) as db:
             self._active(db, batch_id)
-            messages = self._pending(db, limit)
+            used = db.execute("""SELECT COUNT(*) FROM inbox i JOIN message_images im ON im.event_id=i.event_id
+                WHERE i.batch_id=?""", (batch_id,)).fetchone()[0]
+            messages = self._pending(db, limit, image_slots=MAX_TURN_IMAGES - used)
             self._assign(db, messages, batch_id, True)
             return messages
 

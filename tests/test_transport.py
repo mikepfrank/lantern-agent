@@ -1,6 +1,8 @@
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from decimal import Decimal
+import base64
+import hashlib
 from http.client import HTTPConnection
 from io import BytesIO
 import json
@@ -13,6 +15,7 @@ from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
 from lantern.transport import MODEL, OpenRouterGateway, _open_upstream
+from lantern.image_ref import image_reference
 
 
 CHESS = {"name": "chess", "description": "Inspect a position", "inputSchema": {"type": "object"}}
@@ -65,6 +68,71 @@ class TransportTests(unittest.TestCase):
         return OpenRouterGateway("upstream-test-key", route=route, tools=[CHESS] if tools is None else tools,
                                  reserve=self.reserve, settle=self.settle, observe=self.observe,
                                  unregistered=self.unregistered, **kwargs)
+
+    def test_image_references_resolve_only_for_recent_operator_messages(self):
+        png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNg+N8AAAKCAYAQWoUWAAAAAElFTkSuQmCC"
+        data = base64.b64decode(png)
+        sha = hashlib.sha256(data).hexdigest()
+        loader = Mock(return_value=data)
+        items = [{"role": "user", "content": [{"type": "input_text", "text": f"Image {n}"},
+                                              {"type": "input_image", "image_url": image_reference(n, sha),
+                                               "detail": "original"}]}
+                 for n in range(1, 7)]
+        with self.gateway("cheapest", image_loader=loader) as gate:
+            self.assertEqual(200, self.request(gate, input=items)[0])
+        payload, _ = self.wire[0]
+        self.assertEqual([args[0] for args, _ in loader.call_args_list], [3, 4, 5, 6])
+        self.assertIn("archived", payload["input"][0]["content"][1]["text"])
+        for item in payload["input"][2:]:
+            self.assertEqual(item["content"][1]["image_url"], "data:image/png;base64," + png)
+            self.assertEqual(item["content"][1]["detail"], "high")
+        self.assertEqual(self.observe.call_args.args[0], payload)
+        self.assertEqual(0, payload["provider"]["max_price"]["image"])
+        self.assertNotIn(png, str(gate.evidence))
+
+    def test_wrong_image_source_digest_or_role_never_reaches_provider(self):
+        ref = image_reference(1, "0" * 64)
+        loader = Mock(return_value=None)
+        cases = [("user", ref), ("assistant", ref), ("user", "https://outside.invalid/image.png"),
+                 ("user", "file:///example"), ("user", "data:image/png;base64,Zm9v")]
+        with self.gateway("fastest", image_loader=loader) as gate:
+            for role, url in cases:
+                with self.subTest(role=role, scheme=url.split(":")[0]):
+                    item = {"role": role, "content": [{"type": "input_image", "image_url": url}]}
+                    self.assertEqual(400, self.request(gate, input=[item])[0])
+            loader.assert_called_once_with(1)
+            loader.return_value = b"\x89PNG\r\n\x1a\nwrong"
+            self.assertEqual(400, self.request(gate, input=[{"role": "user", "content": [
+                {"type": "input_image", "image_url": ref}]}])[0])
+        self.observe.assert_not_called()
+        self.reserve.assert_not_called()
+        self.assertEqual([], self.wire)
+
+    def test_unavailable_historical_pixels_do_not_strand_a_later_turn(self):
+        original = {"role": "user", "content": [
+            {"type": "input_image", "image_url": image_reference(12, "0" * 64)}]}
+        history = [original, {"type": "function_call", "name": "chess", "arguments": "{}"},
+                   {"type": "function_call_output", "output": "a tool result"}]
+        with self.gateway("fastest", image_loader=lambda _: None) as gate:
+            self.assertEqual(400, self.request(gate, input=history)[0])
+            history.append({"role": "user", "content": "Give me the text account."})
+            self.assertEqual(200, self.request(gate, tools=[], input=history)[0])
+        part = self.wire[-1][0]["input"][0]["content"][0]
+        self.assertEqual("input_text", part["type"])
+        self.assertIn("could not be verified", part["text"])
+        self.reserve.assert_called_once()
+        self.assertEqual([], self.wire[-1][0]["tools"])
+
+    def test_provider_media_cannot_become_a_persistent_operator_attachment(self):
+        part = {"type": "input_image", "image_url": "data:image/png;base64,dGVzdA=="}
+        for bad_event in (event("response.content_part.added", part=part),
+                          event("response.completed", response={"output": [{"type": "message", "content": [part]}]})):
+            self.stream = bad_event
+            with self.gateway("fastest") as gate:
+                _, received = self.request(gate)
+                self.assertNotIn(b"dGVzdA==", received)
+                self.assertEqual("interrupted", gate.evidence[-1]["status"])
+                self.assertEqual("unsupported provider message content", gate.evidence[-1]["error"])
 
     def test_handoff_reminder_is_a_reviewed_instruction_on_write_capable_requests(self):
         write_tool = {**CHESS, "name": "workspace_write"}

@@ -6,6 +6,9 @@ const feed = byId("events");
 const draft = byId("draft");
 const older = byId("older");
 const send = byId("send");
+const attach = byId("attach");
+const picker = byId("image-file");
+const imageDialog = byId("image-dialog");
 const jump = byId("jump");
 const reviewDialog = byId("review-dialog");
 const reviewInbox = byId("review-inbox");
@@ -32,6 +35,10 @@ let key = fragmentKey || stored("key");
 let pending;
 try { pending = JSON.parse(stored("pending")); } catch { pending = null; }
 draft.value = pending ? pending.text : (stored("draft") || "");
+let attachment;
+try { attachment = JSON.parse(stored("image-draft")); } catch { attachment = null; }
+if (pending) attachment = pending.image ? { ...pending.image, name: "Attached image" } : null;
+let preparingImage = false;
 
 let initialized = false;
 let earliest = 0;
@@ -60,11 +67,13 @@ function connection(state, label) {
 function controls() {
   draft.disabled = !key || !initialized;
   draft.readOnly = Boolean(pending);
-  send.disabled = !key || !initialized || sending || !draft.value.trim();
+  attach.disabled = !key || !initialized || Boolean(pending) || preparingImage;
+  byId("image-remove").disabled = Boolean(pending) || preparingImage;
+  send.disabled = !key || !initialized || sending || preparingImage || (!draft.value.trim() && !attachment);
   send.firstChild.textContent = sending ? "Sending " : pending ? "Retry send " : "Send ";
   const state = byId("send-state");
   state.dataset.error = String(Boolean(sendError));
-  const label = sendError || (sending ? "Sending…" : idleHint);
+  const label = sendError || (preparingImage ? "Preparing image…" : sending ? "Sending…" : idleHint);
   if (state.textContent !== label) state.textContent = label;
 }
 
@@ -88,7 +97,7 @@ class RequestError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-async function request(path, body) {
+async function request(path, body, responseType = "json") {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
@@ -105,11 +114,91 @@ async function request(path, body) {
       const detail = await response.json().catch(() => ({}));
       throw new RequestError(response.status, detail.error || "Request failed.");
     }
-    return await response.json();
+    return responseType === "image" ? await response.blob() : await response.json();
   } finally {
     clearTimeout(timeout);
   }
 }
+
+function displayAttachment() {
+  const preview = byId("image-preview");
+  byId("image-draft").hidden = !attachment;
+  if (attachment) {
+    preview.src = "data:image/png;base64," + attachment.data;
+    byId("image-name").textContent = attachment.name;
+    const size = byId("image-size");
+    size.textContent = attachment.width ? [attachment.width + " × " + attachment.height, attachment.resized ? "Resized" : ""].filter(Boolean).join(" · ") : "";
+  } else {
+    preview.removeAttribute("src");
+  }
+  controls();
+}
+
+async function prepareImage(file) {
+  if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) throw Error("Choose a PNG, JPEG or WebP image.");
+  if (file.size > 32 * 1024 * 1024) throw Error("Choose an image under 32 MiB.");
+  const source = new Image();
+  const url = URL.createObjectURL(file);
+  try {
+    source.src = url;
+    await source.decode();
+    const originalWidth = source.naturalWidth, originalHeight = source.naturalHeight;
+    let scale = Math.min(1, 1600 / Math.max(originalWidth, originalHeight));
+    const canvas = document.createElement("canvas");
+    const drawing = canvas.getContext("2d");
+    while (true) {
+      canvas.width = Math.max(1, Math.round(originalWidth * scale));
+      canvas.height = Math.max(1, Math.round(originalHeight * scale));
+      drawing.imageSmoothingQuality = "high";
+      drawing.drawImage(source, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
+      if (!blob) throw Error("Couldn’t prepare this image. Try a different file.");
+      if (blob.size <= 1024 * 1024) {
+        const reader = new FileReader();
+        const dataURL = await new Promise((resolve, reject) => {
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(Error("Couldn’t read this image."));
+          reader.readAsDataURL(blob);
+        });
+        return { mime_type: "image/png", data: dataURL.split(",")[1], name: file.name,
+          width: canvas.width, height: canvas.height,
+          resized: canvas.width !== originalWidth || canvas.height !== originalHeight };
+      }
+      scale *= 0.9 * Math.sqrt((1024 * 1024) / blob.size);
+    }
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+attach.addEventListener("click", () => picker.click());
+picker.addEventListener("change", async () => {
+  const file = picker.files[0];
+  picker.value = "";
+  if (!file || attach.disabled) return;
+  preparingImage = true;
+  sendError = "";
+  controls();
+  try {
+    attachment = await prepareImage(file);
+    remember("image-draft", JSON.stringify(attachment));
+    byId("announcer").textContent = "Image attached. " + attachment.name;
+  } catch (error) {
+    sendError = error instanceof DOMException ? "Couldn’t open this image. Try another file." : error.message;
+  } finally {
+    preparingImage = false;
+    displayAttachment();
+    draft.focus();
+  }
+});
+byId("image-remove").addEventListener("click", () => {
+  attachment = null;
+  remember("image-draft", null);
+  sendError = "";
+  displayAttachment();
+  byId("announcer").textContent = "Image removed.";
+  attach.focus();
+});
 
 function updateWorker(status) {
   const node = byId("worker");
@@ -253,6 +342,64 @@ byId("review-form").addEventListener("submit", async (event) => {
   }
 });
 
+const imageLoads = new WeakMap();
+const imageObserver = new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (entry.isIntersecting) {
+      imageObserver.unobserve(entry.target);
+      imageLoads.get(entry.target)();
+    }
+  }
+}, { root: historyView, rootMargin: "160px" });
+
+function messageImage(event) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "message-image";
+  button.setAttribute("aria-label", "Open attached image");
+  const image = document.createElement("img");
+  const scale = Math.min(1, 304 / event.image.width, 192 / event.image.height);
+  image.width = Math.max(1, Math.round(scale * event.image.width));
+  image.height = Math.max(1, Math.round(scale * event.image.height));
+  image.alt = "Attached image";
+  const retry = document.createElement("span");
+  retry.textContent = "Retry loading image";
+  retry.hidden = true;
+  button.append(image, retry);
+  let loading = false;
+  async function load() {
+    if (loading || !key) return;
+    loading = true;
+    try {
+      const blob = await request("/api/messages/" + event.id + "/image", undefined, "image");
+      if (!key) return;
+      image.src = URL.createObjectURL(blob);
+      image.hidden = false;
+      retry.hidden = true;
+      button.setAttribute("aria-label", "Open attached image");
+    } catch {
+      image.hidden = true;
+      retry.hidden = false;
+      button.setAttribute("aria-label", retry.textContent);
+    } finally {
+      loading = false;
+    }
+  }
+  imageLoads.set(button, load);
+  imageObserver.observe(button);
+  button.addEventListener("click", () => {
+    if (image.hasAttribute("src")) {
+      byId("image-full").src = image.src;
+      imageDialog.showModal();
+    } else {
+      void load();
+    }
+  });
+  return button;
+}
+byId("image-close").addEventListener("click", () => imageDialog.close());
+imageDialog.addEventListener("close", () => byId("image-full").removeAttribute("src"));
+
 function messageNode(event) {
   const speakers = { operator: "You", lantern: "Lantern", system: "Service" };
   const role = Object.hasOwn(speakers, event.role) ? event.role : "system";
@@ -275,7 +422,9 @@ function messageNode(event) {
   } else {
     appendPlainMessage(body, event.text);
   }
-  item.append(header, body);
+  item.append(header);
+  if (role === "operator" && event.image) item.append(messageImage(event));
+  if (event.text) item.append(body);
   return item;
 }
 
@@ -387,6 +536,10 @@ byId("composer").addEventListener("submit", async (event) => {
   if (send.disabled) return;
   if (!pending) {
     pending = { text: draft.value, client_id: crypto.randomUUID() };
+    if (attachment) {
+      pending.image = { mime_type: attachment.mime_type, data: attachment.data };
+      remember("image-draft", null);
+    }
     remember("pending", JSON.stringify(pending));
   }
   sending = true;
@@ -395,15 +548,19 @@ byId("composer").addEventListener("submit", async (event) => {
   try {
     await request("/api/messages", pending);
     pending = null;
+    attachment = null;
     remember("pending", null);
+    remember("image-draft", null);
     remember("draft", null);
     draft.value = "";
+    displayAttachment();
     latest();
     void poll();
   } catch (error) {
     if (error.status === 400 || error.status === 413 || error.status === 409) {
       pending = null;
       remember("pending", null);
+      if (attachment) remember("image-draft", JSON.stringify(attachment));
       sendError = error.message;
     } else if (key) {
       sendError = "Delivery unconfirmed. Retry send to check or deliver this message.";
@@ -435,5 +592,6 @@ window.addEventListener("hashchange", () => {
   if (new URLSearchParams(location.hash.slice(1)).has("key")) location.reload();
 });
 if (pending) sendError = "A previous send is unconfirmed. Retry send to check delivery.";
+displayAttachment();
 if (key) void poll();
 else locked();

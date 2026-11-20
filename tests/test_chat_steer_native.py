@@ -1,6 +1,7 @@
 """Native Codex steering through the real loopback gateway and an offline provider."""
 
 import asyncio
+import base64
 from contextlib import contextmanager, redirect_stderr, suppress
 from decimal import Decimal
 from io import StringIO
@@ -15,10 +16,12 @@ import unittest
 from unittest.mock import patch
 
 from lantern.__main__ import main
+from lantern.attachments import parse_image
 from lantern.budget import Budget
 from lantern.chat_store import ChatStore
 from lantern.codex_session import _Peer
 from lantern.transport import OpenRouterGateway
+from test_attachments import png, upload
 from test_codex_smoke import FixtureStream, reply
 
 
@@ -29,6 +32,8 @@ class NativeSteering(unittest.TestCase):
         self.assertTrue(binary, "Cannot find the native codex executable")
         prompt = "Start the calculation. Reference River-190."
         followup = "Use the amended figure instead. Reference Orchard-843."
+        drawing = parse_image(upload(png()))
+        encoded = base64.b64encode(drawing.data).decode("ascii")
         first_inference = Event()
         acknowledged = Event()
         release_old_response = Event()
@@ -36,6 +41,7 @@ class NativeSteering(unittest.TestCase):
         settlement_timed_out = Event()
         requests, sent, started, finished = [], [], [], []
         reports = []
+        transmitted_images = []
         steer_ids = set()
         send, read = _Peer.send, _Peer.read
 
@@ -78,6 +84,9 @@ class NativeSteering(unittest.TestCase):
             self.assertIn("Michael P. Frank", payload["instructions"])
             users = [part["text"] for item in payload["input"] if item.get("role") == "user"
                      for part in item["content"] if part.get("type") == "input_text"]
+            images = [(item["content"], part["image_url"]) for item in payload["input"] if item.get("role") == "user"
+                      for part in item["content"] if part.get("type") == "input_image"]
+            transmitted_images.append(images)
             requests.append(users)
             serial = len(requests)
             answer = "I used Orchard-843." if any(followup in user for user in users) else "I used River-190."
@@ -113,7 +122,7 @@ class NativeSteering(unittest.TestCase):
                         if worker.done():
                             await worker
                         await asyncio.sleep(.025)
-                    store.submit(followup)
+                    store.submit(followup, image=drawing)
                     while not any(event.role in ("lantern", "system") for event in store.events()):
                         if worker.done():
                             await worker
@@ -154,8 +163,15 @@ class NativeSteering(unittest.TestCase):
         self.assertEqual(finished, started)
         self.assertEqual(sent[1]["params"]["expectedTurnId"], started[0])
         self.assertEqual(sent[1]["params"]["threadId"], thread_id)
+        self.assertEqual([part["type"] for part in sent[1]["params"]["input"]], ["text", "image"])
         self.assertTrue(acknowledged.is_set())
         self.assertEqual(len(requests), 2, reports)
         self.assertEqual([sum(text.count(prompt) for text in users) for users in requests], [1, 1])
         self.assertEqual([sum(text.count(followup) for text in users) for users in requests], [0, 1])
+        self.assertTrue(all(encoded not in text for users in requests for text in users))
+        self.assertEqual(transmitted_images[0], [])
+        amended, = transmitted_images[1]
+        parts, image_url = amended
+        self.assertTrue(any(followup in part.get("text", "") for part in parts))
+        self.assertEqual(image_url, "data:image/png;base64," + encoded)
         self.assertEqual([entry["status"] for entry in reports], ["completed", "completed"])
