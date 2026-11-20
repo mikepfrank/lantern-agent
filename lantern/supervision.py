@@ -224,6 +224,13 @@ class Supervisor:
             db.execute("INSERT INTO events(thread, event, tool, call_id) VALUES (?, ?, ?, ?)",
                        (self.thread, event, tool, call_id))
 
+    def reviewed_calls(self):
+        """Identify previously registered calls in this room, including denials."""
+        with database(self.path) as db:
+            return set(db.execute("""SELECT DISTINCT e.tool,e.call_id FROM events e
+                JOIN actions a ON a.thread=e.thread AND a.call_id=e.call_id
+                WHERE e.thread=? AND e.tool IS NOT NULL""", (self.thread,)))
+
     def _record_screen(self, db, scan, sequence, kind, tool=None, call_id=None):
         """Commit Luna's stated concern with its event, independently of the later ruling."""
         flagged = scan["escalate"]

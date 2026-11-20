@@ -109,6 +109,16 @@ class ReviewTests(unittest.TestCase):
         self.assertNotIn("opaque-provider-field", json.dumps(rows))
         self.assertNotIn(self.args["rationale"], json.dumps(rows))
 
+    def test_reviewed_history_covers_allowed_and_denied_calls_in_one_thread(self):
+        self.gate.observe(self.payload)
+        self.assertIn("move", self.call("old-allow"))
+        self.luna.screen.return_value = report("Fixture concern")
+        self.review.return_value = {"decision": "deny", "reason": "Fixture denial"}
+        self.assertIn("error", self.call("old-deny"))
+        self.gate.unregistered("never_registered", "{}")
+        self.assertEqual(self.gate.reviewed_calls(), {("chess_analyze", "old-allow"), ("chess_analyze", "old-deny")})
+        self.assertEqual(self.session(thread="other").reviewed_calls(), set())
+
     def test_first_audit_on_a_preexisting_operator_database(self):
         legacy = self.state / "legacy"
         legacy.mkdir()

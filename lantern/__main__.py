@@ -347,7 +347,8 @@ async def main(args):
                                         image_id, cid, thread_id=supervisor.thread)) if store is not None else None,
                                     settle=ledger.settle, finish=ledger.finish, observe=supervisor.observe,
                                     unregistered=partial(for_tool, "unregistered", None, supervisor.unregistered),
-                                    resuming=bool(thread),
+                                    resuming=bool(thread), managed_registry=store is not None,
+                                    reviewed_calls=supervisor.reviewed_calls,
                                     operator_context=context,
                                     handoff_due=(lambda: ledger.handoff_reminder_due(supervisor.thread))
                                     if independent else None)
@@ -399,7 +400,7 @@ async def main(args):
 
         await serve(state, store, turn, args.route, heartbeat_minutes=heartbeat_minutes,
                     budget_check=partial(can_start_request, ledger, vendors) if independent else None,
-                    on_start=prepare_room if independent else None)
+                    on_start=prepare_room)
         return
     if args.command == "say":
         result, _ = await turn(args.message, args.route, args.thread)

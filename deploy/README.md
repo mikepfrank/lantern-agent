@@ -40,7 +40,7 @@ ssh -t lightsail "sudo -iu lantern lantern"
 
 Within an existing `lantern` shell, run `lantern`. Use `lantern status`, `lantern history`, and `lantern usage` for one-shot checks. The system unit is enabled across boots. Worker logs are available to the administrator with `sudo journalctl -u lantern-chat.service`.
 
-The unit passes `--heartbeat-minutes 60`. Its first independent start adds the new tool definitions to the current private Codex room under the exclusive worker lock. It preserves the pinned persona, messages and thread ID. It saves the original native history in `operator-backups/independent-work-v1/` in the private state directory before updating the registry and offsets. A later restart uses the saved cadence. Inspect it with `lantern schedule`. The worker reads and writes project files under `workspace/files/` through supervised tools.
+The unit passes `--heartbeat-minutes 60`. At startup the worker uses its active configuration to synchronize the native tool definitions in the private room's header and its same-thread compaction checkpoints. This covers additions, removals and revised schemas. The worker holds its exclusive lock and takes a private backup before changing the saved metadata and history offsets. Current migrations store the original rollout and the target registry under `operator-backups/room-tools-v2/`. The pinned persona, messages and thread ID survive the update. A later restart uses the saved heartbeat cadence. Inspect it with `lantern schedule`. The worker reads and writes project files under `workspace/files/` through supervised tools.
 
 ## Browser
 

@@ -177,6 +177,15 @@ class NativeIndependentWorker(unittest.TestCase):
                                   and item["call_id"] == "call_7")
                 self.assertIn("at_utc", json.dumps(diagnostic["output"]))
 
+                store.submit("Keep going in the same conversation with independent work disabled.")
+                boot(state)
+                self.assertEqual(store.status()["thread_id"], tid)
+                self.assertEqual(store.recent(1)[0].text, new_answer)
+                self.assertEqual({t["name"] for t in requests[-1]["tools"]},
+                                 {"chess_analyze", "read_heritage", "message_operator", "consult_opus"})
+                prior = {i["name"] for i in requests[-1]["input"] if i.get("type") == "function_call"}
+                self.assertTrue({"workspace_read", "coding_run", "harness_logs"}.issubset(prior))
+
         requests = requests[:5]
         self.assertEqual(["notes/handoff.md" in request["instructions"] for request in requests],
                          [False, True, False, False, False])

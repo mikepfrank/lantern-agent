@@ -65,7 +65,7 @@ class CompactionRegistryTests(unittest.TestCase):
             with patch("lantern.thread_upgrade.os.replace", side_effect=interrupt), self.assertRaises(RuntimeError):
                 install_room_tools(state, tid, [old, PDF_TOOL])
             install_room_tools(state, tid, [old, PDF_TOOL])
-            repair, = (state / "operator-backups/compaction-tools-v1").glob("*.jsonl")
+            repair, = (state / "operator-backups/room-tools-v2").glob("*.jsonl")
             self.assertEqual(old_backup.read_bytes(), b"".join(baseline))
             self.assertEqual(repair.read_bytes(), before)
             self.assertTrue(repair.with_suffix(".done").exists())
@@ -84,6 +84,25 @@ class CompactionRegistryTests(unittest.TestCase):
             self.assertIsNone(install_room_tools(state, tid, [old, PDF_TOOL, extra]))
             self.assertEqual(repair.read_bytes(), before)
             self.assertEqual(len(list(repair.parent.glob("*.jsonl"))), 2)
+            # Interrupt a definition change with simultaneous removal. Restart
+            # with a third configuration; replay the frozen target first.
+            revised = {**old, "description": "Updated chess tool", "inputSchema": {"type": "object", "required": ["fen"]}}
+            with patch("lantern.thread_upgrade.os.replace", side_effect=interrupt), self.assertRaises(RuntimeError):
+                install_room_tools(state, tid, [revised])
+            interrupted = rollout.read_bytes()
+            self.assertEqual(json.loads(interrupted.splitlines()[0])["payload"]["dynamic_tools"], [saved(revised)])
+            install_room_tools(state, tid, [PDF_TOOL, revised])
+            final = rollout.read_bytes().splitlines(keepends=True)
+            for i in (1, 4):
+                self.assertEqual(json.loads(final[i])["payload"]["resume_metadata"]["dynamic_tools"]["tools"],
+                                 [saved(PDF_TOOL), saved(revised)])
+            self.assertEqual(final[2:4], baseline[2:4])
+            self.assertEqual(final[5:], [baseline[5], next_line])
+            self.assertIsNone(install_room_tools(state, tid, [PDF_TOOL, revised]))
+            install_room_tools(state, tid, [])
+            cleared = [json.loads(line)["payload"] for line in rollout.read_bytes().splitlines()]
+            self.assertEqual(cleared[0]["dynamic_tools"], [])
+            self.assertEqual(cleared[1]["resume_metadata"]["dynamic_tools"]["tools"], [])
 
     @unittest.skipUnless(os.environ.get("LANTERN_TEST_CODEX") == "1", "requires native Codex")
     def test_native_manual_compaction_then_migrated_resume_advertises_tool(self):
@@ -123,3 +142,8 @@ class CompactionRegistryTests(unittest.TestCase):
             self.assertIsNotNone(report)
             self.assertEqual(run([old, PDF_TOOL], tid).thread_id, tid)
             self.assertIn("view_pdf_page", {t["name"] for t in calls[-1]["tools"]})
+            revised = {**old, "description": "A revised chess tool.", "inputSchema": {"type": "object", "required": ["fen"]}}
+            self.assertIsNotNone(install_room_tools(state, tid, [revised]))
+            self.assertEqual(run([revised], tid).thread_id, tid)
+            self.assertEqual([(t["name"], t["parameters"]) for t in calls[-1]["tools"]],
+                             [("chess_analyze", revised["inputSchema"])])

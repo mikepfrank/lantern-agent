@@ -139,6 +139,37 @@ class TransportTests(unittest.TestCase):
         self.reserve.assert_called_once()
         self.assertEqual([], self.wire[-1][0]["tools"])
 
+    def test_managed_worker_requires_its_complete_active_tools(self):
+        names = ["chess_analyze", "read_heritage", "consult_opus"]
+        tools = [{**CHESS, "name": n} for n in names]
+        offered = [{"type": "function", "name": n} for n in names]
+        with self.gateway("fastest", tools=tools, resuming=True, managed_registry=True) as gate:
+            self.assertEqual(400, self.request(gate, tools=offered[:1])[0])
+            self.reserve.assert_not_called()
+            self.assertEqual(200, self.request(gate, tools=offered)[0])
+        self.assertEqual([t["name"] for t in self.wire[-1][0]["tools"]], names)
+        with self.gateway("fastest", tools=tools, resuming=True) as prototype:
+            self.assertEqual(200, self.request(prototype, tools=offered[:1])[0])
+        self.assertEqual([t["name"] for t in self.wire[-1][0]["tools"]], names[:1])
+
+    def test_retired_call_receipts_cover_only_matching_inert_history(self):
+        history = [{"type": "function_call", "name": "workspace_read", "call_id": "earlier"},
+                   {"type": "function_call_output", "call_id": "earlier", "output": "from private notes"}]
+        receipts = Mock(return_value={("workspace_read", "earlier")})
+        with self.gateway("fastest", resuming=True, managed_registry=True, reviewed_calls=receipts) as gate:
+            self.assertEqual(200, self.request(gate, input=history)[0])
+            for changes in [{"call_id": "forged"}, {"name": "unknown"}]:
+                self.assertEqual(400, self.request(gate, input=[{**history[0], **changes}, history[1]])[0])
+            self.assertEqual(400, self.request(gate, input=history, tool_choice={"type": "function",
+                                             "name": "workspace_read"})[0])
+            self.stream = event("response.output_item.done", item=history[0])
+            _, response = self.request(gate, input=history)
+        receipts.assert_called_once()
+        self.assertEqual(self.wire[0][0]["input"], history)
+        self.assertEqual([t["name"] for t in self.wire[0][0]["tools"]], ["chess"])
+        self.assertNotIn(b"workspace_read", response)
+        self.unregistered.assert_called_once_with("workspace_read", None)
+
     def test_provider_media_cannot_become_a_persistent_operator_attachment(self):
         part = {"type": "input_image", "image_url": "data:image/png;base64,dGVzdA=="}
         for bad_event in (event("response.content_part.added", part=part),

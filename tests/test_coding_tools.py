@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from lantern.coding_tools import CODING_TOOL, COMMAND_LIMIT, run_code
 from lantern.supervision import Supervisor, supervised_tools
-from lantern.thread_upgrade import install_room_tools
+from lantern.thread_upgrade import _migrate, install_room_tools
 from lantern.transport import MODEL, ProtocolError, _prepare
 
 
@@ -77,11 +77,14 @@ class CodingClientTests(unittest.TestCase):
                    {"type": "function_call_output", "call_id": "logs", "output": "ok"}]
         payload = {"model": MODEL, "stream": True, "input": history,
                    "tools": [{"type": "function", "name": "coding_run"}]}
-        prepared = _prepare(payload, "fastest", [], resuming=True)
+        def receipts():
+            return {("coding_run", "prior"), ("harness_logs", "logs")}
+        prepared = _prepare(payload, "fastest", [], resuming=True, managed_registry=True, reviewed_calls=receipts)
         self.assertEqual(prepared["input"], history)
         self.assertEqual(prepared["tools"], [])
         with self.assertRaises(ProtocolError):
-            _prepare({**payload, "tool_choice": payload["tools"][0]}, "fastest", [], resuming=True)
+            _prepare({**payload, "tool_choice": payload["tools"][0]}, "fastest", [], resuming=True,
+                     managed_registry=True, reviewed_calls=receipts)
 
 
 class CodingRegistryTests(unittest.TestCase):
@@ -108,7 +111,8 @@ class CodingRegistryTests(unittest.TestCase):
                 db.execute("INSERT INTO thread_history_projection_state VALUES(?,?,?)", (tid, 2, rollout.stat().st_size))
             old = {"name": "workspace_write", "description": "Save", "inputSchema": {"type": "object", "properties": {}}}
             logs = {"name": "harness_logs", "description": "Inspect", "inputSchema": {"type": "object", "properties": {}}}
-            install_room_tools(state, tid, supervised_tools([old]))
+            _migrate(home, tid, supervised_tools([old]),
+                     state / "operator-backups/independent-work-v1", "independent-work")
             base_backup = next((state / "operator-backups/independent-work-v1").glob("*.jsonl"))
             self.assertEqual(base_backup.read_bytes(), b"".join(map(line, initial)))
             second_start = rollout.stat().st_size
@@ -127,7 +131,7 @@ class CodingRegistryTests(unittest.TestCase):
                     raise RuntimeError("injected interruption")
             all_tools = supervised_tools([old, CODING_TOOL])
             with patch("lantern.thread_upgrade.os.replace", side_effect=replace_then_interrupt), self.assertRaises(RuntimeError):
-                install_room_tools(state, tid, all_tools)
+                _migrate(home, tid, [all_tools[1]], state / "operator-backups/coding-workspace-v1", "coding-workspace")
             coding_backup = next((state / "operator-backups/coding-workspace-v1").glob("*.jsonl"))
             self.assertEqual(coding_backup.read_bytes(), before)
             self.assertFalse(coding_backup.with_suffix(".done").exists())
@@ -138,8 +142,8 @@ class CodingRegistryTests(unittest.TestCase):
             after = rollout.read_bytes()
             self.assertEqual(after.splitlines(keepends=True)[1:], before.splitlines(keepends=True)[1:])
             names = [tool["name"] for tool in json.loads(after.splitlines()[0])["payload"]["dynamic_tools"]]
-            self.assertEqual(names, ["workspace_write", "consult_opus", "coding_run", "harness_logs"])
-            logs_backup = next((state / "operator-backups/harness-logs-v1").glob("*.jsonl"))
+            self.assertEqual(names, ["workspace_write", "harness_logs", "consult_opus"])
+            logs_backup = next((state / "operator-backups/room-tools-v2").glob("*.jsonl"))
             after_coding = logs_backup.read_bytes()
             self.assertEqual(after_coding.splitlines(keepends=True)[1:], before.splitlines(keepends=True)[1:])
             self.assertNotEqual(after, after_coding)
@@ -151,6 +155,6 @@ class CodingRegistryTests(unittest.TestCase):
             with rollout.open("ab") as stream:
                 stream.write(line({"type": "event_msg", "payload": {"text": "later still"}}))
             final = rollout.read_bytes()
-            self.assertIsNone(install_room_tools(state, tid, supervised_tools([old, CODING_TOOL, logs])))
+            self.assertIsNone(install_room_tools(state, tid, supervised_tools([old, logs])))
             self.assertEqual(rollout.read_bytes(), final)
             self.assertEqual(coding_backup.read_bytes(), before)

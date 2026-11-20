@@ -3,6 +3,7 @@
 import base64
 from contextlib import contextmanager
 from decimal import Decimal
+from functools import cache
 import hashlib
 import hmac
 import http.client
@@ -63,7 +64,7 @@ class UnregisteredCall(ProtocolError):
         self.arguments = item.get("arguments")
 
 
-def _prepare_input(items, names, image_loader, page_image_loader):
+def _prepare_input(items, names, image_loader, page_image_loader, reviewed_calls=None):
     if isinstance(items, str):
         return items
     if not isinstance(items, list):
@@ -103,7 +104,8 @@ def _prepare_input(items, names, image_loader, page_image_loader):
                     raise ProtocolError("unsupported image detail")
                 images.append((index, position, event_id, digest, "high" if detail == "original" else detail, page_call))
         elif kind == "function_call":
-            if item.get("name") not in names:
+            if item.get("name") not in names and (reviewed_calls is None or
+                    (item.get("name"), item.get("call_id")) not in reviewed_calls()):
                 raise ProtocolError("unknown tool in conversation")
             if item.get("name") == "view_pdf_page" and isinstance(item.get("call_id"), str):
                 page_calls.add(item["call_id"])
@@ -142,23 +144,25 @@ def _prepare_input(items, names, image_loader, page_image_loader):
     return result
 
 
-def _prepare(payload, route, tools, *, resuming=False, image_loader=None, page_image_loader=None):
+def _prepare(payload, route, tools, *, resuming=False, managed_registry=False, reviewed_calls=None,
+             image_loader=None, page_image_loader=None):
     if not isinstance(payload, dict) or payload.get("model") != MODEL or payload.get("stream") is not True:
         raise ProtocolError("expected a streaming request for " + MODEL)
     if payload.get("previous_response_id") is not None:
         raise ProtocolError("full conversation history is required")
     names = {tool["name"] for tool in tools}
-    # Historical calls remain inert transcript entries when a host tool has
-    # been disabled. New replies and tool_choice still use the enabled names.
-    history_names = names | {"coding_run", "harness_logs", "view_pdf_page"} if resuming else names
-    prepared_input = _prepare_input(payload.get("input"), history_names, image_loader, page_image_loader)
+    # A retired call can remain in native history. Its room-specific receipt
+    # permits replay as input only. Outputs and tool_choice use the active list.
+    prepared_input = _prepare_input(payload.get("input"), names, image_loader, page_image_loader,
+                                     reviewed_calls if resuming else None)
     incoming = payload.get("tools", [])
     if not isinstance(incoming, list) or any(not isinstance(tool, dict) for tool in incoming):
         raise ProtocolError("invalid tool declarations")
     declared = {t.get("name") for t in incoming if t.get("type") == "function"}
-    # Old Codex threads retain their original tool registrations. Keep the
-    # optional additions out of requests for threads that predate them.
-    if resuming and "chess_analyze" in declared and (names - declared) <= {"consult_opus", "read_heritage"}:
+    # Legacy one-shot threads can predate supervision and the heritage reader.
+    # Managed rooms reconcile the full active list before resuming.
+    if (not managed_registry and resuming and "chess_analyze" in declared
+            and (names - declared) <= {"consult_opus", "read_heritage"}):
         tools = [tool for tool in tools if tool["name"] in declared]
         names = {tool["name"] for tool in tools}
     if incoming and (missing := names - declared):
@@ -359,7 +363,8 @@ class OpenRouterGateway:
     """
 
     def __init__(self, api_key, *, route, tools, reserve, settle, observe, unregistered, resuming=False,
-                 operator_context="", finish=None, handoff_due=None, image_loader=None, page_image_loader=None):
+                 operator_context="", finish=None, handoff_due=None, image_loader=None, page_image_loader=None,
+                 managed_registry=False, reviewed_calls=None):
         if route not in ROUTES or not api_key:
             raise ValueError("a valid route and OpenRouter key are required")
         self.route = route
@@ -372,6 +377,10 @@ class OpenRouterGateway:
         self.handoff_due = handoff_due
         self.image_loader = image_loader
         self.page_image_loader = page_image_loader
+        self.managed_registry = managed_registry
+        # Historical lookup is needed only when replaying a retired tool.
+        # The configured tools stay fixed for this one gateway/turn.
+        self.reviewed_calls = cache(reviewed_calls) if reviewed_calls is not None else None
         self._api_key = api_key
         self.token = secrets.token_urlsafe(32)
         self.evidence = []
@@ -459,7 +468,8 @@ class OpenRouterGateway:
                         return self.reject_unread(413, "invalid request size")
                     prepared = _prepare(json.loads(self.rfile.read(length)), gateway.route, gateway.tools,
                                         resuming=gateway.resuming, image_loader=gateway.image_loader,
-                                        page_image_loader=gateway.page_image_loader)
+                                        page_image_loader=gateway.page_image_loader,
+                                        managed_registry=gateway.managed_registry, reviewed_calls=gateway.reviewed_calls)
                     if gateway.operator_context:
                         # Apply current channel facts even when Codex resumes an older thread.
                         instructions = prepared.get("instructions") or ""

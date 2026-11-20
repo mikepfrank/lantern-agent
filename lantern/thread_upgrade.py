@@ -11,14 +11,16 @@ from tempfile import NamedTemporaryFile
 from uuid import UUID
 
 from .codex_session import BASE_INSTRUCTIONS
-from .coding_tools import CODING_TOOL
-from .diagnostics import DIAGNOSTICS_TOOL
-from .pdf_tool import PDF_TOOL
-from .supervision import supervised_tools
 
 
-def _update_room_meta(meta, tools, *, independent):
-    changed = _add_specifications(meta["dynamic_tools"], ({"type": "function", **tool} for tool in tools))
+def _update_room_meta(meta, tools, *, independent, exact=False):
+    specifications = [{"type": "function", **tool} for tool in tools]
+    if exact:
+        changed = meta.get("dynamic_tools") != specifications
+        if changed:
+            meta["dynamic_tools"] = specifications
+    else:
+        changed = _add_specifications(meta["dynamic_tools"], specifications)
     if independent:
         # Exact base shipped through the private heritage release. Keep custom
         # bases and the separate developer persona intact.
@@ -66,16 +68,21 @@ def _add_specifications(saved, specifications):
     return changed
 
 
-def _update_checkpoint(payload, thread_id, specifications):
+def _update_checkpoint(payload, thread_id, specifications, *, exact=False):
     # A compacted rollout can carry a registry scoped to a specific thread.
     # Absent and foreign registries are not overrides for this room.
     checkpoint = (payload.get("resume_metadata") or {}).get("dynamic_tools")
     if checkpoint is None or checkpoint.get("thread_id") != thread_id:
         return False
+    if exact:
+        if checkpoint.get("tools") == specifications:
+            return False
+        checkpoint["tools"] = specifications
+        return True
     return _add_specifications(checkpoint["tools"], specifications)
 
 
-def _rewrite(backup, out, thread_id, tools, old_persona, new_persona, *, checkpoints=False):
+def _rewrite(backup, out, thread_id, tools, old_persona, new_persona, *, checkpoints=False, exact=False):
     # Codex persists the first session_meta tool list and stores developer text
     # in rollout messages. Its resume RPC cannot replace either in an old thread.
     matches = 0
@@ -90,15 +97,14 @@ def _rewrite(backup, out, thread_id, tools, old_persona, new_persona, *, checkpo
             if i == 0:
                 if record["type"] != "session_meta" or payload.get("id") != thread_id:
                     raise ValueError("Saved thread identity mismatch")
-                if checkpoints:
-                    specifications = payload["dynamic_tools"]
-                else:
-                    changed = _update_room_meta(payload, tools, independent=old_persona is None)
+                if not checkpoints:
+                    changed = _update_room_meta(payload, tools, independent=old_persona is None, exact=exact)
+                specifications = payload["dynamic_tools"]
             if record["type"] == "response_item":
                 items = [payload]
             elif record["type"] == "compacted":
-                if checkpoints:
-                    changed = _update_checkpoint(payload, thread_id, specifications)
+                if checkpoints or exact:
+                    changed = _update_checkpoint(payload, thread_id, specifications, exact=exact)
                 items = payload.get("replacement_history") or []
             else:
                 items = []
@@ -159,55 +165,62 @@ def install_room_tools(state, thread_id, tools):
     home = state / "codex"
     backups = state / "operator-backups"
     rollout = _room_rollout(home, thread_id)
-    checkpoint_dir = backups / "compaction-tools-v1"
-    # This step can have completed the rename but not the index commit. Repair
-    # from its own source snapshot before attempting a newly configured upgrade.
-    for backup in sorted(checkpoint_dir.glob(f"{thread_id}.before-*.jsonl")):
-        if not backup.with_suffix(".done").exists():
-            _migrate(home, thread_id, [], checkpoint_dir, backup.stem.split(".before-", 1)[1],
-                     checkpoints=True)
-    optional = {"coding-workspace": CODING_TOOL, "harness-logs": DIAGNOSTICS_TOOL, "pdf-pages": PDF_TOOL}
-    additions = {tool["name"]: label for label, tool in optional.items()}
-    stages = {label: [] for label in ("independent-work", *optional)}
-    for tool in tools:
-        stages[additions.get(tool["name"], "independent-work")].append(tool)
-
-    # Each stage has an immutable backup of its own starting point. Recover a
-    # partially replaced rollout/index BEFORE installing any newly enabled tool.
-    report = None
-    for label, specifications in stages.items():
-        directory = backups / f"{label}-v1"
-        backup = directory / f"{thread_id}.before-{label}.jsonl"
-        if not backup.exists() or backup.with_suffix(".done").exists():
-            continue
-        recovery_specs = specifications
-        if not specifications and label in optional:
-            recovery_specs = [supervised_tools([optional[label]])[0]]
-        report = _migrate(home, thread_id, recovery_specs, directory, label)
-
-    for label, specifications in stages.items():
-        if specifications:
-            report = _migrate(home, thread_id, specifications, backups / f"{label}-v1", label) or report
-    # 0.169 prefers the saved compaction checkpoint over the opening registry
-    # on a later resume. A completed earlier rollout migration is still valid:
-    # start any checkpoint repair from the complete current history.
+    directory = backups / "room-tools-v2"
+    # Old installers committed the rollout rename before the history-index
+    # transaction. Complete any interrupted transaction before touching tools.
+    _recover_registries(home, thread_id, rollout, backups)
     with rollout.open("rb") as stream:
         first = json.loads(stream.readline())
         if first["type"] != "session_meta" or first["payload"].get("id") != thread_id:
             raise ValueError("Saved thread identity mismatch")
-        canonical = first["payload"]["dynamic_tools"]
-        for raw in stream:
-            if b'"compacted"' not in raw:
+        header = first["payload"]
+        if not _update_room_meta(header, tools, independent=True, exact=True):
+            for raw in stream:
+                if b'"compacted"' not in raw:
+                    continue
+                record = json.loads(raw)
+                if record["type"] == "compacted" and _update_checkpoint(
+                        record["payload"], thread_id, header["dynamic_tools"], exact=True):
+                    break
+            else:
+                return None
+    # Keep the target alongside its source backup so recovery can finish this
+    # exact transaction even if this worker's configuration subsequently changes.
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=directory, prefix=f"{thread_id}.before-", suffix=".json", delete=False,
+                            mode="w", encoding="utf-8") as dst:
+        label = Path(dst.name).stem.split(".before-", 1)[1]
+        json.dump(tools, dst, ensure_ascii=False, allow_nan=False)
+        dst.flush()
+        os.fsync(dst.fileno())
+    return _migrate(home, thread_id, tools, directory, label, exact=True)
+
+
+def _recover_registries(home, thread_id, rollout, backups):
+    for stage in ("independent-work-v1", "coding-workspace-v1", "harness-logs-v1", "pdf-pages-v1",
+                  "compaction-tools-v1", "room-tools-v2"):
+        directory = backups / stage
+        for backup in sorted(directory.glob(f"{thread_id}.before-*.jsonl")):
+            done = backup.with_suffix(".done")
+            if done.exists():
                 continue
-            record = json.loads(raw)
-            if record["type"] == "compacted" and _update_checkpoint(record["payload"], thread_id, canonical):
-                break
-        else:
-            return report
-    # A room may gain more tools after many subsequent turns. A source digest
-    # distinguishes each revision's private backup and crash recovery metadata.
-    label = "checkpoint-" + _digest(rollout)
-    return _migrate(home, thread_id, [], checkpoint_dir, label, checkpoints=True) or report
+            label = backup.stem.split(".before-", 1)[1]
+            if stage == "room-tools-v2":
+                target = json.loads(backup.with_suffix(".json").read_text(encoding="utf-8"))
+                _migrate(home, thread_id, target, directory, label, exact=True)
+            elif _digest(backup) == _digest(rollout):
+                # The legacy installer never renamed its output. The indexes
+                # still describe this original history.
+                done.touch(mode=0o600)
+            elif stage == "compaction-tools-v1":
+                _migrate(home, thread_id, [], directory, label, checkpoints=True)
+            else:
+                # v1 stored no target manifest. If it reached rename, its target
+                # declarations are in the live header. Reproduce the old output
+                # from its backup and check the digest before repairing offsets.
+                with rollout.open("rb") as stream:
+                    registered = json.loads(stream.readline())["payload"]["dynamic_tools"]
+                _migrate(home, thread_id, registered, directory, label)
 
 
 def _room_rollout(codex_home, thread_id):
@@ -225,12 +238,13 @@ def _room_rollout(codex_home, thread_id):
     return rollout
 
 
-def _migrate(codex_home, thread_id, tools, backup_dir, label, old_persona=None, new_persona=None, *, checkpoints=False):
+def _migrate(codex_home, thread_id, tools, backup_dir, label, old_persona=None, new_persona=None, *,
+             checkpoints=False, exact=False):
     home = codex_home.resolve(strict=True)
     rollout = _room_rollout(home, thread_id)
     backup = backup_dir / f"{thread_id}.before-{label}.jsonl"
     done = backup.with_suffix(".done")
-    if not checkpoints and old_persona is None and (done.exists() or not backup.exists()):
+    if not (checkpoints or exact) and old_persona is None and (done.exists() or not backup.exists()):
         with rollout.open("rb") as stream:
             meta = json.loads(stream.readline())
         if meta["type"] != "session_meta" or meta["payload"]["id"] != thread_id:
@@ -243,7 +257,8 @@ def _migrate(codex_home, thread_id, tools, backup_dir, label, old_persona=None, 
     with NamedTemporaryFile(dir=rollout.parent, prefix=".heritage-", delete=False) as out:
         staged = Path(out.name)
         try:
-            offsets = _rewrite(backup, out, thread_id, tools, old_persona, new_persona, checkpoints=checkpoints)
+            offsets = _rewrite(backup, out, thread_id, tools, old_persona, new_persona,
+                               checkpoints=checkpoints, exact=exact)
             out.flush()
             os.fsync(out.fileno())
             out.close()
