@@ -1,5 +1,6 @@
-# Preserve the exact UTF-8 attachment and its original line endings.
+# Preserve the supplied persona files and their original line endings.
 lantern/personas/lantern-v1.md -text whitespace=cr-at-eol
+lantern/personas/lantern-v2.md -text whitespace=cr-at-eol
 lantern/web_assets/markdown-it-15.0.3.min.js -text
 deploy/*.sh text eol=lf
 deploy/lantern text eol=lf

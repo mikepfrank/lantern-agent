@@ -8,7 +8,7 @@ The final suite passed 239 tests on Amazon Linux with two environment-specific s
 
 For the coordinated cutover, use the worker-only installer from the staged revision at an idle boundary. The local ignored files `.lantern/standing-policy-watches.md` and `.lantern/standing-policy-reconcile.py` contain the reviewed one-time plan. It rehearsed retiring five watches and focusing two on concrete outstanding risks. Its default mode rehearses on a copy. Applying checks the exact release, watch versions and policy, takes a backup, and preserves individual action receipts, refusals and pending questions. The live watches have yet to be reconciled.
 
-**GitHub.** The private canonical repository is [mikepfrank/lantern-agent](https://github.com/mikepfrank/lantern-agent). The Windows checkout uses `origin`. Mike authorized including the original bundled persona at `lantern/personas/lantern-v1.md` in the project history. The local `heritage/` directory, its private founding-chat exports and live operator state stay outside Git.
+**GitHub.** The private canonical repository is [mikepfrank/lantern-agent](https://github.com/mikepfrank/lantern-agent). The Windows checkout uses `origin`. Mike authorized including both the [original persona](lantern/personas/lantern-v1.md) and the [revised persona that names him](lantern/personas/lantern-v2.md). The local `heritage/` directory, its private founding-chat exports and live operator state stay outside Git.
 
 **Live release, November 20.** The worker runs `2d2258a` and the private browser runs `939f367`. Turn 79 held a write to `notes/supervisory-assessment.md` when Opus asked questions about both the action and concern #4 and omitted the concern's tool scope. The worker can now recover a clearly identified question from an invalid ruling. It preserves the hold on the exact proposal and requires a fresh valid action decision. When both questions are readable, the action question appears first and the context question appears in the same dialog's supporting excerpt.
 
@@ -98,7 +98,7 @@ For routine inspection, log in as `lantern` and open `~/.local/state/lantern`. T
 
 ### Private persona and heritage archive
 
-Mike supplied a revised `Lantern.md` and three exports of the founding LM Studio conversation between Mike and Qwen on his MacBook. The local project keeps them under the ignored `heritage/` directory. The private Lightsail launcher uses `~lantern/.local/state/lantern/heritage/`, outside both Git checkouts and the installed application bundle. Provision or restore these files over a private channel. Keep the originals, extracts, screenshots and quotations out of GitHub issues, PRs, commits and public research queries.
+Mike supplied a revised `Lantern.md` and three exports of the founding LM Studio conversation between Mike and Qwen on his MacBook. The local project keeps the supplied files under the ignored `heritage/` directory. The private Lightsail launcher reads them from `~lantern/.local/state/lantern/heritage/`. The tracked `lantern/personas/lantern-v2.md` is a byte-for-byte copy of the revised persona. Provision or restore the conversation exports over a private channel. Keep those exports, their extracts, screenshots and quotations out of GitHub issues, PRs, commits and public research queries.
 
 On November 18 Mike inspected the state directory and reported that Lantern seemed more confident about its origins and role after chatting with the updated persona and archive access.
 
