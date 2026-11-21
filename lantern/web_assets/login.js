@@ -21,9 +21,12 @@ form.addEventListener("submit", async (event) => {
   error.textContent = "";
   submit.disabled = true;
   submit.textContent = "Signing in…";
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
   try {
     const response = await fetch("/api/sign-in", {
       method: "POST", credentials: "same-origin", cache: "no-store", redirect: "error",
+      signal: controller.signal,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ password: password.value }),
     });
@@ -45,6 +48,8 @@ form.addEventListener("submit", async (event) => {
     }
   } catch {
     error.textContent = "Couldn’t reach Lantern. Check your connection and try again.";
+  } finally {
+    clearTimeout(timeout);
   }
   submit.textContent = "Sign in";
   submit.disabled = false;
