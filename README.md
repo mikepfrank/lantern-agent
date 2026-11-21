@@ -42,7 +42,7 @@ When a single Qwen request in the current thread reports at least 180,000 input 
 
 The supervised `web_search` tool returns links and short excerpts from Mwmbl, Wikipedia or Crossref. `budget_status` reports both ledgers, outstanding reservations and time to midnight UTC. If a daily cap blocks a turn, the worker durably defers pending work. If a request already ran, a continuation asks Lantern to inspect earlier effects before resuming.
 
-When something fails, Lantern can call `harness_logs` for recent operational records, optionally filtered by batch ID. Mike can inspect the same view with `lantern logs --limit 20` or `lantern logs --batch N`. The view reads existing ledgers and reports provider and review outcomes using a fixed set of fields. Raw Opus replies are available separately to the operator.
+When something fails, Lantern can call `harness_logs` for recent operational records, optionally filtered by batch ID. Mike can inspect the same view with `lantern logs --limit 20` or `lantern logs --batch N`. The view reads existing ledgers and reports provider and review outcomes using a fixed set of fields. Mike can inspect the original provider responses separately in the private archive.
 
 ## Run locally
 
@@ -84,7 +84,9 @@ When several watches apply to a proposal, Opus receives one case with all of the
 
 For a question about a context concern, answer once in the private web room. The host queues a wake, obtains the final disposition, and posts the result in chat. A held tool needs a fresh proposal if Lantern still wants to perform it. If the final concern review was interrupted or unreadable, the chat notice gives the review ID. Run `lantern retry-concern REVIEW_ID` in the operator shell to reopen that question.
 
-Opus decides flagged actions before execution. It sees Luna's evidence, a concise context summary and Lantern's justification. Lantern receives Opus's explanation if the action is denied. When a required reviewer is unavailable the action is held. A voluntary consultation returns advice and a record of any Wikipedia or Crossref searches. Opus can request up to two short public keyword lookups per case. The operator mediates the queries and search results are treated as untrusted text. Codex binds tool names when a thread starts, so milestone 1 threads retain supervised chess, and a new thread adds direct Opus consultation.
+Opus decides flagged actions before execution. It sees Luna's evidence, a concise context summary and Lantern's justification. The tool result gives Lantern Opus's visible reply, including introductions, side remarks and sign-offs. The host uses the XML decision that matches the request. Surrounding prose and incidental elements such as `<advice>` carry no authority in a ruling. A missing or ambiguous decision holds the action. The action also stays on hold when a required reviewer is unavailable.
+
+A voluntary consultation returns advice and a record of any Wikipedia or Crossref searches. Opus can request up to two short public keyword lookups per case. The operator mediates the queries and search results are treated as untrusted text. Codex binds tool names when a thread starts, so milestone 1 threads retain supervised chess, and a new thread adds direct Opus consultation.
 
 From the operator shell, run `lantern flags` to read Luna's most recent screening concerns. Each entry gives Luna's summary and the evidence it cited, the UTC time, and the context scan or tool call that triggered it. Use `lantern flags --kind context` for context spot-checks or `lantern flags --kind tool` for tool proposals. To examine a particular turn alongside its costs, use the same `--batch N` with `lantern flags` and `lantern usage`. Results are newest first. Use `--before-id` with the returned cursor for the next page.
 

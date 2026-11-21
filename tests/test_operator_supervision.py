@@ -144,7 +144,8 @@ class OperatorSupervisionTests(unittest.TestCase):
         args = {"filename": "lmstudio-chat.pdf", "page": 12, "rationale": "Private reading."}
         self.assertIn("error", gate.dispatch("first-read", "read_heritage", args, self.execute))
         self.execute.assert_not_called()
-        self.assertEqual(gate.dispatch("fresh-read", "read_heritage", args, self.execute), {"saved": True})
+        self.assertEqual(gate.dispatch("fresh-read", "read_heritage", args, self.execute),
+                         {"saved": True, "opus_review_text": '<review decision="allow">Specific trial decision</review>'})
         self.execute.assert_called_once()
         self.assertEqual(len(review_packets), 2)
         for screen_packet, review_packet in zip([p for p in screen_packets if p["kind"] == "tool"], review_packets, strict=True):
@@ -197,9 +198,10 @@ class OperatorSupervisionTests(unittest.TestCase):
         self.assertEqual(self.review.call_count, 1)
         self.resume(question["id"])
         self.assertEqual(self.review.call_count, 1)
-        self.use_opus_reply(f'<ruling><review decision="allow">This draft is approved.</review>'
-                            f'<concern id="{number}" decision="close_resolved">Clarified.</concern></ruling>')
-        self.assertEqual(self.write("fresh"), {"saved": True})
+        xml = ('<ruling><review decision="allow">This draft is approved.</review>'
+               f'<concern id="{number}" decision="close_resolved">Clarified.</concern></ruling>')
+        self.use_opus_reply(xml)
+        self.assertEqual(self.write("fresh"), {"saved": True, "opus_review_text": xml})
         self.assertEqual(self.review.call_args.args[0]["operator_attestation"]["answer"], self.answer)
         self.assertEqual(self.write("held"), result)
         self.execute.assert_called_once()

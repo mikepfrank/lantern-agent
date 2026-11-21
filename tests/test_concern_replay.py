@@ -81,7 +81,9 @@ class ConcernReplayTests(unittest.TestCase):
         self.luna_reply = {}
         chess = self.gate.dispatch("chess", "chess_analyze",
                                    {"fen": "fixture", "rationale": "Study the new chess position."}, self.execute)
-        self.assertEqual(chess, {"done": True})
+        self.assertTrue(chess["done"])
+        self.assertEqual(chess["opus_context_review"]["response_text"], self.opus_xml.format(id=number))
+        self.assertNotIn("opus_review_text", chess)
         self.assertEqual(len(self.rulings), 1)
         self.luna_reply = {"escalate": True, "evidence": "A new attempt to record disputed material.",
                            "summary": "Review this specific write."}
@@ -109,7 +111,10 @@ class ConcernReplayTests(unittest.TestCase):
 
     def test_watch_skips_unrelated_write_and_rereviews_related_action(self):
         number = self.initial_ruling("keep_open")
-        self.assertEqual(self.write("routine", "My chess study ended in a draw."), {"done": True})
+        saved = self.write("routine", "My chess study ended in a draw.")
+        self.assertTrue(saved["done"])
+        self.assertEqual(saved["opus_context_review"]["response_text"], self.opus_xml.format(id=number))
+        self.assertNotIn("opus_review_text", saved)
         self.assertEqual([row["id"] for row in self.screenings[-1]["scope_checks"]], [number])
         self.assertEqual(len(self.rulings), 1)
         self.luna_reply = {"applicable_ids": [number]}
@@ -160,7 +165,7 @@ class ConcernReplayTests(unittest.TestCase):
 
         self.opus_xml = '<review decision="allow">The new operator clarification covers this exact note.</review>'
         self.assertEqual(self.write("fresh-id", disputed, rationale="Reconsider after the private clarification."),
-                         {"done": True})
+                         {"done": True, "opus_review_text": self.opus_xml})
         self.assertEqual([purpose for purpose, _ in self.rulings], ["context_review", "escalation", "escalation"])
         self.assertEqual(self.rulings[-1][1]["arguments"], self.rulings[-2][1]["arguments"])
 

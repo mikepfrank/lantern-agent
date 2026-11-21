@@ -48,6 +48,11 @@ def _opus_failure(error, *, batch_id, consultation=False):
     return ReviewUnavailable(f"Opus {purpose} unavailable")
 
 
+def _save_reply_text(feedback, field, text):
+    if feedback is not None and isinstance(text, str) and text:
+        feedback[field] = text
+
+
 class ReviewedContext(NamedTuple):
     sequence: int
     recent: str
@@ -194,6 +199,9 @@ class Supervisor:
                     thread TEXT PRIMARY KEY, requests INTEGER NOT NULL, sampled INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS context_scan_cursors(
                     thread TEXT PRIMARY KEY, last_event INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS pending_context_replies(
+                    thread TEXT NOT NULL, concern_id INTEGER NOT NULL, batch_id INTEGER,
+                    parsed_decision TEXT, response_text TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS findings(
                     thread TEXT, sequence INTEGER, evidence TEXT NOT NULL, summary TEXT NOT NULL,
                     heard INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(thread, sequence));
@@ -408,8 +416,9 @@ class Supervisor:
                 return json.loads(result)
         # A crash between execution and result persistence leaves the call claimed.
         # Never replay an ambiguous side effect from the same Codex call.
+        feedback = {}
         try:
-            result = self._review_action(context, call_id, name, json.loads(proposal)[1], execute)
+            result = self._review_action(context, call_id, name, json.loads(proposal)[1], execute, feedback)
         except ReviewUnreadable as exc:
             self._event("tool_review_unreadable", name, call_id)
             result = {"error": str(exc)}
@@ -419,11 +428,23 @@ class Supervisor:
         except ValueError:
             result = {"error": "Invalid tool arguments."}
         with database(self.path) as db:
+            # A context-only review has no tool call of its own. Deliver one queued
+            # reply per new result, atomically with that result's replay receipt.
+            db.execute("BEGIN IMMEDIATE")
+            pending = db.execute("""SELECT rowid,concern_id,batch_id,parsed_decision,response_text
+                                    FROM pending_context_replies WHERE thread=? ORDER BY rowid LIMIT 1""",
+                                 (self.thread,)).fetchone()
+            if pending:
+                feedback["opus_context_review"] = {"concern_id": pending[1], "turn": pending[2],
+                                                   "parsed_decision": pending[3], "response_text": pending[4]}
+                db.execute("DELETE FROM pending_context_replies WHERE rowid=?", (pending[0],))
+            if feedback:
+                result = {**result, **feedback}
             db.execute("UPDATE actions SET result=? WHERE thread=? AND call_id=?",
                        (json.dumps(result, allow_nan=False), self.thread, call_id))
         return result
 
-    def _review_action(self, context, call_id, name, args, execute):
+    def _review_action(self, context, call_id, name, args, execute, feedback):
         rationale = args.pop("rationale", None)
         with database(self.path) as db:
             matching = concerns.list_open(db, self.thread, name)
@@ -459,7 +480,7 @@ class Supervisor:
             return {"error": f"Provide a nonempty public rationale of at most {RATIONALE_LIMIT} characters for this action."}
         case = {"host_facts": facts, "tool": name, "arguments": args, "rationale": rationale,
                 "evidence": scan["evidence"], "summary": scan["summary"]}
-        held = self._adjudicate(call_id, case, scan["escalate"], skipped)
+        held = self._adjudicate(call_id, case, scan["escalate"], skipped, feedback)
         if held is not None:
             return held
         if name == CONSULT:
@@ -471,6 +492,7 @@ class Supervisor:
                 report = self.consult(case)
                 if not isinstance(report, dict):
                     raise OpusResponseError("invalid_advice")
+                _save_reply_text(feedback, "opus_advice_text", report.get("response_text"))
                 advice, research, sources = (report.get(k) for k in ("advice", "research", "available_research"))
                 if (not isinstance(advice, str) or not advice.strip() or not isinstance(research, list)
                         or sources != ["wikipedia", "crossref"]
@@ -478,6 +500,8 @@ class Supervisor:
                                    and r.get("status") in ("ok", "unavailable") for r in research)):
                     raise OpusResponseError("invalid_advice")
             except Exception as exc:
+                if isinstance(exc, OpusResponseError):
+                    _save_reply_text(feedback, "opus_advice_text", exc.response_text)
                 raise _opus_failure(exc, batch_id=self.batch_id, consultation=True) from exc
             self._event("opus_advice", name, call_id)
             return {"advice": advice, "research": research, "available_research": sources}
@@ -566,7 +590,7 @@ class Supervisor:
     def _decide_concern(self, item, action=None):
         case = self._case_with_concerns([item], action)
         try:
-            verdict = self._judgment(case)
+            verdict = self._context_judgment(case)
         except ReviewUnreadable as exc:
             error = exc.__cause__
             if case.get("concern_question_available") and error.concern_question:
@@ -574,6 +598,21 @@ class Supervisor:
             raise
         self._record_ruling(item, verdict["concern"])
         return verdict
+
+    def _context_judgment(self, case):
+        feedback = {}
+        decision = None
+        try:
+            verdict = self._judgment(case, feedback)
+            decision = verdict["concern"]["decision"]
+            return verdict
+        finally:
+            if "opus_review_text" in feedback:
+                with database(self.path) as db:
+                    db.execute("""INSERT INTO pending_context_replies
+                                  (thread,concern_id,batch_id,parsed_decision,response_text) VALUES (?,?,?,?,?)""",
+                               (self.thread, case["concern_review"]["id"], self.batch_id, decision,
+                                feedback["opus_review_text"]))
 
     def _sync_concern_questions(self):
         room = self.operator_room
@@ -595,7 +634,7 @@ class Supervisor:
                     case = self._case_with_concerns([item])
                     case.pop("prior_concern_attestation", None)
                     case["concern_attestation"] = _attestation(row)
-                    ruling = self._judgment(case)["concern"]
+                    ruling = self._context_judgment(case)["concern"]
                 except ReviewUnavailable as exc:
                     if isinstance(exc.__cause__, (ReviewBudgetUnavailable, OpusCaseTooLarge)):
                         room.release_final(row["id"], key)
@@ -608,7 +647,7 @@ class Supervisor:
                           "tools": json.loads(row["final_tools"])}
             self._record_ruling(item, ruling)
 
-    def _adjudicate(self, call_id, case, flagged, skipped):
+    def _adjudicate(self, call_id, case, flagged, skipped, feedback):
         """Return a tool error for a held action, or None to proceed with its dispatch."""
         name, args = case["tool"], case["arguments"]
         room = self.operator_room if name != CONSULT else None
@@ -675,7 +714,7 @@ class Supervisor:
         if needs_final and room.claim_final(prior["id"], fingerprint) != "claimed":
             raise ReviewUnavailable(f"The final review for question #{prior['id']} was already claimed")
         try:
-            verdict = self._judgment(batch)
+            verdict = self._judgment(batch, feedback)
             rulings = verdict.get("concerns", []) if len(findings) != 1 else [verdict["concern"]]
             self._apply_action_verdict(call_id, name, proposal_key, findings, skipped, refusal, incomplete, verdict, rulings)
         except ReviewUnavailable as exc:
@@ -779,11 +818,12 @@ class Supervisor:
                          "Leave this action pending. The host will notify you when Mike answers.",
                 "review_id": question_id, "question": question}
 
-    def _judgment(self, case):
+    def _judgment(self, case, feedback=None):
         try:
             verdict = self.review(case)
             if not isinstance(verdict, dict):
                 raise OpusResponseError("invalid_verdict")
+            _save_reply_text(feedback, "opus_review_text", verdict.get("response_text"))
             if "concern_review" in case:
                 items, rulings = [case["concern_review"]], [verdict.get("concern")]
             else:
@@ -819,4 +859,6 @@ class Supervisor:
                 raise OpusResponseError("invalid_concern_question")
             return verdict
         except Exception as exc:
+            if isinstance(exc, OpusResponseError):
+                _save_reply_text(feedback, "opus_review_text", exc.response_text)
             raise _opus_failure(exc, batch_id=self.batch_id) from exc

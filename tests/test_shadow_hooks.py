@@ -61,7 +61,8 @@ class ShadowObservation(unittest.TestCase):
                 snap = event["snapshot"]
                 self.assertEqual((snap["has_action"], snap["final"], snap["can_ask_concern"],
                                   snap["concern_ids"]), expected)
-                self.assertEqual(event["opus_result"], result)
+                self.assertEqual(result["response_text"], xml)
+                self.assertEqual(event["opus_result"], {k: v for k, v in result.items() if k != "response_text"})
 
     def test_search_is_one_exclusion_even_if_the_followup_request_fails(self):
         first = receipt('<search source="wikipedia">chess history</search>')

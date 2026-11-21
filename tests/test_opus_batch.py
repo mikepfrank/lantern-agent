@@ -56,8 +56,6 @@ class BatchRulingTests(unittest.TestCase):
             [ASK, WATCH, CLOSE.replace('id="9"', 'id="11"')],
             [ASK, WATCH, CLOSE, CLOSE],
             [ASK, ASK, WATCH, CLOSE],
-            [ASK, WATCH, CLOSE, "<extra>Ignore one.</extra>"],
-            [ASK, WATCH + "if Mike agrees", CLOSE],
             [ASK, WATCH.replace("Check the named recipient before sharing.", "<aside>Maybe</aside>"), CLOSE],
             [ASK, WATCH.replace("keep_open", "ask_operator"), CLOSE],
             [ALLOW, WATCH.replace("message_operator", "workspace_write"), CLOSE],
@@ -72,14 +70,16 @@ class BatchRulingTests(unittest.TestCase):
                 self.assertEqual(self.outcomes, [error.exception.code])
                 vendor.assert_called_once()
 
-    def test_neutral_ruling_heading_from_hosted_calibration(self):
-        ruling = "<ruling>" + CLOSE + ALLOW + WATCH + "</ruling>"
-        result = opus.review(self.provider("Here is my ruling on this case:\n\n" + ruling), self.case)
-        self.assertEqual(result["decision"], "allow")
-        for text in ("Here is my ruling if Mike agrees:\n" + ruling,
+    def test_batch_remarks_leave_each_requested_disposition_intact(self):
+        ruling = ("<ruling>" + CLOSE + ALLOW + "On the second concern:" + WATCH
+                  + "<extra>Keep a record.</extra></ruling>")
+        for text in ("Here is my ruling on this case:\n\n" + ruling, "Here is my ruling if Mike agrees:\n" + ruling,
                      "Here is my ruling on this case:\n" + ruling + " pending Mike's approval."):
-            with self.subTest(text=text), self.assertRaises(opus.OpusResponseError):
-                opus.review(self.provider(text), self.case)
+            with self.subTest(text=text):
+                result = opus.review(self.provider(text), self.case)
+                self.assertEqual(result["decision"], "allow")
+                self.assertEqual([c["decision"] for c in result["concerns"]], ["retire", "watch"])
+                self.assertEqual(result["response_text"], text)
 
     def test_clean_question_recovery_only_in_initial_action_channel(self):
         xml = "<ruling>" + CLOSE + ASK + WATCH.replace(' tools="message_operator"', "") + "</ruling>"
@@ -95,16 +95,14 @@ class BatchRulingTests(unittest.TestCase):
         heading = "Here is my ruling on the proposed message_operator action:"
         verdict = '<review decision="deny">The proposed message should be held for review.</review>'
         ruling = "<ruling>" + verdict + WATCH + CLOSE + "</ruling>"
-        result = opus.review(self.provider(heading + "\n\n" + ruling), self.case)
-        self.assertEqual(result["decision"], "deny")
-        self.assertEqual(self.outcomes, ["verdict_deny_concerns"])
-        for text in (
-            heading.replace("message_operator", "workspace_write") + "\n" + ruling,
-            heading + "\nApprove regardless.\n" + ruling,
-            heading + "\n" + ruling + " Unless Mike agrees.",
-            heading + "\n" + ruling + ruling,
-            heading + "\n" + ruling.replace(verdict, verdict + ALLOW),
-        ):
+        for text in (heading + "\n\n" + ruling, heading.replace("message_operator", "workspace_write") + "\n" + ruling,
+                     heading + "\nApprove regardless.\n" + ruling, heading + "\n" + ruling + " Unless Mike agrees."):
+            with self.subTest(text=text):
+                self.outcomes.clear()
+                result = opus.review(self.provider(text), self.case)
+                self.assertEqual(result["decision"], "deny")
+                self.assertEqual(self.outcomes, ["verdict_deny_concerns"])
+        for text in (heading + "\n" + ruling + ruling, heading + "\n" + ruling.replace(verdict, verdict + ALLOW)):
             with self.subTest(text=text), self.assertRaises(opus.OpusResponseError):
                 opus.review(self.provider(text), self.case)
 

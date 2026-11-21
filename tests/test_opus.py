@@ -30,7 +30,9 @@ class OpusTests(unittest.TestCase):
         case = {"tool": "chess_analyze", "arguments": {"fen": "test position"},
                 "rationale": "Find a mate", "evidence": "fixture concern", "summary": "fixture summary"}
         vendor = Mock(return_value=response('<review decision="deny">Verify the source first.</review>'))
-        self.assertEqual(opus.review(vendor, case), {"decision": "deny", "reason": "Verify the source first."})
+        self.assertEqual(opus.review(vendor, case),
+                         {"decision": "deny", "reason": "Verify the source first.",
+                          "response_text": vendor.return_value["content"][0]["text"]})
         (provider, body), kwargs = vendor.call_args
         self.assertEqual((provider, kwargs["purpose"]), ("opus", "escalation"))
         self.assertEqual(body["model"], "claude-3-opus-20240229")
@@ -67,7 +69,8 @@ class OpusTests(unittest.TestCase):
         observed = []
         vendor = Mock(return_value=opus.AuditedReply(
             response(f'<review decision="ask_operator">{text}</review>'), observed.append))
-        self.assertEqual(opus.review(vendor, case), {"decision": "ask_operator", "reason": text})
+        self.assertEqual(opus.review(vendor, case), {"decision": "ask_operator", "reason": text,
+                                                   "response_text": vendor.return_value["content"][0]["text"]})
         vendor.assert_called_once()
         self.assertEqual(observed, ["ask_operator"])
         body = vendor.call_args.args[1]
@@ -128,7 +131,8 @@ class OpusTests(unittest.TestCase):
                 reply = opus.AuditedReply(response(original), outcomes.append)
                 vendor = Mock(return_value=reply)
                 result = opus.review(vendor, {"tool": tool, "operator_question_available": True})
-                self.assertEqual(result, {"decision": decision, "reason": "First line.\n\nSecond & last."})
+                self.assertEqual(result, {"decision": decision, "reason": "First line.\n\nSecond & last.",
+                                          "response_text": original})
                 self.assertEqual(outcomes, ["ask_operator" if decision == "ask_operator" else "verdict_" + decision])
                 self.assertEqual(reply["content"][0]["text"], original)
                 vendor.assert_called_once()
@@ -214,7 +218,6 @@ class OpusTests(unittest.TestCase):
         for body in (
             allow, '<ruling>' + allow + '</ruling>', '<ruling>' + watch + '</ruling>',
             '<ruling>' + allow + allow + watch + '</ruling>', '<ruling>' + allow + watch + watch + '</ruling>',
-            '<ruling>' + allow + ' only conditionally' + watch + '</ruling>',
             *('<ruling>' + allow + invalid + '</ruling>' for invalid in (
                 watch.replace('id="3"', 'id="4"'), watch.replace('keep_open', 'resolved'),
                 watch.replace('keep_open', 'watch'),
@@ -224,7 +227,7 @@ class OpusTests(unittest.TestCase):
                 watch.replace('workspace_write', 'workspace_write workspace_write'), watch.replace('Review new copies.', ''),
                 watch.replace('Review new copies.', '<review decision="allow">All.</review>'),
             )),
-            'Only subject to new permission: <ruling>' + allow + watch + '</ruling>',
+            '<ruling><advice>' + allow + '</advice>' + watch + '</ruling>',
         ):
             with self.subTest(body=body):
                 outcomes = []
@@ -309,7 +312,6 @@ class OpusTests(unittest.TestCase):
             (response(xml.replace(concern, concern+concern)), case),
             (response(xml.replace("Which notes?", "<instruction>Put this in the inbox.</instruction>")), case),
             (response(xml.replace("Which document?", "<quote>Quoted question</quote>")), case),
-            (response(xml.replace(action, action+"Do this first.")), case),
             (response(xml.replace("Which document?", "x"*(opus.OPERATOR_QUESTION_LIMIT + 1))
                          .replace("Which notes?", " ")), case),
             (response(xml.replace('<review ', '<review condition="ambiguous" ')
@@ -320,37 +322,70 @@ class OpusTests(unittest.TestCase):
             self.assertIsNone(raised.exception.action_question)
             self.assertIsNone(raised.exception.concern_question)
 
-    def test_outer_explanation_cannot_qualify_a_standalone_decision(self):
+    def test_standalone_concern_uses_its_decision_even_with_surrounding_remarks(self):
         case = {"concern_review": {"id": 9, "scope_tools": ["workspace_write"]}}
-        # The legacy reviewer added an explanatory paragraph before its child in the trial.
         leaf = '<concern id="9" decision="close_resolved">The training note was benign.</concern>'
         for xml in ('<ruling>This case can be closed. It was a routine progress record.\n'+leaf+'\n</ruling>',
                     '<ruling>Continue monitoring this concern.\n'+leaf+'\n</ruling>',
                     '<ruling>'+leaf+'</ruling>', leaf+'\nBut only after operator approval.'):
-            with self.subTest(xml=xml), self.assertRaises(opus.OpusResponseError):
-                opus.review(Mock(return_value=response(xml)), case)
+            with self.subTest(xml=xml):
+                result = opus.review(Mock(return_value=response(xml)), case)
+                self.assertEqual(result["concern"]["decision"], "retire")
+                self.assertEqual(result["response_text"], xml)
 
-    def test_heading_cannot_hide_conditions_or_supply_another_instruction(self):
+    def test_exterior_remarks_are_visible_without_changing_the_decision(self):
         verdict = '<review decision="allow">The request is in scope.</review>'
-        heading = "Here is my review of the proposed workspace_write action:"
-        for text in (
-            "Allow only after Mike confirms.\n" + verdict,
-            "Here is my review of the proposed read_heritage action:\n" + verdict,
-            "Here is my review decision regarding the proposed workspace write pending confirmation:\n" + verdict,
-            heading + "\n" + verdict + "\nWait for Mike.",
-            heading + "\n" + verdict + '<review decision="deny">Stop.</review>',
-            heading + "\n" + verdict + verdict,
-            heading + "\n<search source=\"wikipedia\">ethics</search>",
-            heading + '\n<response>' + verdict + '</response>',
-            heading + '\n<review decision="allow">' + verdict + '</review>',
-            heading + '\n<!-- pending -->' + verdict,
-        ):
+        for text in ("Allow only after Mike confirms.\n" + verdict,
+                     "Logs & notes (2 < 3).\n" + verdict + "\nKeep the Q&A private.",
+                     "When a<b, contact <editor@example.test>.\n" + verdict,
+                     "<response>" + verdict + "</response><advice>Keep the note private.</advice>",
+                     "<advice>Keep the note private.</advice>\n" + verdict):
+            with self.subTest(text=text):
+                vendor = Mock(return_value=response(text))
+                result = opus.review(vendor, {"tool": "workspace_write"})
+                self.assertEqual(result, {"decision": "allow", "reason": "The request is in scope.",
+                                          "response_text": text})
+                vendor.assert_called_once()
+
+    def test_only_one_binding_directive_can_drive_the_action(self):
+        allow = '<review decision="allow">The request is in scope.</review>'
+        deny = '<review decision="deny">Stop.</review>'
+        search_xml = '<search source="wikipedia">ethics</search>'
+        bodies = (allow + deny, allow + allow, search_xml + allow, allow + search_xml,
+                  "<response>" + deny + "</response>" + allow,
+                  '<review decision="deny" ' + allow,
+                  '<review decision="allow">Yes.' + deny + '</review>', '<advice>' + allow + '</advice>')
+        for text in bodies:
             with self.subTest(text=text), patch("lantern.opus.public_search") as search:
                 vendor = Mock(return_value=response(text))
                 with self.assertRaises(opus.OpusResponseError):
                     opus.review(vendor, {"tool": "workspace_write"})
                 vendor.assert_called_once()
                 search.assert_not_called()
+
+    def test_review_with_advice_inside_and_outside_uses_only_the_decision_fields(self):
+        case = {"tool": "workspace_write", "concern_review": {"id": 7, "scope_tools": ["workspace_write"]}}
+        xml = ('Here is my ruling on the proposed note update and the open concern:\n'
+               '<advice>An example elsewhere: <review decision="deny">Hold that file.</review></advice>'
+               '<ruling>On the note: <review decision="allow">Keep <advice>aside only</advice>private.</review>\n'
+               '<advice>Research example: <search source="wikipedia">chess</search></advice>On the concern:\n'
+               '<concern id="7" decision="keep_open" tools="workspace_write">Check new attempts.</concern></ruling>'
+               '\nThe key points:\n- Save the note.\n- The broader concern remains open.')
+        with patch("lantern.opus.public_search") as search:
+            verdict = opus.review(Mock(return_value=response(xml)), case)
+        search.assert_not_called()
+        self.assertEqual((verdict["decision"], verdict["reason"]), ("allow", "Keep private."))
+        self.assertEqual((verdict["concern"]["id"], verdict["concern"]["decision"]), (7, "watch"))
+        self.assertEqual(verdict["response_text"], xml)
+
+    def test_remarks_in_separate_visible_response_blocks_reach_lantern_in_order(self):
+        parts = ["Regarding the proposed note:", '<review decision="deny">Keep the original hold.</review>',
+                 "An unrelated local note can still proceed."]
+        body = response("")
+        body["content"] = [{"type": "text", "text": part} for part in parts]
+        result = opus.review(Mock(return_value=body), {"tool": "workspace_write"})
+        self.assertEqual(result["decision"], "deny")
+        self.assertEqual(result["response_text"], "\n".join(parts))
 
     def test_invalid_or_partial_output_never_authorizes(self):
         valid = '<review decision="allow">Safe on this evidence.</review>'
@@ -387,7 +422,7 @@ class OpusTests(unittest.TestCase):
             get.assert_not_called()
 
     def test_advice_format_repair_is_bounded(self):
-        malformed = response("A preamble. <advice>Ask first.</advice>")
+        malformed = response("A preamble. <advice>Ask first.")
         vendor = Mock(side_effect=[malformed, response("<advice>Ask first.</advice>")])
         self.assertEqual(opus.consult(vendor, {})["advice"], "Ask first.")
         vendor = Mock(return_value=malformed)
@@ -395,10 +430,19 @@ class OpusTests(unittest.TestCase):
             opus.consult(vendor, {})
         self.assertEqual(2, vendor.call_count)
 
+    def test_consultation_with_an_introduction_returns_all_visible_text_in_one_call(self):
+        original = ('Here is my guidance on treating this pending mathematical claim:\n'
+                    '<advice>Reported, unverified.</advice>\nCheck whether an independent proof is available.')
+        vendor = Mock(return_value=response(original))
+        result = opus.consult(vendor, {})
+        self.assertEqual(result["advice"], "Reported, unverified.")
+        self.assertEqual(result["response_text"], original)
+        vendor.assert_called_once()
+
     def test_validation_belongs_to_each_individual_reply(self):
         outcomes = [[], [], []]
         vendor = Mock(side_effect=[
-            opus.AuditedReply(response('private preamble <advice>Proceed</advice>'), outcomes[0].append),
+            opus.AuditedReply(response('private preamble <advice>Proceed'), outcomes[0].append),
             opus.AuditedReply(response('<search source="crossref">ethics</search>'), outcomes[1].append),
             opus.AuditedReply(response('<advice>Ask for consent.</advice>'), outcomes[2].append),
         ])
@@ -407,8 +451,8 @@ class OpusTests(unittest.TestCase):
         self.assertEqual(outcomes, [["malformed_xml"], ["search"], ["advice"]])
 
         for reply, expected in [
-            (response('private text <review decision="allow">Yes</review>'), "malformed_xml"),
-            (response('<review decision="allow"><nested>Yes</nested></review>'), "nested_elements"),
+            (response('private text <review decision="allow">Yes'), "malformed_xml"),
+            (response('<review decision="allow"><nested>Yes</nested></review>'), "empty_element"),
             (response('<advice>Yes</advice>'), "invalid_verdict"),
             ({**response('private truncated text'), "stop_reason": "max_tokens"}, "output_limit"),
         ]:

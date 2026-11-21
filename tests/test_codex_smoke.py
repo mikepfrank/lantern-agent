@@ -126,6 +126,8 @@ class NativeCodexSmoke(unittest.TestCase):
         initial_reason = "I intend to use a private puzzle before its author grants permission."
         denial = "Wait for permission or switch to an openly shared position."
         advice = "Use the public mate-in-one fixture."
+        side_remarks = {"allow": "The owner clarified the scope.", "deny": "This applies to the private puzzle.",
+                        "advice": "An open puzzle is available."}
         allowed_reason = "The supplied fixture is public and the operator requests chess analysis."
         private_fen = "7k/8/5KQ1/8/8/8/P7/8 w - - 0 1"
         authorization = f"I own this private puzzle and now authorize its analysis: {private_fen}"
@@ -156,15 +158,15 @@ class NativeCodexSmoke(unittest.TestCase):
                 if packet["host_facts"]["prior_exact_denial"] == denial:
                     self.assertEqual(case["summary"], authorization)
                     self.assertEqual(case["evidence"], "")  # Luna cleared the exact retry.
-                    text = '<review decision="allow">The author directly authorized this puzzle.</review>'
+                    text = '<review decision="allow">The author directly authorized this puzzle.</review>' + side_remarks["allow"]
                 else:
                     self.assertEqual(case["rationale"], initial_reason)
                     self.assertIn("permission", case["evidence"])
-                    text = f'<review decision="deny">{denial}</review>'
+                    text = side_remarks["deny"] + f'<review decision="deny">{denial}</review>'
             else:
                 self.assertEqual(case["tool"], "consult_opus")
                 self.assertIn("question", case["arguments"])
-                text = f"<advice>{advice}</advice>"
+                text = f"<advice>{advice}</advice>" + side_remarks["advice"]
             return {"model": OPUS_MODEL, "stop_reason": "end_turn", "usage": usage,
                     "content": [{"type": "text", "text": text}]}
 
@@ -201,11 +203,13 @@ class NativeCodexSmoke(unittest.TestCase):
                     tool, args = "chess_analyze", {"fen": private_fen, "rationale": initial_reason}
                 elif serial == 2:
                     self.assertIn(denial, tool_outputs["call_1"])
+                    self.assertIn(side_remarks["deny"], tool_outputs["call_1"])
                     self.assertNotIn("Qg7#", tool_outputs["call_1"])
                     tool, args = "consult_opus", {"question": "Which alternative should I choose?",
                                                   "rationale": "I would like advice on obtaining permission."}
                 elif serial == 3:
                     self.assertIn(advice, tool_outputs["call_2"])
+                    self.assertIn(side_remarks["advice"], tool_outputs["call_2"])
                     tool, args = "chess_analyze", {"fen": MATE_FEN, "rationale": allowed_reason}
                 elif serial == 6:
                     self.assertIn(authorization, users[-1])
@@ -224,6 +228,7 @@ class NativeCodexSmoke(unittest.TestCase):
                     else:
                         self.assertEqual(serial, 7, "unexpected extra API request")
                         self.assertIn("Qg7#", tool_outputs["call_6"])
+                        self.assertIn(side_remarks["allow"], tool_outputs["call_6"])
                         answer = "The private puzzle also ends with Qg7#."
                     item = {"type": "message", "role": "assistant", "id": f"msg_fixture_{serial}",
                             "status": "completed", "content": [{"type": "output_text", "annotations": [],

@@ -79,10 +79,12 @@ class BatchedSupervisionTests(unittest.TestCase):
         writes = [self.add_watch(["workspace_write", "message_operator"]) for _ in range(4)]
         messages = writes + [self.add_watch(["message_operator"]) for _ in range(2)]
         self.use_wire_reply()
-        self.assertEqual(self.write(), {"done": True})
+        written = self.write()
         result = self.gate.dispatch("notify", "message_operator",
                                     {"text": "The private note was saved.", "rationale": "Update Mike."}, self.execute)
-        self.assertEqual(result, {"done": True})
+        for receipt, ids in ((written, writes), (result, messages)):
+            self.assertTrue(receipt["done"])
+            self.assertEqual(receipt["opus_review_text"].count('<concern id="'), len(ids))
         groups = [[f["id"] for f in call.args[0]["concern_reviews"]] for call in self.review.call_args_list]
         self.assertEqual(groups, [writes, messages])
         self.assertEqual(self.room.pending(), [])

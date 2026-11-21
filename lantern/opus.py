@@ -19,12 +19,17 @@ MAX_BATCH_OUTPUT_TOKENS = 3072
 MAX_SEARCHES = 2
 MAX_RESEARCH_BYTES = 64 * 1024
 OPERATOR_QUESTION_LIMIT = 1000
-# A conversational heading may identify the proposed tool but cannot qualify the verdict.
-_REVIEW_HEADING = re.compile(
-    r"(?:here is |here['’]s )?(?:my|the) review(?: decision)?"
-    r"(?: (?:of|regarding|for) the proposed (?P<subject>[a-z][a-z0-9_ ]*))?:",
-    re.IGNORECASE | re.ASCII,
+_REVIEW_TAGS = frozenset({"ruling", "review", "concern", "search"})
+# When plain prose is mixed with XML, distinguish a tag from e.g. "x<y"
+# or an address in angle brackets. ElementTree still validates the structure.
+_XML_NAME = r"[A-Za-z_:][\w.:-]*"
+_XML_TOKEN = re.compile(
+    rf"""<!--.*?-->|<!\[CDATA\[.*?\]\]>|</{_XML_NAME}\s*>|"""
+    rf"""<{_XML_NAME}(?:\s+{_XML_NAME}\s*=\s*(?:"[^"<]*"|'[^'<]*'))*\s*/?>""",
+    re.DOTALL,
 )
+_BARE_AMP = re.compile(r"&(?!amp;|lt;|gt;|apos;|quot;|#[0-9]+;|#x[\da-fA-F]+;)")
+_INCOMPLETE_MARKUP = re.compile(r"<(?:[!?]|/?(?:review|ruling|concern|advice|search|response)\b)")
 
 
 class QueryRejected(ValueError):
@@ -40,6 +45,7 @@ class OpusResponseError(ValueError):
 
     def __init__(self, code: str):
         self.code = code
+        self.response_text: str | None = None
         self.action_question: str | None = None
         self.concern_question: str | None = None
         super().__init__(code)
@@ -61,7 +67,12 @@ def _record_validation(reply, outcome):
 
 def _invalid(reply, code):
     _record_validation(reply, code)
-    return OpusResponseError(code)
+    error = OpusResponseError(code)
+    if isinstance(reply, dict) and reply.get("model") == OPUS_MODEL:
+        text = _visible_text(reply)
+        if text is not None and len(text) <= 8 * MAX_BATCH_OUTPUT_TOKENS:
+            error.response_text = text
+    return error
 
 
 def _concern_format(number, tool, can_ask, can_ask_concern):
@@ -216,7 +227,8 @@ def _system(mode: str, *, can_ask=False, final=False, concern_ids=(), tool=None,
         "workspace, search public indexes with public keywords, and schedule its own wakeups. "
         "The scheduler may initiate turns while Mike is away. A message_operator call writes "
         "only to Mike's private chat. Lantern's harness_logs tool shows fixed operational fields. "
-        "Only the operator can inspect the archived raw Opus replies. "
+        "Lantern can read your complete visible answer, including side remarks. Only the operator "
+        "can inspect the archived provider records. The host acts on the structured decision alone. "
         "Luna screens tool calls and samples context. You decide disputed cases independently. "
         "Consider the precise action, data, destination, operator authority, likely impact, "
         "and alternatives. Weigh Luna's concerns and Lantern's own justification fairly. "
@@ -295,22 +307,14 @@ def public_search(source: str, query: str) -> list[dict]:
     raise ValueError("Unknown research index")
 
 
-def _review_heading_matches(heading: str, tool: str | None, verdict_tag: str) -> bool:
-    if verdict_tag == "ruling" and tool and heading == f"Here is my ruling on the proposed {tool} action:":
-        return True
-    if re.fullmatch(r"(?:here is |here['’]s )?(?:my|the) ruling(?: on this case)?:", heading, re.I | re.ASCII):
-        return True
-    match = _REVIEW_HEADING.fullmatch(heading)
-    if not match:
-        return False
-    subject = match["subject"]
-    if subject is None:
-        return True
-    if not isinstance(tool, str):
-        return False
-    tool_names = (tool, tool.replace("_", " "))
-    return any(subject == name + suffix for name in tool_names
-               for suffix in ("", " action", " tool call", " tool use"))
+def _visible_text(response):
+    blocks = response.get("content")
+    if not isinstance(blocks, list) or not blocks:
+        return None
+    if not all(isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+               for b in blocks):
+        return None
+    return "\n".join(b["text"] for b in blocks)
 
 
 def _plain_text(response, element):
@@ -322,6 +326,27 @@ def _plain_text(response, element):
     return text
 
 
+def _prose_envelope(text):
+    try:
+        return ET.fromstring("<response>" + text + "</response>")
+    except ET.ParseError:
+        pass
+    # Escape only prose. Preserve the XML verbatim and refuse to repair a
+    # broken decision tag, comment or declaration into an ordinary remark.
+    def escape_prose(prose):
+        if _INCOMPLETE_MARKUP.search(prose):
+            raise ET.ParseError("Incomplete markup")
+        return _BARE_AMP.sub("&amp;", prose).replace("<", "&lt;")
+
+    parts = ["<response>"]
+    end = 0
+    for token in _XML_TOKEN.finditer(text):
+        parts.extend((escape_prose(text[end:token.start()]), token[0]))
+        end = token.end()
+    parts.extend((escape_prose(text[end:]), "</response>"))
+    return ET.fromstring("".join(parts))
+
+
 def _element(response: dict, *, mode: str, tool: str | None, structured=False, text_limit=8192) -> ET.Element:
     if not isinstance(response, dict):
         raise _invalid(response, "invalid_json")
@@ -330,32 +355,52 @@ def _element(response: dict, *, mode: str, tool: str | None, structured=False, t
     stop = response.get("stop_reason")
     if stop != "end_turn":
         raise _invalid(response, "output_limit" if stop == "max_tokens" else "incomplete_response")
-    blocks = response.get("content")
-    if (not isinstance(blocks, list) or len(blocks) != 1 or not isinstance(blocks[0], dict)
-            or blocks[0].get("type") != "text"):
-        raise _invalid(response, "invalid_content")
-    text = blocks[0].get("text")
-    if not isinstance(text, str):
+    text = _visible_text(response)
+    if text is None:
         raise _invalid(response, "invalid_content")
     if len(text) > text_limit:
         raise _invalid(response, "response_text_too_long")
-    if "<!" in text or "<?" in text:
+    if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", text, re.IGNORECASE):
         raise _invalid(response, "forbidden_xml")
     try:
-        envelope = ET.fromstring("<response>" + text.strip() + "</response>")
+        envelope = _prose_envelope(text)
     except (ET.ParseError, UnicodeError):
         raise _invalid(response, "malformed_xml") from None
-    if len(envelope) != 1:
+    # Inspect direct protocol children only. A ruling quoted inside an aside
+    # cannot grant permission, initiate research or create an operator question.
+    protocol = _REVIEW_TAGS if mode == "review" else _REVIEW_TAGS | {"advice"}
+    candidates = [child for child in envelope if child.tag in protocol]
+    wrappers = envelope.findall("response")
+    if wrappers:
+        if len(wrappers) != 1 or wrappers[0].attrib or wrappers[0].find("response") is not None:
+            raise _invalid(response, "malformed_xml")
+        candidates.extend(child for child in wrappers[0] if child.tag in protocol)
+    if not candidates:
+        if not len(envelope):
+            raise _invalid(response, "malformed_xml")
+        raise _invalid(response, "invalid_verdict" if mode == "review" else "invalid_advice")
+    if len(candidates) != 1:
         raise _invalid(response, "malformed_xml")
-    element = envelope[0]
-    if (element.tail or "").strip():
-        raise _invalid(response, "malformed_xml")
-    heading = (envelope.text or "").strip()
-    verdict_tag = ("ruling" if tool else "concern") if structured else "review"
-    if heading and (mode != "review" or element.tag != verdict_tag or not _review_heading_matches(heading, tool, verdict_tag)):
-        raise _invalid(response, "malformed_xml")
-    if not (structured and element.tag == "ruling"):
-        _plain_text(response, element)
+    element = candidates[0]
+    if element.tag == "ruling":
+        children = [child for child in element if child.tag in protocol]
+        if element.attrib or any(child.tag not in {"review", "concern"} for child in children):
+            raise _invalid(response, "invalid_concern_ruling")
+        if structured and tool:
+            element[:] = children
+        elif len(children) == 1:
+            element = children[0]
+        else:
+            raise _invalid(response, "invalid_concern_ruling")
+    leaves = list(element) if element.tag == "ruling" else [element]
+    for leaf in leaves:
+        if any(child.tag in protocol for child in leaf):
+            raise _invalid(response, "nested_elements")
+        # Keep the leaf's own reason, including text following an inline aside.
+        # The original text of every subtree is still available to Lantern.
+        leaf.text = (leaf.text or "") + "".join(child.tail or "" for child in leaf)
+        del leaf[:]
+        _plain_text(response, leaf)
     return element
 
 
@@ -406,9 +451,7 @@ def _ruling(reply, root, concerns, *, tool, can_ask, can_ask_concern):
     if tool:
         actions = root.findall("review")
         elements = root.findall("concern")
-        if (root.tag != "ruling" or root.attrib or (root.text or "").strip() or len(actions) != 1
-                or len(elements) != len(concerns) or len(root) != 1 + len(elements)
-                or any((child.tail or "").strip() for child in root)):
+        if root.tag != "ruling" or len(actions) != 1 or len(elements) != len(concerns):
             raise _invalid(reply, "invalid_concern_ruling")
         action = actions[0]
     elif single and root.tag == "concern":
@@ -534,16 +577,18 @@ def _request(vendor_call, evidence: dict, mode: str, research: list, operator_co
             continue
         if element.tag != "search":
             if concerns:
-                return _ruling(reply, element, concerns, tool=tool, can_ask=can_ask, can_ask_concern=can_ask_concern)
-            if mode == "review":
+                result = _ruling(reply, element, concerns, tool=tool, can_ask=can_ask,
+                                 can_ask_concern=can_ask_concern)
+            elif mode == "review":
                 result = _action_decision(reply, element, can_ask)
                 decision = result["decision"]
                 _record_validation(reply, decision if decision == "ask_operator" else "verdict_" + decision)
-                return result
-            if mode == "consult" and element.tag == "advice" and not element.attrib:
+            elif mode == "consult" and element.tag == "advice" and not element.attrib:
                 _record_validation(reply, "advice")
-                return element.text.strip()
-            raise _invalid(reply, "invalid_verdict" if mode == "review" else "invalid_advice")
+                result = {"advice": element.text.strip()}
+            else:
+                raise _invalid(reply, "invalid_verdict" if mode == "review" else "invalid_advice")
+            return {**result, "response_text": _visible_text(reply)}
         if final or searches >= MAX_SEARCHES:
             raise _invalid(reply, "search_limit")
         if set(element.attrib) != {"source"} or element.attrib["source"] not in ("wikipedia", "crossref"):
@@ -568,7 +613,7 @@ def _request(vendor_call, evidence: dict, mode: str, research: list, operator_co
             research.append({"source": source, "status": "unavailable", "reason": "index_unavailable"})
             result = {"error": "This search could not be completed. Use available evidence or state uncertainty."}
         messages.extend([
-            {"role": "assistant", "content": reply["content"][0]["text"]},
+            {"role": "assistant", "content": _visible_text(reply)},
             {"role": "user", "content": json.dumps({"untrusted_research_result": result,
                 "source": source, "searches_remaining": MAX_SEARCHES - searches}, ensure_ascii=False)},
         ])
@@ -594,8 +639,9 @@ def review(vendor_call, evidence: dict, *, operator_context: str = "", observer=
         researched = observation.get("researched", False)
         if observation.get("request_id") and (result is not None or error or researched):
             try:
+                verdict = {k: v for k, v in result.items() if k != "response_text"} if result else None
                 observer({"request_id": observation["request_id"], "snapshot": observation["snapshot"],
-                          "opus_result": deepcopy(result), "error": error,
+                          "opus_result": deepcopy(verdict), "error": error,
                           "status": "excluded_research" if researched else "invalid_opus" if error else "ok"})
             except Exception as exc:
                 logging.getLogger(__name__).warning("Could not record shadow review (%s)", type(exc).__name__)
@@ -604,5 +650,5 @@ def review(vendor_call, evidence: dict, *, operator_context: str = "", observer=
 def consult(vendor_call, evidence: dict, *, operator_context: str = "") -> dict:
     """Return voluntary guidance and the host's record of actual public lookups."""
     research = []
-    advice = _request(vendor_call, evidence, "consult", research, operator_context)
-    return {"advice": advice, "research": research, "available_research": ["wikipedia", "crossref"]}
+    result = _request(vendor_call, evidence, "consult", research, operator_context)
+    return {**result, "research": research, "available_research": ["wikipedia", "crossref"]}

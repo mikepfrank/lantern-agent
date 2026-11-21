@@ -73,7 +73,9 @@ class OpusAuditTests(unittest.TestCase):
         body = wire_reply('<review decision="deny">Ask Mike first — privé.</review>')
         self.connection.getresponse.return_value = http_response(body)
         decision = opus.review(self.call, self.case)
-        self.assertEqual(decision, {"decision": "deny", "reason": "Ask Mike first — privé."})
+        self.assertEqual(decision["decision"], "deny")
+        self.assertEqual(decision["reason"], "Ask Mike first — privé.")
+        self.assertEqual(decision["response_text"], '<review decision="deny">Ask Mike first — privé.</review>')
         row, = self.rows()
         self.assertEqual((row["http_status"], row["billing"], row["validation"]), (200, "metered", "verdict_deny"))
         self.assertEqual((row["thread_id"], row["batch_id"], row["tool"], row["purpose"]),
@@ -88,7 +90,7 @@ class OpusAuditTests(unittest.TestCase):
                     self.assertNotIn("privé".encode("utf-8"), saved)
 
     def test_unreadable_verdict_remains_held_and_original_is_inspectable(self):
-        body = wire_reply('Commentary outside the root. <review decision="allow">Raw reply marker.</review>')
+        body = wire_reply('Commentary outside the root. <review decision="allow">Raw reply marker.')
         self.connection.getresponse.return_value = http_response(body)
         with self.assertRaises(ValueError) as failed:
             opus.review(self.call, self.case)
