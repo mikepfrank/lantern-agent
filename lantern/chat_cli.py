@@ -12,7 +12,8 @@ import time
 from unicodedata import combining, east_asian_width
 
 
-HELP = "Enter sends a message. /status shows queued work, /history shows the last 20 events, and /quit detaches."
+HELP = ("Enter sends a message. /status shows queued work, /history shows the last 20 events, "
+        "/release-concern N [reason] retires one context concern, and /quit detaches.")
 PROMPT = "You> "
 POLL_SECONDS = 0.20
 

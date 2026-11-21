@@ -6,18 +6,21 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import sqlite3
 from threading import Event
 
-from .budget import UNITS_PER_DOLLAR
+from .budget import UNITS_PER_DOLLAR, units
 from .chat_worker import worker_lock
-from .shadow_vendor import MAX_CALLS as CASE_LIMIT, PILOT_CAP
+from .shadow_vendor import MAX_CALLS as CASE_LIMIT, PILOT_CAP, PURPOSE
 
 
 WINDOW = timedelta(days=7)
 PILOT_NAME = "sonnet-live-v1"
+ADDITIONAL_CASES = 10
+ADDITIONAL_USD = Decimal("0.50")
 
 
 def _json(obj):
@@ -74,6 +77,51 @@ class ShadowPilot:
                        (now.isoformat(), (now + WINDOW).isoformat()))
         return self.status()
 
+    @staticmethod
+    def _campaign(db):
+        campaign = dict(db.execute("SELECT * FROM campaign WHERE id=1").fetchone())
+        campaign.update(case_limit=CASE_LIMIT, limit_usd=str(PILOT_CAP))
+        # Existing installations have only the original campaign and cases tables.
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='extensions'").fetchone():
+            row = db.execute("SELECT * FROM extensions ORDER BY rowid DESC LIMIT 1").fetchone()
+            if row:
+                campaign.update(extended_at=row["granted_at"], deadline=row["deadline"],
+                                case_limit=row["case_limit"], limit_usd=str(Decimal(row["limit_units"]) / UNITS_PER_DOLLAR))
+        return campaign
+
+    def extend(self, until):
+        """Make one additional, short observation window per explicit UTC deadline."""
+        if not self.path.is_file():
+            raise ValueError("Start the comparison before extending it.")
+        until = datetime.fromisoformat(until)
+        if until.utcoffset() is None:
+            raise ValueError("The extension deadline needs an explicit timezone.")
+        until = until.astimezone(timezone.utc)
+        deadline = until.isoformat()
+        with self._db(write=True) as db:
+            campaign = self._campaign(db)
+            db.execute("""CREATE TABLE IF NOT EXISTS extensions (
+                deadline TEXT PRIMARY KEY, granted_at TEXT NOT NULL, prior_deadline TEXT NOT NULL,
+                prior_closed TEXT NOT NULL, prior_reason TEXT NOT NULL,
+                case_limit INTEGER NOT NULL, limit_units INTEGER NOT NULL)""")
+            if not db.execute("SELECT 1 FROM extensions WHERE deadline=?", (deadline,)).fetchone():
+                now = self.clock()
+                if not now < until <= now + timedelta(days=1):
+                    raise ValueError("Choose a future extension deadline within 24 hours.")
+                if not campaign["closed"] or db.execute("SELECT 1 FROM cases WHERE state='working'").fetchone():
+                    raise ValueError("The existing campaign must finish or stop before starting a continuation.")
+                occupied = 0
+                if self.ledger.is_file():
+                    with closing(sqlite3.connect(self.ledger.resolve().as_uri() + "?mode=ro", uri=True)) as ledger:
+                        occupied, = ledger.execute("SELECT COALESCE(SUM(COALESCE(cost,reserved)),0) "
+                                                   "FROM calls WHERE purpose=?", (PURPOSE,)).fetchone()
+                enrolled, = db.execute("SELECT COUNT(*) FROM cases WHERE exclusion IS NULL").fetchone()
+                db.execute("INSERT INTO extensions VALUES(?,?,?,?,?,?,?)",
+                           (deadline, now.isoformat(), campaign["deadline"], campaign["closed"], campaign["reason"],
+                            enrolled + ADDITIONAL_CASES, occupied + units(ADDITIONAL_USD)))
+                db.execute("UPDATE campaign SET closed=NULL, reason=NULL WHERE id=1")
+        return self.status()
+
     def _billing(self, ids):
         ids = list(ids)
         if not ids or not self.ledger.is_file():
@@ -90,21 +138,30 @@ class ShadowPilot:
         """Called after a live ruling. No provider calls, shared ledger, or work on an inactive host."""
         if not self.path.is_file():
             return False
-        now = self.clock().isoformat()
-        with self._db(write=True, timeout=0.1) as db:
-            campaign = db.execute("SELECT * FROM campaign WHERE id=1").fetchone()
-            if not campaign or campaign["closed"] or now >= campaign["deadline"]:
-                return False
-            if db.execute("SELECT count(*) FROM cases WHERE exclusion IS NULL").fetchone()[0] >= CASE_LIMIT:
-                return False
-            shadow_id = hashlib.sha256((PILOT_NAME + "\0" + key).encode()).hexdigest()[:32]
-            if exclusion:
-                opus = {"status": opus["status"], "error": opus.get("error")}
-            accepted = db.execute("""INSERT INTO cases(opus_id,shadow_id,at,thread_id,batch_id,tool,kind,sample,
-                    opus,state,exclusion) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(opus_id) DO NOTHING""",
-                (key, shadow_id, now, thread_id, batch_id, tool, kind, _json(sample) if not exclusion else None,
-                 _json(opus), "excluded" if exclusion else "queued", exclusion)).rowcount
-            return bool(accepted)
+        shadow_id = hashlib.sha256((PILOT_NAME + "\0" + key).encode()).hexdigest()[:32]
+        if exclusion:
+            opus = {"status": opus["status"], "error": opus.get("error")}
+        encoded_sample = None if exclusion else _json(sample)
+        encoded_opus = _json(opus)
+        try:
+            with self._db(write=True, timeout=0.1) as db:
+                now = self.clock().isoformat()
+                campaign = self._campaign(db)
+                if campaign["closed"] or now >= campaign["deadline"]:
+                    return False
+                enrolled, = db.execute("SELECT count(*) FROM cases WHERE exclusion IS NULL").fetchone()
+                if enrolled >= campaign["case_limit"]:
+                    return False
+                accepted = db.execute("""INSERT INTO cases(opus_id,shadow_id,at,thread_id,batch_id,tool,kind,sample,
+                        opus,state,exclusion) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(opus_id) DO NOTHING""",
+                    (key, shadow_id, now, thread_id, batch_id, tool, kind, encoded_sample,
+                     encoded_opus, "excluded" if exclusion else "queued", exclusion)).rowcount
+                return bool(accepted)
+        except sqlite3.OperationalError as exc:
+            if (getattr(exc, "sqlite_errorcode", 0) & 0xff) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise
+            logging.getLogger(__name__).warning("Skipped a shadow sample because the pilot database was busy")
+            return False
 
     @staticmethod
     def _close(db, now, reason):
@@ -137,7 +194,7 @@ class ShadowPilot:
         """Return 'processed', 'idle', or 'closed'. Only the dedicated consumer calls this."""
         now = self.clock().isoformat()
         with self._db(write=True) as db:
-            campaign = db.execute("SELECT * FROM campaign WHERE id=1").fetchone()
+            campaign = self._campaign(db)
             if campaign["closed"]:
                 return "closed"
             if now >= campaign["deadline"]:
@@ -147,13 +204,15 @@ class ShadowPilot:
                 FROM cases WHERE state='queued' ORDER BY rowid LIMIT 1""").fetchone()
             if case is None:
                 count, = db.execute("SELECT count(*) FROM cases WHERE exclusion IS NULL").fetchone()
-                if count >= CASE_LIMIT:
+                if count >= campaign["case_limit"]:
                     self._close(db, now, "sample_limit")
                     return "closed"
                 return "idle"
             request = dict(case)
             db.execute("UPDATE cases SET state='working' WHERE shadow_id=?", (request["request_id"],))
         request["sample"] = json.loads(request["sample"])
+        request["case_limit"] = campaign["case_limit"]
+        request["limit_usd"] = campaign["limit_usd"]
         deadline = datetime.fromisoformat(campaign["deadline"])
         try:
             result = reviewer(request, deadline)
@@ -194,7 +253,7 @@ class ShadowPilot:
         if not self.path.is_file():
             return {"state": "not_started", "enrolled": 0, "case_limit": CASE_LIMIT, "limit_usd": str(PILOT_CAP)}
         with self._db() as db:
-            campaign = dict(db.execute("SELECT started,deadline,closed,reason FROM campaign WHERE id=1").fetchone())
+            campaign = self._campaign(db)
         rows = self.results()
         counts = Counter(r["state"] for r in rows)
         enrolled = len(rows) - counts["excluded"]
@@ -203,9 +262,9 @@ class ShadowPilot:
         elif self.clock().isoformat() >= campaign["deadline"]:
             state = "expired"
         else:
-            state = "draining" if enrolled >= CASE_LIMIT else "collecting"
+            state = "draining" if enrolled >= campaign["case_limit"] else "collecting"
         usage = [r["sonnet_usage"] for r in rows if r["sonnet_usage"]]
-        return {**campaign, "state": state, "case_limit": CASE_LIMIT, "limit_usd": str(PILOT_CAP), "enrolled": enrolled,
+        return {**campaign, "state": state, "enrolled": enrolled,
                 "case_states": dict(counts), "paired": dict(Counter(r["comparison"] for r in rows if r["comparison"])),
                 "referral_kinds": dict(Counter(r["kind"] for r in rows if not r["exclusion"])),
                 "opus_outcomes": dict(Counter(r["opus"]["status"] for r in rows if not r["exclusion"])),

@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 
 from .attachments import ImageAttachment, MAX_TURN_IMAGES
+from . import operator_release
 from .chat_text import trim_reply_segment
 from .scheduler import SCHEMA, next_reset
 
@@ -82,7 +83,7 @@ class ChatStore:
                     batch_id INTEGER NOT NULL REFERENCES batches(id), call_id TEXT NOT NULL,
                     event_id INTEGER UNIQUE NOT NULL REFERENCES events(id),
                     PRIMARY KEY(batch_id, call_id));
-            """ + SCHEMA)
+            """ + SCHEMA + operator_release.SCHEMA)
 
     @contextmanager
     def _connect(self, *, write=False):
@@ -301,6 +302,7 @@ class ChatStore:
     def claim(self, limit: int = 16, *, budget_check=None, include_scheduled=True) -> Batch | None:
         """Admit human input first, then a deferred continuation, due alarm, or one idle heartbeat."""
         with self._connect(write=True) as db:
+            operator_release.process_commands(self, db)
             if db.execute("SELECT 1 FROM batches WHERE status='active'").fetchone():
                 return None
             now = self.clock()
@@ -373,6 +375,7 @@ class ChatStore:
         """Claim additions before attempting their delivery into the running turn."""
         with self._connect(write=True) as db:
             self._active(db, batch_id)
+            operator_release.process_commands(self, db)
             used = db.execute("""SELECT COUNT(*) FROM inbox i JOIN message_images im ON im.event_id=i.event_id
                 WHERE i.batch_id=?""", (batch_id,)).fetchone()[0]
             messages = self._pending(db, limit, image_slots=MAX_TURN_IMAGES - used)

@@ -35,7 +35,7 @@ OPUS_CODES = set("""invalid_json unexpected_model output_limit incomplete_respon
 response_text_too_long forbidden_xml malformed_xml nested_elements empty_element invalid_verdict
 invalid_advice search_limit invalid_search verdict_allow verdict_deny ask_operator advice search invalid_usage
 archive_error incomplete_body transport_error response_too_large invalid_concern_ruling
-invalid_concern_scope invalid_concern_question""".split())
+invalid_concern_scope invalid_concern_question indirect_operator_request""".split())
 for disposition in ("retire", "watch", "ask_operator"):
     OPUS_CODES.add("concern_" + disposition)
     OPUS_CODES.update("verdict_" + decision + "_concern_" + disposition for decision in ("allow","deny","ask_operator"))

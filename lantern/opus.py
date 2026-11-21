@@ -10,7 +10,7 @@ import re
 from urllib.parse import quote, urlencode, urlsplit
 import xml.etree.ElementTree as ET
 
-from .review_policy import ACTION_FACTS_POLICY, OPERATOR_QUESTION_POLICY, STANDING_POLICY
+from .review_policy import ACTION_FACTS_POLICY, OPERATOR_QUESTION_POLICY, STANDING_POLICY, indirect_operator_request
 
 
 OPUS_MODEL = "claude-3-opus-20240229"
@@ -194,7 +194,11 @@ def _system(mode: str, *, can_ask=False, final=False, concern_ids=(), tool=None,
     else:
         response_format = (
             'Return <advice>your guidance</advice>. Lantern asked you voluntarily. '
-            'Address its question. Advice does not grant permission for any future tool call.'
+            'Address its question using the authenticated host evidence provided with this request. '
+            'The host has admitted this exact question for advice. A prior_exact_denial describes its earlier '
+            'review history. A private discussion of a decision can proceed within standing policy. '
+            'The host handles binding rulings and any questions to Mike. Advice cannot grant, deny or '
+            'withdraw permission, retire a concern, or require Lantern to obtain a ruling on your behalf.'
         )
     research = '' if final else (
         ' If public evidence is needed first, return <search source="wikipedia">public search '
@@ -442,6 +446,32 @@ def _question_text(element, enabled):
     text = (element.text or "").strip()
     if set(element.attrib) <= attrs and 0 < len(text) <= OPERATOR_QUESTION_LIMIT:
         return text
+
+
+def _check_question_channel(reply, action, dispositions, can_ask, can_ask_concern):
+    # Only a validated decision can supply a question. An indirect request
+    # cannot commit a denial or change any of the accompanying concern scopes.
+    for ruling in ([action] if action else []) + dispositions:
+        relay = indirect_operator_request(ruling["decision"], ruling["reason"])
+        if relay is None:
+            continue
+        error = _invalid(reply, "indirect_operator_request")
+        # If the other part already contains a structured question, use that
+        # exact question. Never pay for two clarifications or commit a partial ruling.
+        if action and can_ask and action["decision"] == "ask_operator":
+            error.action_question = action["reason"]
+            raise error
+        if len(dispositions) == 1 and can_ask_concern and dispositions[0]["decision"] == "ask_operator":
+            error.concern_question = dispositions[0]["reason"]
+            raise error
+        question = ("Opus requested clarification on the proposal shown here. "
+                    "What should it know about your authorization or intent? Its request was: " + relay)
+        if relay and len(question) <= OPERATOR_QUESTION_LIMIT:
+            if ruling is not action and len(dispositions) == 1 and can_ask_concern:
+                error.concern_question = question
+            elif can_ask and (ruling is action or len(dispositions) > 1):
+                error.action_question = question
+        raise error
     return None
 
 
@@ -476,6 +506,7 @@ def _ruling(reply, root, concerns, *, tool, can_ask, can_ask_concern):
             if single or all(element.get("decision") != "ask_operator" for element in elements):
                 exc.action_question = _question_text(action, can_ask)
         raise
+    _check_question_channel(reply, result if tool else None, dispositions, can_ask, can_ask_concern)
     if single:
         result["concern"] = dispositions[0]
         outcome = "concern_" + dispositions[0]["decision"]
@@ -494,11 +525,11 @@ def _request(vendor_call, evidence: dict, mode: str, research: list, operator_co
     can_ask_concern = False
     concerns = []
     tool = evidence.get("tool")
+    question_available = packet["case"].pop("operator_question_available", False)
     if mode == "review":
         # The host builds the top-level case. Text in proposed arguments, rationale,
         # conversation, and research never supplies operator-channel metadata.
-        can_ask = (packet["case"].pop("operator_question_available", False) is True
-                   and evidence.get("tool") not in (None, "consult_opus") and "host_status" not in evidence)
+        can_ask = question_available is True and bool(tool) and "host_status" not in evidence
         if "concern_review" in evidence:
             concerns = [evidence["concern_review"]]
             can_ask_concern = packet["case"].pop("concern_question_available", False) is True
@@ -517,18 +548,17 @@ def _request(vendor_call, evidence: dict, mode: str, research: list, operator_co
                 raise ValueError("Invalid host concern review")
         if len({item["id"] for item in concerns}) != len(concerns):
             raise ValueError("Duplicate host concern IDs")
-        for field in ("host_facts", "operator_statements", "operator_attestation", "prior_operator_attestation",
-                      "concern_attestation", "prior_concern_attestation", "prior_concern_attestations"):
-            if field in packet["case"]:
-                packet[field] = packet["case"].pop(field)
-        if "host_facts" in packet:
-            # Current tool reviews carry each host fact once. Older case formats
-            # and voluntary consultations retain their original fields.
-            if packet.get("operator_statements") == packet["host_facts"]["operator_statements"]:
-                packet.pop("operator_statements", None)
-            if packet["case"].get("prior_action_denial") == packet["host_facts"]["prior_exact_denial"]:
-                packet["case"].pop("prior_action_denial", None)
-    final = "operator_attestation" in packet or "concern_attestation" in packet
+    for field in ("host_facts", "operator_statements", "operator_attestation", "prior_operator_attestation",
+                  "concern_attestation", "prior_concern_attestation", "prior_concern_attestations"):
+        if field in packet["case"]:
+            packet[field] = packet["case"].pop(field)
+    if "host_facts" in packet:
+        # Use the same provenance boundary on the admission and advisory calls.
+        if packet.get("operator_statements") == packet["host_facts"]["operator_statements"]:
+            packet.pop("operator_statements", None)
+        if packet["case"].get("prior_action_denial") == packet["host_facts"]["prior_exact_denial"]:
+            packet["case"].pop("prior_action_denial", None)
+    final = mode == "review" and ("operator_attestation" in packet or "concern_attestation" in packet)
     can_ask = can_ask and not final
     can_ask_concern = can_ask_concern and not final
     case = json.dumps(packet, ensure_ascii=False, allow_nan=False)
@@ -581,6 +611,7 @@ def _request(vendor_call, evidence: dict, mode: str, research: list, operator_co
                                  can_ask_concern=can_ask_concern)
             elif mode == "review":
                 result = _action_decision(reply, element, can_ask)
+                _check_question_channel(reply, result, [], can_ask, False)
                 decision = result["decision"]
                 _record_validation(reply, decision if decision == "ask_operator" else "verdict_" + decision)
             elif mode == "consult" and element.tag == "advice" and not element.attrib:

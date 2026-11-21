@@ -13,6 +13,7 @@ from threading import Event
 import unittest
 
 from lantern.chat_worker import WorkerBusy
+from lantern.budget import units
 from lantern.review_vendors import ReviewerVendors
 from lantern.shadow_pilot import CASE_LIMIT, ShadowPilot, run_shadow
 
@@ -64,6 +65,11 @@ class ShadowPilotTest(unittest.TestCase):
             return self.record("case-" + str(i % 25))
         with ThreadPoolExecutor(max_workers=3) as pool:
             count = sum(pool.map(submit, range(50)))
+        # Under disk contention the live worker may skip a sample after its short
+        # wait. Resubmission should fill remaining slots and never duplicate a case.
+        self.assertGreater(count, 0)
+        self.assertLessEqual(count, CASE_LIMIT)
+        count += sum(submit(i) for i in range(25))
         self.assertEqual(count, CASE_LIMIT)
         sent = []
         def reviewer(request, deadline):
@@ -75,6 +81,14 @@ class ShadowPilotTest(unittest.TestCase):
         self.assertEqual(len(set(sent)), CASE_LIMIT)
         self.assertEqual(self.pilot.status()["paired"], {"agree": CASE_LIMIT})
         self.assertEqual(self.pilot.status()["reason"], "sample_limit")
+
+    def test_busy_pilot_skips_sample_and_admits_resubmission_after_release(self):
+        self.pilot.activate()
+        with self.pilot._db(write=True), self.assertLogs("lantern.shadow_pilot", level="WARNING"):
+            self.assertFalse(self.record("contended"))
+        self.assertEqual(self.pilot.status()["enrolled"], 0)
+        self.assertTrue(self.record("contended"))
+        self.assertFalse(self.record("contended"))
 
     def test_frozen_packets_blinding_exclusions_and_failure_accounting(self):
         self.pilot.activate()
@@ -157,6 +171,67 @@ class ShadowPilotTest(unittest.TestCase):
         self.assertFalse(self.record("late"))
         self.assertEqual(self.pilot.status()["reason"], "pilot_cap")
         self.assertEqual(self.pilot.status()["case_states"], {"finished": 1, "skipped": 1})
+
+    def test_extension_adds_only_new_cases_and_spend_across_restarts(self):
+        self.pilot.activate()
+        self.record("first")
+        self.record("second")
+        self.record("cap")
+        self.record("skipped")
+        for _ in range(2):
+            self.pilot.drain_one(lambda *_: {"status": "ok", "verdict": self.verdict})
+        self.assertEqual(self.pilot.drain_one(lambda *_: {"status": "pilot_cap"}), "closed")
+        old = self.pilot.results()
+        ledger = ReviewerVendors(self.state, Decimal(5))
+        with closing(sqlite3.connect(ledger.path)) as db, db:
+            db.executemany("""INSERT INTO calls(id,at,day,vendor,purpose,reserved,cost,status)
+                VALUES(?,'now','2026-11-20','test','shadow_review',?,?,?)""", [
+                (old[0]["shadow_id"], units(Decimal(".25")), units(Decimal(".20")), "metered"),
+                (old[1]["shadow_id"], units(Decimal(".10")), None, "ambiguous")])
+        old = self.pilot.results()
+        until = (self.now + timedelta(hours=12)).isoformat()
+        report = self.pilot.extend(until)
+        self.assertEqual((report["case_limit"], report["limit_usd"], report["cost_usd"], report["held_usd"]),
+                         (14, "0.8", "0.2", "0.1"))
+        self.pilot = ShadowPilot(self.state, clock=lambda: self.now)
+        self.assertFalse(self.record("skipped"))
+        for i in range(10):
+            self.assertTrue(self.record(f"new-{i}"))
+        self.assertFalse(self.record("extra"))
+        same_until = "2026-11-21T08:00:00-06:00"
+        self.assertEqual(self.pilot.extend(same_until)["case_limit"], 14)
+        self.assertEqual(self.pilot.activate()["deadline"], until)
+        seen = []
+        def judge(row, deadline):
+            seen.append(row["request_id"])
+            self.assertEqual((row["case_limit"], row["limit_usd"], deadline.isoformat()), (14, "0.8", until))
+            return {"status": "ok", "verdict": self.verdict}
+        for _ in range(10):
+            self.assertEqual(self.pilot.drain_one(judge), "processed")
+        self.assertEqual(self.pilot.drain_one(judge), "closed")
+        self.assertEqual(self.pilot.extend(until)["reason"], "sample_limit")
+        self.assertEqual(self.pilot.status()["paired"], {"agree": 12})
+        self.assertEqual(len(set(seen)), 10)
+        self.assertEqual(self.pilot.results()[:4], old)
+
+    def test_extension_deadline_and_active_campaign_guards(self):
+        until = self.now + timedelta(minutes=5)
+        with self.assertRaises(ValueError):
+            self.pilot.extend(until.isoformat())
+        self.pilot.activate()
+        with self.assertRaises(ValueError):
+            self.pilot.extend(until.isoformat())
+        self.pilot.stop()
+        for invalid in (self.now.isoformat(), until.replace(tzinfo=None).isoformat(),
+                        (self.now + timedelta(days=2)).isoformat()):
+            with self.assertRaises(ValueError):
+                self.pilot.extend(invalid)
+        self.pilot.extend(until.isoformat())
+        self.record("right before cutoff")
+        self.now = until
+        self.assertFalse(self.record("too late"))
+        self.assertEqual(self.pilot.drain_one(None), "closed")
+        self.assertEqual(self.pilot.extend(until.isoformat())["reason"], "expired")
 
     def test_live_recorder_can_enqueue_while_consumer_is_waiting_on_provider(self):
         self.pilot = ShadowPilot(self.state)

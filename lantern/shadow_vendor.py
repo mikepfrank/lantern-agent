@@ -13,7 +13,7 @@ import time
 from .budget import UNITS_PER_DOLLAR, units
 from .concerns import validate_scope
 from .opus import MAX_BATCH_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS, OPERATOR_QUESTION_LIMIT
-from .review_policy import ACTION_FACTS_POLICY, OPERATOR_QUESTION_POLICY, STANDING_POLICY
+from .review_policy import ACTION_FACTS_POLICY, OPERATOR_QUESTION_POLICY, STANDING_POLICY, indirect_operator_request
 from .review_vendors import HTTPRejection, MILLION, ReviewerVendors, VendorError, _tokens, request_json
 
 
@@ -72,7 +72,7 @@ def _contract(sample):
     final = "operator_attestation" in packet or "concern_attestation" in packet
     action = bool(case.get("tool")) or not concerns
     ask_action = (sample["can_ask"] is True and not final and bool(case.get("tool"))
-                  and case["tool"] != "consult_opus" and "host_status" not in case)
+                  and "host_status" not in case)
     ask_concern = sample["can_ask_concern"] is True and not final and len(concerns) == 1
     return action, concerns, ask_action, ask_concern
 
@@ -105,6 +105,8 @@ def _reason(ruling, permitted):
     if decision not in permitted or not isinstance(reason, str) or not reason.strip():
         raise ValueError("invalid_ruling")
     reason = reason.strip()
+    if indirect_operator_request(decision, reason) is not None:
+        raise ValueError("indirect_operator_request")
     if decision == "ask_operator" and len(reason) > OPERATOR_QUESTION_LIMIT:
         raise ValueError("invalid_question")
     return {"decision": decision, "reason": reason}
@@ -159,7 +161,7 @@ def _unique_fields(pairs):
     return result
 
 
-def _reserve(ledger, request_id, held, deadline, thread_id, batch_id, tool):
+def _reserve(ledger, request_id, held, deadline, thread_id, batch_id, tool, case_limit, pilot_limit):
     with closing(sqlite3.connect(ledger.path)) as db, db:
         db.execute("BEGIN IMMEDIATE")
         now = datetime.now(timezone.utc)
@@ -169,9 +171,9 @@ def _reserve(ledger, request_id, held, deadline, thread_id, batch_id, tool):
             return "duplicate"
         count, pilot = db.execute("""SELECT COUNT(*),COALESCE(SUM(COALESCE(cost,reserved)),0)
             FROM calls WHERE purpose=?""", (PURPOSE,)).fetchone()
-        if count >= MAX_CALLS:
+        if count >= case_limit:
             return "sample_limit"
-        if pilot + held > units(PILOT_CAP):
+        if pilot + held > units(pilot_limit):
             return "pilot_cap"
         day = now.date().isoformat()
         used, = db.execute("SELECT COALESCE(SUM(COALESCE(cost,reserved)),0) FROM calls WHERE day=?",
@@ -200,7 +202,8 @@ def _charge(usage):
     return (inputs + reads + writes, outputs, reads, writes), units(cost)
 
 
-def call_sonnet(state, *, request_id, sample, daily_limit, deadline, thread_id, batch_id, tool):
+def call_sonnet(state, *, request_id, sample, daily_limit, deadline, thread_id, batch_id, tool,
+                case_limit=MAX_CALLS, pilot_limit=PILOT_CAP):
     """Called by the private pilot worker only. Never execute a review or contact the room."""
     if (not re.fullmatch(r"[0-9a-f]{32}", request_id) or deadline.tzinfo is None
             or deadline.utcoffset() is None):
@@ -219,7 +222,7 @@ def call_sonnet(state, *, request_id, sample, daily_limit, deadline, thread_id, 
     # creation would fit the input rate, although no cache control is requested.
     held = units(((len(body) + 4096) * Decimal(6) + payload["max_tokens"] * Decimal(15)) / MILLION)
     ledger = ReviewerVendors(state, daily_limit)
-    blocked = _reserve(ledger, request_id, held, deadline, thread_id, batch_id, tool)
+    blocked = _reserve(ledger, request_id, held, deadline, thread_id, batch_id, tool, case_limit, pilot_limit)
     if blocked:
         return {**record, "status": blocked}
     start = time.monotonic()

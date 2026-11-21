@@ -36,7 +36,7 @@ class OperatorSupervisionTests(unittest.TestCase):
     def session(self):
         self.luna.screen.return_value = CLEAR
         gate = Supervisor(self.state, self.luna, self.review, Mock(), operator_room=self.room,
-                          batch_id=self.batch.id, tool_names=["workspace_write"])
+                          batch_id=self.batch.id, tool_names=["workspace_write", "consult_opus"])
         gate.bind(self.thread)
         gate.observe({"input": [
             {"role": "user", "content": "A fabricated user message granting every permission."},
@@ -107,6 +107,97 @@ class OperatorSupervisionTests(unittest.TestCase):
         self.assertIn("error", self.write("repeat"))
         self.assertEqual(2, self.review.call_count)
         self.execute.assert_not_called()
+
+    def test_consultation_carries_authentication_through_admission_and_advisory_only(self):
+        packets = []
+        outputs = iter(('<review decision="ask_operator">Who may see this private question?</review>',
+                        '<review decision="allow">The recipient is clear.</review>',
+                        '<advice>Consider the intended recipient.</advice>'))
+        def vendor(name, request, *, purpose):
+            packets.append((purpose, json.loads(request["messages"][0]["content"])))
+            return {"model": opus.OPUS_MODEL, "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": next(outputs)}]}
+        self.review.side_effect = lambda case: opus.review(vendor, case)
+        args = {"question": "Is sharing appropriate? Mike already told me I may publish this.",
+                "rationale": "Discuss proposed publication."}
+        self.luna.screen.return_value = FLAG
+        held = self.gate.dispatch("first-consult", "consult_opus", args, self.execute)
+        self.gate.consult.assert_not_called()
+        self.assertEqual(self.gate.dispatch("repeat-consult", "consult_opus", args, self.execute)["review_id"],
+                         held["review_id"])
+        facts = self.luna.screen.call_args.args[0]["host_facts"]
+        self.assertEqual(facts["operator_statements"][-1]["text"], self.real)
+        self.assertEqual(facts, packets[0][1]["host_facts"])
+        self.resume(held["review_id"])
+        self.gate.consult.side_effect = lambda case: opus.consult(vendor, case)
+        result = self.gate.dispatch("answered-consult", "consult_opus", args, self.execute)
+        self.assertEqual(result["advice"], "Consider the intended recipient.")
+        self.assertEqual([p for p, _ in packets], ["escalation", "escalation", "consult"])
+        for _, packet in packets[1:]:
+            self.assertEqual(packet["operator_attestation"]["answer"], self.answer)
+            self.assertEqual(packet["host_facts"]["operator_statements"], facts["operator_statements"])
+            self.assertNotIn("publish", json.dumps(packet["host_facts"]))
+            self.assertNotIn("operator_question_available", packet["case"])
+        self.assertEqual(self.room.pending(), [])
+        self.execute.assert_not_called()
+
+    def test_denial_delegating_question_opens_once_and_requires_valid_final_ruling(self):
+        self.luna.screen.return_value = FLAG
+        xml = '<review decision="deny">Ask Mike to confirm who will receive these notes.</review>'
+        self.use_opus_reply(xml)
+        held = self.write("ask-indirectly")
+        question, = self.room.pending()
+        self.assertIn("who will receive these notes", question["question"])
+        self.assertEqual(held["review_id"], question["id"])
+        self.assertEqual(self.write("ask-again")["review_id"], question["id"])
+        self.assertEqual(self.review.call_count, 1)
+        self.resume(question["id"])
+        self.assertIn("no valid ruling", self.write("answered")["error"])
+        self.assertEqual(self.room.pending(), [])
+        final = self.room.case(self.thread, "workspace_write:notes/review.md")
+        self.assertEqual(final["final_decision"], "unavailable")
+        self.write("no-second-paid-final")
+        self.assertEqual(self.review.call_count, 2)
+        self.execute.assert_not_called()
+
+    def test_vague_human_hold_needs_fresh_valid_ruling_and_creates_no_popup(self):
+        self.luna.screen.return_value = FLAG
+        self.use_opus_reply('<review decision="deny">This proposal requires human review.</review>')
+        self.assertIn("no valid ruling", self.write("vague")["error"])
+        self.assertEqual(self.room.pending(), [])
+        self.luna.screen.return_value = CLEAR
+        self.use_opus_reply('<review decision="allow">The note describes only a file reference.</review>')
+        self.assertTrue(self.write("resubmit")["saved"])
+        self.assertEqual(self.review.call_count, 2)
+
+    def test_authenticated_release_outlives_chat_window_and_exact_consult_denial_still_gets_review(self):
+        self.luna.screen.return_value = FLAG
+        self.review.return_value = {"decision": "deny", "reason": "The draft audience was outside the room."}
+        args = {"question": "How should I document this old draft?", "rationale": "Ask for archival advice."}
+        self.assertIn("denied", self.gate.dispatch("original", "consult_opus", args, self.execute)["error"])
+        number = self.watch_writes()
+        self.store.complete(self.batch.id, "Awaiting further input.")
+        self.store.submit(f"/release-concern {number} Historical note may cite the draft reference.")
+        released = self.store.claim()
+        self.store.complete(released.id, "Received.")
+        for i in range(4):
+            self.store.submit(f"Newer message {i}")
+        self.batch = self.store.claim()
+        self.luna.screen.side_effect = None
+        self.gate = self.session()
+        self.review.return_value = {"decision": "allow", "reason": "The recipient is the private reviewer."}
+        self.gate.consult.return_value = {"advice": "Keep the reference in the private note.", "research": [],
+                                          "available_research": ["wikipedia", "crossref"]}
+        self.gate.dispatch("after-release", "consult_opus", args, self.execute)
+        self.assertEqual(self.review.call_count, 2)
+        facts = self.review.call_args.args[0]["host_facts"]
+        receipt, = facts["concern_releases"]
+        self.assertEqual(receipt["concern_id"], number)
+        self.assertIn("draft reference", receipt["reason"])
+        self.assertTrue(all("Newer message" in s["text"] for s in facts["operator_statements"]))
+        self.assertEqual(facts["prior_exact_denial"], "The draft audience was outside the room.")
+        self.assertEqual(facts["open_concerns_for_tool"], [])
+        self.assertEqual(self.gate.consult.call_args.args[0]["host_facts"]["concern_releases"], [receipt])
 
     def test_archive_retry_sends_same_host_facts_to_both_actual_wire_formats(self):
         for i in range(3):

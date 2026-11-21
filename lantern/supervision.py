@@ -33,6 +33,10 @@ def _opus_failure(error, *, batch_id, consultation=False):
     purpose = "consultation" if consultation else "review"
     if isinstance(error, OpusResponseError):
         turn = f" for turn {batch_id}" if batch_id is not None else ""
+        if error.code == "indirect_operator_request":
+            return ReviewUnreadable("The reviewer requested operator input outside the direct question channel. "
+                                    "The review has no valid ruling. Leave the action held and do not seek "
+                                    f"authorization through chat. The host archived the reply{turn}.")
         status = ("No advice was delivered." if consultation else
                   "The proposed action did not run and remains held. Leave it pending.")
         return ReviewUnreadable(f"Opus replied, but its {purpose} response was unreadable ({error.code}). "
@@ -171,7 +175,9 @@ def _review_excerpt(case):
 
 
 def recovered_excerpt(error, evidence_excerpt):
-    prefix = f"Opus asked for clarification in a ruling the host could not validate ({error.code})."
+    prefix = ("Opus requested an operator decision through Lantern. The host redirected it here."
+              if error.code == "indirect_operator_request" else
+              f"Opus asked for clarification in a ruling the host could not validate ({error.code}).")
     if error.action_question and error.concern_question:
         prefix += "\n\nRelated context question from the same reply\n" + error.concern_question
     return (prefix + "\n\n" + evidence_excerpt)[:2000]
@@ -450,9 +456,10 @@ class Supervisor:
             matching = concerns.list_open(db, self.thread, name)
             prior = db.execute("SELECT reason FROM action_refusals WHERE thread=? AND proposal=?",
                                (self.thread, _fingerprint([name, args]))).fetchone()
-        room = self.operator_room if name != CONSULT else None
+        room = self.operator_room
         facts = action_facts(name, args,
                              operator_statements=room.statements(self.thread, self.batch_id) if room else [],
+                             concern_releases=room.concern_releases(self.thread, name) if room else [],
                              open_concerns=matching, prior_denial=prior[0] if prior else None,
                              archive_receipt=room.archive_receipt(self.thread)
                              if room and name in ("read_heritage", "view_pdf_page") else None)
@@ -488,7 +495,6 @@ class Supervisor:
                     or not args["question"].strip() or len(args["question"]) > 2400):
                 return {"error": "Provide one nonempty question of at most 2400 characters."}
             try:
-                del case["host_facts"]
                 report = self.consult(case)
                 if not isinstance(report, dict):
                     raise OpusResponseError("invalid_advice")
@@ -650,7 +656,7 @@ class Supervisor:
     def _adjudicate(self, call_id, case, flagged, skipped, feedback):
         """Return a tool error for a held action, or None to proceed with its dispatch."""
         name, args = case["tool"], case["arguments"]
-        room = self.operator_room if name != CONSULT else None
+        room = self.operator_room
         scope = question_scope(name, args) if room else None
         prior = room.case(self.thread, scope) if room else None
         # Resolve the action's own operator question independently of context rulings.
@@ -665,7 +671,11 @@ class Supervisor:
         if prior:
             # New operator statements can change the evidence after a refusal.
             # Merely rephrasing the public rationale leaves this fingerprint unchanged.
-            fingerprint = _fingerprint([name, args, [s["event_id"] for s in case["operator_statements"]]])
+            fingerprint_parts = [name, args, [s["event_id"] for s in case["operator_statements"]]]
+            releases = case["host_facts"]["concern_releases"]
+            if releases:
+                fingerprint_parts.append([r["receipt_event_id"] for r in releases])
+            fingerprint = _fingerprint(fingerprint_parts)
             if prior["final_fingerprint"] == fingerprint and prior["final_decision"] in ("deny", "unavailable"):
                 return {"error": f"Review #{prior['id']} held this proposal. Mike can supply new information.",
                         "judgment": prior["final_reason"]}
@@ -700,7 +710,7 @@ class Supervisor:
                 if not self.operator_room:
                     return {"error": "An applicable context concern is awaiting the private operator room."}
                 return self._concern_hold(self._concern_question(item, item["reason"]))
-        if room and not needs_final:
+        if room and prior is None:
             case["operator_question_available"] = True
         batch = self._case_with_concerns(findings, case) if findings else case
         if len(findings) > 1 and not incomplete:
@@ -727,6 +737,10 @@ class Supervisor:
                 held = self._recover_action_question(exc.__cause__, batch, call_id, proposal_key, scope)
                 if held is not None:
                     return held
+                if exc.__cause__.code == "indirect_operator_request":
+                    with database(self.path) as db:
+                        db.execute("INSERT OR IGNORE INTO incomplete_action_reviews VALUES(?,?,?,?,NULL)",
+                                   (self.thread, proposal_key, call_id, exc.__cause__.code))
             raise
         if needs_final:
             room.finish_final(prior["id"], fingerprint, verdict["decision"], verdict["reason"])
@@ -767,7 +781,10 @@ class Supervisor:
         else:
             row = self._recover_concern_question(item, error)
         held = self._concern_hold(row)
-        held["error"] = f"Opus's ruling could not be validated ({error.code}). " + held["error"]
+        if error.code == "indirect_operator_request":
+            held["error"] = "The host redirected Opus's clarification to Mike. " + held["error"]
+        else:
+            held["error"] = f"Opus's ruling could not be validated ({error.code}). " + held["error"]
         return held
 
     def _apply_action_verdict(self, call_id, name, proposal, findings, skipped, refusal, incomplete, verdict, rulings):

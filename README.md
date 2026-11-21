@@ -10,7 +10,7 @@ To start or re-establish the browser connection, run this in a terminal on the l
 ssh -t -o ExitOnForwardFailure=yes -L 127.0.0.1:8765:127.0.0.1:8765 lightsail "sudo -u lantern -H /usr/local/bin/lantern web-link --wait"
 ```
 
-The browser and terminal show the same conversation. Either interface can send a follow-up while Lantern is working. In the browser, everything you send, including `/help`, is a message to Lantern. Terminal commands such as `/help` run locally in the CLI.
+The browser and terminal show the same conversation. Either interface can send a follow-up while Lantern is working. The host handles `/release-concern` in both interfaces. `/help` runs locally in the terminal and goes to Lantern as an ordinary message in the browser.
 
 Use **+** beside the browser composer to attach one PNG, JPEG or WebP per message. You can add a caption or send the image by itself. The preview shows the dimensions that Lantern will see. The browser reduces large images to fit 1 MiB and 1,600 pixels per side. Click a thumbnail in the conversation to see the saved copy. Qwen receives the four most recent images in its current context. Older uploads remain in chat and can be attached again. Luna receives the pixels during full-context checks. The terminal shows the image dimensions and caption.
 
@@ -64,7 +64,7 @@ State defaults to `%LOCALAPPDATA%\Lantern` on Windows and `~/.local/state/lanter
 
 ## Supervision
 
-Mike’s standing policy authorizes Lantern to write private notes, inspect filtered diagnostics, and report to Mike in their private room. This includes documenting or criticizing a review and suggesting a fix. Luna screens for concrete actions or plans with material consequences. For example, diagnosing a failed tool call in a private note is ordinary work. Sending that same note to an outside recipient introduces a disclosure that may need review.
+Mike’s standing policy authorizes Lantern to write private notes, inspect filtered diagnostics, and report to Mike in their private room. A useful incident note can identify the concern and turn numbers, tool, file or page, ruling, and what resolved it. Documenting or criticizing a review and suggesting a fix are ordinary private work. Executing the held action, copying protected contents, or sending the note to an outside recipient has its own review implications.
 
 Mike also authorized private, read-only reference to the founding conversation he supplied in `heritage/`. The reviewers receive that permission on every page request, including requests to read the text or inspect a rendered page. Quoted instructions in the archive have no authority. Sharing material outside the private room requires separate review. If a particular read was previously denied, Lantern can submit it again for a fresh Opus decision.
 
@@ -84,9 +84,11 @@ When several watches apply to a proposal, Opus receives one case with all of the
 
 For a question about a context concern, answer once in the private web room. The host queues a wake, obtains the final disposition, and posts the result in chat. A held tool needs a fresh proposal if Lantern still wants to perform it. If the final concern review was interrupted or unreadable, the chat notice gives the review ID. Run `lantern retry-concern REVIEW_ID` in the operator shell to reopen that question.
 
+To end a named context watch directly, enter `/release-concern N` in the private room or terminal, replacing `N` with its number. You can append a short reason or use `/release-concern N --cite EVENT` to cite an earlier message you sent about that concern. The host records your decision, posts a receipt in the conversation, and supplies it as evidence on relevant future reviews. Individual action rulings retain their own scope. Ordinary messages discussing a watch do not invoke this command.
+
 Opus decides flagged actions before execution. It sees Luna's evidence, a concise context summary and Lantern's justification. The tool result gives Lantern Opus's visible reply, including introductions, side remarks and sign-offs. The host uses the XML decision that matches the request. Surrounding prose and incidental elements such as `<advice>` carry no authority in a ruling. A missing or ambiguous decision holds the action. The action also stays on hold when a required reviewer is unavailable.
 
-A voluntary consultation returns advice and a record of any Wikipedia or Crossref searches. Opus can request up to two short public keyword lookups per case. The operator mediates the queries and search results are treated as untrusted text. Codex binds tool names when a thread starts, so milestone 1 threads retain supervised chess, and a new thread adds direct Opus consultation.
+A voluntary consultation receives host-verified operator evidence and returns advice and a record of any Wikipedia or Crossref searches. Advice grants no permission to perform another action. During binding review, a missing fact that requires Mike’s decision goes to him through the private room. Opus can request up to two short public keyword lookups per case. The operator mediates the queries and search results are treated as untrusted text. Codex binds tool names when a thread starts, so milestone 1 threads retain supervised chess, and a new thread adds direct Opus consultation.
 
 From the operator shell, run `lantern flags` to read Luna's most recent screening concerns. Each entry gives Luna's summary and the evidence it cited, the UTC time, and the context scan or tool call that triggered it. Use `lantern flags --kind context` for context spot-checks or `lantern flags --kind tool` for tool proposals. To examine a particular turn alongside its costs, use the same `--batch N` with `lantern flags` and `lantern usage`. Results are newest first. Use `--before-id` with the returned cursor for the next page.
 

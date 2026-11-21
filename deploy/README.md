@@ -44,6 +44,16 @@ sudo -iu lantern lantern reviewer-pilot status
 
 The pilot admits up to 20 referrals. Its total Sonnet reservation and spend ceiling is $0.50, within the existing supervisor budget. Admission also preserves $0.50 of the current UTC day's allowance for live review. A request whose delivery is uncertain retains its reservation. A worker restart cannot resend a paid request with the same ID.
 
+After the collector has closed and any in-flight call has settled, the operator can grant one more observation window. Each grant admits up to ten new referrals and adds $0.50 to the Sonnet costs and outstanding reservations already on the ledger. Choose a deadline with a timezone within the next 24 hours. For example, this window ends at midnight Chicago time after November 21, 2026.
+
+```sh
+sudo -iu lantern lantern reviewer-pilot extend --until 2026-11-22T06:00:00Z
+sudo systemctl restart lantern-review-shadow.service
+sudo -iu lantern lantern reviewer-pilot status
+```
+
+Repeating the same deadline preserves the original grant even after it expires. Status, results, case IDs, and spending cover both windows. Previously skipped cases stay in the record. The same daily supervisor budget and live-review headroom apply throughout.
+
 Use `lantern reviewer-pilot status` for counts and spending, or `lantern reviewer-pilot results` for private, per-case decisions, reasons, costs, and timings. Agreement covers the proposed action and each concern's disposition and tool scope. Evaluate differing reasons and proposed operator questions against Mike's recorded permissions. To close the pilot early, run `lantern reviewer-pilot stop`. A call already in flight can finish settling. The collector exits when collection ends.
 
 ## Chat

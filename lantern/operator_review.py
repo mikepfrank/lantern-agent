@@ -65,6 +65,8 @@ class ReviewRoom:
                 if original["scope"] != scope:
                     raise ValueError("Tool call already has a different review scope")
                 return original["id"]
+            if tool == "context_concern" and self._released(db, thread, scope):
+                raise ValueError("The operator has already retired this context concern")
             pending = db.execute("""SELECT id FROM operator_reviews
                 WHERE thread=? AND scope=? AND status='pending'""", (thread, scope)).fetchone()
             if pending is not None:
@@ -79,6 +81,21 @@ class ReviewRoom:
             row = db.execute("""SELECT q.* FROM operator_reviews q JOIN room r ON r.thread_id=q.thread
                 WHERE q.thread=? AND q.scope=? ORDER BY q.id DESC LIMIT 1""", (thread, scope)).fetchone()
             return dict(row) if row else None
+
+    @staticmethod
+    def _released(db, thread, scope):
+        return db.execute("""SELECT 1 FROM operator_concern_releases
+            WHERE thread=? AND 'context-concern:' || concern_id=?""", (thread, scope)).fetchone() is not None
+
+    def concern_releases(self, thread, tool):
+        """Durable operator evidence for the former scope, independent of recent chat."""
+        with self.store._connect() as db:
+            rows = db.execute("""SELECT concern_id,reason,released_at,command_event_id,source_event_id,receipt_event_id
+                FROM operator_concern_releases AS x JOIN room r ON r.thread_id=x.thread
+                WHERE x.thread=? AND (?='consult_opus'
+                    OR EXISTS (SELECT 1 FROM json_each(x.prior_tools) WHERE value IN ('*',?)))
+                ORDER BY x.receipt_event_id DESC LIMIT 16""", (thread, tool, tool))
+            return [dict(row) for row in rows]
 
     def archive_receipt(self, thread):
         """The signed-in operator's original archive answer, when present in this room."""
@@ -99,6 +116,8 @@ class ReviewRoom:
                 AND q.final_decision='unavailable'""", (review_id,)).fetchone()
             if row is None:
                 raise ValueError("Only an unavailable final context review can be reopened")
+            if self._released(db, row["thread"], row["scope"]):
+                raise ValueError("The operator has already retired this context concern")
             call_id = f"host:retry-context-review:{review_id}"
             latest = db.execute("""SELECT id,call_id FROM operator_reviews
                 WHERE thread=? AND scope=? ORDER BY id DESC LIMIT 1""", (row["thread"], row["scope"])).fetchone()
@@ -181,12 +200,14 @@ class ReviewRoom:
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("Invalid final judgment")
         with self.store._connect(write=True) as db:
-            row = db.execute("""SELECT tool,final_decision,final_reason,final_tools FROM operator_reviews
+            row = db.execute("""SELECT thread,scope,tool,final_decision,final_reason,final_tools FROM operator_reviews
                 WHERE id=? AND thread=(SELECT thread_id FROM room WHERE id=1) AND final_fingerprint=?""",
                              (review_id, fingerprint)).fetchone()
             if row is None:
                 raise ValueError("No matching claim for this final judgment")
             concern = row["tool"] == "context_concern"
+            if concern and row["final_decision"] == "retire" and self._released(db, row["thread"], row["scope"]):
+                return
             allowed = ("retire", "watch", "unavailable") if concern else ("allow", "deny", "unavailable")
             if decision not in allowed:
                 raise ValueError("Invalid final judgment for this review")
@@ -234,4 +255,9 @@ class ReviewRoom:
                 WHERE id=? AND thread=(SELECT thread_id FROM room WHERE id=1)
                     AND final_fingerprint=? AND final_decision IS NULL""", (review_id, fingerprint)).rowcount
             if not updated:
+                row = db.execute("""SELECT thread,scope FROM operator_reviews WHERE id=? AND tool='context_concern'
+                    AND thread=(SELECT thread_id FROM room WHERE id=1) AND final_fingerprint=?
+                    AND final_decision='retire'""", (review_id, fingerprint)).fetchone()
+                if row and self._released(db, row["thread"], row["scope"]):
+                    return
                 raise ValueError("No matching unreconciled claim")

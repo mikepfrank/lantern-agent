@@ -83,7 +83,8 @@ def arguments():
     responses.add_argument("--batch", type=int, help="Restrict responses to this worker batch")
     responses.add_argument("--limit", type=int, default=20, help="Number of recent responses to show (1 to 200)")
     pilot = commands.add_parser("reviewer-pilot", help="Operate the private Sonnet comparison")
-    pilot.add_argument("operation", choices=("start", "stop", "status", "results", "collect"))
+    pilot.add_argument("operation", choices=("start", "extend", "stop", "status", "results", "collect"))
+    pilot.add_argument("--until", help="Required for extend. Supply the cutoff timestamp with its timezone.")
     commands.add_parser("chat", help="Attach to the persistent operator conversation")
     retry = commands.add_parser("retry-concern", help="Reopen an unavailable final context ruling for a fresh operator answer")
     retry.add_argument("review_id", type=int)
@@ -119,6 +120,8 @@ async def main(args):
         from .shadow_vendor import call_sonnet
 
         pilot = ShadowPilot(state)
+        if bool(args.until) != (args.operation == "extend"):
+            raise ValueError("Only reviewer-pilot extend takes --until and it requires an explicit deadline.")
         if args.operation == "collect":
             limit = supervisor_limit()
             if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -127,11 +130,14 @@ async def main(args):
             def judge(row, deadline):
                 return call_sonnet(state, request_id=row["request_id"], sample=row["sample"],
                                    daily_limit=limit, deadline=deadline, thread_id=row["thread_id"],
-                                   batch_id=row["batch_id"], tool=row["tool"])
+                                   batch_id=row["batch_id"], tool=row["tool"], case_limit=row["case_limit"],
+                                   pilot_limit=Decimal(row["limit_usd"]))
             run_shadow(state, judge)
             return
         if args.operation == "start":
             report = pilot.activate()
+        elif args.operation == "extend":
+            report = pilot.extend(args.until)
         elif args.operation == "stop":
             report = pilot.stop()
         elif args.operation == "results":

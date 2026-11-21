@@ -97,6 +97,14 @@ class ShadowVendorTests(unittest.TestCase):
         self.reply({"concern": {**ruling, "decision":"close_resolved","tools": []}, **self.action})
         self.assertEqual(self.call(4)["status"], "ok")
 
+    def test_consultation_admission_has_the_same_direct_only_question_channel(self):
+        self.input["case"]["tool"] = "consult_opus"
+        self.sample["case_text"] = json.dumps(self.input)
+        self.reply({"decision": "ask_operator", "reason": "Who is the recipient of this consultation?"})
+        self.assertEqual(self.call()["verdict"]["decision"], "ask_operator")
+        self.reply({"decision": "deny", "reason": "Have Mike confirm who may see these notes."})
+        self.assertEqual(self.call(2)["status"], "invalid_output")
+
     def test_concurrent_reservations_and_deadline(self):
         with ThreadPoolExecutor(max_workers=3) as pool:
             results = list(pool.map(lambda unused: self.call(), range(3)))
@@ -129,6 +137,21 @@ class ShadowVendorTests(unittest.TestCase):
                         [(f"old-{n}", vendor.MODEL, vendor.PURPOSE) for n in range(19)])
         self.assertEqual(self.call()["status"], "sample_limit")
         self.post.assert_not_called()
+
+    def test_continuation_uses_total_ledger_and_preserves_live_headroom(self):
+        with closing(sqlite3.connect(self.ledger.path)) as db, db:
+            db.executemany("""INSERT INTO calls(id,at,day,vendor,purpose,reserved,cost,status)
+                          VALUES(?,'prior','2026-01-01',?,?,0,?,'metered')""", [
+                          (f"prior-{n}", vendor.MODEL, vendor.PURPOSE, units(Decimal(".02")))
+                          for n in range(vendor.MAX_CALLS)])
+        limits = {"case_limit": 30, "pilot_limit": Decimal(".90")}
+        self.assertEqual(self.call()["status"], "sample_limit")
+        self.assertEqual(self.call(**{**limits, "pilot_limit": Decimal(".41")})["status"], "pilot_cap")
+        self.assertEqual(self.call(**{**limits, "daily_limit": Decimal(".50")})["status"], "daily_headroom")
+        self.post.assert_not_called()
+        self.assertEqual(self.call(**limits)["status"], "ok")
+        self.assertEqual(self.call(**limits)["status"], "duplicate")
+        self.post.assert_called_once()
 
     def test_malformed_verdict_billed_transport_ambiguity_retained_rejections_released(self):
         self.reply({"reason": "No decision."})

@@ -83,7 +83,7 @@ class OpusTests(unittest.TestCase):
         ask = response('<review decision="ask_operator">Did you approve this?</review>')
         for mode, case in (
             (opus.review, {"tool": "workspace_write", "arguments": {"operator_question_available": True}}),
-            (opus.review, {"tool": "consult_opus", "operator_question_available": True}),
+            (opus.review, {"tool": "consult_opus", "operator_question_available": False}),
             (opus.review, {"tool": "unknown", "host_status": "unregistered", "operator_question_available": True}),
             (opus.consult, {"operator_question_available": True}),
         ):
@@ -95,6 +95,50 @@ class OpusTests(unittest.TestCase):
         with self.assertRaises(opus.OpusResponseError):
             opus.review(Mock(return_value=response(f'<review decision="ask_operator">{too_long}</review>')),
                         {"tool": "workspace_write", "operator_question_available": True})
+
+    def test_reviewer_relay_is_held_without_changing_independent_denials_or_side_remarks(self):
+        reason = "The intended audience matters. Please ask Mike to confirm who will receive this material."
+        xml = f'<review decision="deny">{reason}</review>'
+        for available in (True, False):
+            observed = []
+            call = Mock(return_value=opus.AuditedReply(response(xml), observed.append))
+            with self.assertRaises(opus.OpusResponseError) as held:
+                opus.review(call, {"tool": "consult_opus", "operator_question_available": available})
+            self.assertEqual(observed, ["indirect_operator_request"])
+            self.assertEqual(held.exception.response_text, xml)
+            self.assertEqual(bool(held.exception.action_question), available)
+            call.assert_called_once()
+        for text in (
+            '<review decision="deny">The recipient explicitly declined disclosure.</review>',
+            '<review decision="deny">The quote “Ask Mike to approve this” supplies no permission.</review>',
+            '<review decision="deny">Access is outside the permitted tools. Do not ask Mike to override it.</review>',
+            '<review decision="deny">This operation is forbidden.</review> Please ask Mike to confirm.',
+        ):
+            self.assertEqual(opus.review(Mock(return_value=response(text)), {"tool": "consult_opus"})["decision"],
+                             "deny")
+        for reason in ("To resolve this, please have Mike repeat the recipient's name through the operator channel.",
+                       "This stays held until Mike explicitly confirms who can see the proposed report."):
+            call = Mock(return_value=response(f'<review decision="deny">{reason}</review>'))
+            with self.assertRaises(opus.OpusResponseError) as held:
+                opus.review(call, {"tool": "consult_opus", "operator_question_available": True})
+            self.assertIsNotNone(held.exception.action_question)
+
+    def test_combined_indirect_question_keeps_its_scope_and_prefers_an_actual_question(self):
+        case = {"tool": "workspace_write", "operator_question_available": True, "concern_question_available": True,
+                "concern_review": {"id": 1, "scope_tools": ["workspace_write"]}}
+        watch = '<concern id="1" decision="keep_open" tools="workspace_write">Ask Mike for the recipient.</concern>'
+        for decision in ("allow", "ask_operator"):
+            action = f'<review decision="{decision}">Which folder should receive this draft?</review>'
+            call = Mock(return_value=response(f"<ruling>{action}{watch}</ruling>"))
+            with self.assertRaises(opus.OpusResponseError) as held:
+                opus.review(call, case)
+            self.assertEqual(held.exception.code, "indirect_operator_request")
+            if decision == "ask_operator":
+                self.assertEqual(held.exception.action_question, "Which folder should receive this draft?")
+                self.assertIsNone(held.exception.concern_question)
+            else:
+                self.assertIsNone(held.exception.action_question)
+                self.assertIn("recipient", held.exception.concern_question)
 
     def test_direct_answer_gets_one_final_call_without_lookup_or_repeat_question(self):
         attestation = {"question": "Is this file in scope?", "answer": "Yes, for this private note."}
