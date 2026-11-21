@@ -1,4 +1,4 @@
-"""Supervised public research and UTC budget information for independent turns."""
+"""Supervised public research and budget information for independent turns."""
 
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -6,6 +6,7 @@ import http.client
 import math
 
 from .budget import Budget, DAILY_USD, UNITS_PER_DOLLAR
+from .local_time import central_time
 from .opus import QueryRejected, public_search
 from .review_vendors import ReviewerVendors
 
@@ -32,8 +33,8 @@ RESEARCH_TOOL = {
 BUDGET_TOOL = {
     "name": "budget_status",
     "description": (
-        "Check today's OpenRouter spending, outstanding reservations and available funds, "
-        "the separate supervisor allowance, and the time until both budgets reset at midnight UTC."
+        "Check current US Central time, OpenRouter and supervisor spending, reservations, "
+        "and funds available. The next midnight UTC reset is also shown in US Central time."
     ),
     "inputSchema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
 }
@@ -67,6 +68,8 @@ def budget_status(arguments: dict, ledger: Budget, vendors: ReviewerVendors, *, 
     review_available = (Decimal(reviews["limit_usd"]) - Decimal(reviews["estimated_spend_usd"])
                         - Decimal(reviews["reserved_usd"]))
     return {
+        "as_of_central": central_time(now),
+        "reset_at_central": central_time(reset),
         "as_of_utc": now.isoformat(),
         "reset_at_utc": reset.isoformat(),
         "seconds_until_reset": math.ceil((reset - now).total_seconds()),

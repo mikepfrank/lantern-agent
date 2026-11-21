@@ -10,6 +10,7 @@ import sqlite3
 from .attachments import ImageAttachment, MAX_TURN_IMAGES
 from . import operator_release
 from .chat_text import trim_reply_segment
+from .local_time import central_time
 from .scheduler import SCHEMA, next_reset
 
 
@@ -240,7 +241,9 @@ class ChatStore:
             db.execute("UPDATE scheduler SET heartbeat_minutes=?,next_heartbeat=? WHERE id=1", (minutes, due))
             return {"heartbeat_minutes": minutes, "next_heartbeat": due}
 
-        return self._schedule_change(call_id, ["heartbeat", minutes], change)
+        result = self._schedule_change(call_id, ["heartbeat", minutes], change)
+        due = result["next_heartbeat"]
+        return {"next_heartbeat_central": central_time(due) if due else None, **result}
 
     def set_alarm(self, at_utc, note, *, call_id):
         if not isinstance(note, str) or not note.strip() or len(note) > 1000 or not isinstance(at_utc, str):
@@ -260,7 +263,8 @@ class ChatStore:
                                   (due.isoformat(), note)).lastrowid
             return {"alarm_id": alarm_id, "at_utc": due.isoformat(), "status": "pending"}
 
-        return self._schedule_change(call_id, ["alarm", due.isoformat(), note], change)
+        result = self._schedule_change(call_id, ["alarm", due.isoformat(), note], change)
+        return {"at_central": central_time(result["at_utc"]), **result}
 
     def cancel_alarm(self, alarm_id, *, call_id=None):
         if type(alarm_id) is not int or not 1 <= alarm_id <= 2**63 - 1:
@@ -283,10 +287,12 @@ class ChatStore:
             row = db.execute("SELECT heartbeat_minutes,next_heartbeat,budget_until FROM scheduler WHERE id=1").fetchone()
             alarms = db.execute("""SELECT id AS alarm_id,at_utc,note FROM alarms
                 WHERE status='pending' AND id>? ORDER BY id LIMIT 21""", (after_id,)).fetchall()
-            return {"utc_now": now, "heartbeat_minutes": row["heartbeat_minutes"],
-                    "next_heartbeat": row["next_heartbeat"],
-                    "budget_until": row["budget_until"] if (row["budget_until"] or "") > now else None,
-                    "pending_alarms": [dict(alarm) for alarm in alarms[:20]],
+            due = row["next_heartbeat"]
+            until = row["budget_until"] if (row["budget_until"] or "") > now else None
+            return {"central_now": central_time(now), "utc_now": now, "heartbeat_minutes": row["heartbeat_minutes"],
+                    "next_heartbeat_central": central_time(due) if due else None, "next_heartbeat": due,
+                    "budget_until_central": central_time(until) if until else None, "budget_until": until,
+                    "pending_alarms": [{"at_central": central_time(alarm["at_utc"]), **dict(alarm)} for alarm in alarms[:20]],
                     "next_after_id": alarms[19]["alarm_id"] if len(alarms) > 20 else None}
 
     @staticmethod
@@ -323,12 +329,12 @@ class ChatStore:
             if budget_check and not budget_check():
                 until = next_reset(now).isoformat()
                 db.execute("UPDATE scheduler SET budget_until=? WHERE id=1", (until,))
-                self._append(db, "system", f"Queued work is waiting for the daily budget reset at {until}.")
+                self._append(db, "system", f"Queued work is waiting for the daily budget reset at {central_time(until)}.")
                 return None
             if not messages:
                 if alarm:
                     db.execute("UPDATE alarms SET status='delivered' WHERE id=?", (alarm["id"],))
-                    text = (f"Scheduled alarm #{alarm['id']} (due {alarm['at_utc']}). "
+                    text = (f"Scheduled alarm #{alarm['id']} (due {central_time(alarm['at_utc'])}). "
                             "This is an automated reminder. Your saved note follows as quoted data.\n"
                             + json.dumps(alarm["note"], ensure_ascii=False))
                 else:
@@ -357,7 +363,7 @@ class ChatStore:
                 db.execute("INSERT INTO inbox(event_id) VALUES(?)", (event_id,))
             else:
                 db.execute("UPDATE inbox SET batch_id=NULL,steered=0 WHERE batch_id=?", (batch_id,))
-            receipt = self._append(db, "system", f"Turn {batch_id} is waiting for the daily budget reset at {until}.")
+            receipt = self._append(db, "system", f"Turn {batch_id} is waiting for the daily budget reset at {central_time(until)}.")
             db.execute("UPDATE batches SET status='deferred',outcome=? WHERE id=?", (receipt, batch_id))
 
     def bind_thread(self, batch_id: int, thread_id: str) -> None:

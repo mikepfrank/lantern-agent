@@ -83,7 +83,7 @@ class TransportTests(unittest.TestCase):
         payload, _ = self.wire[0]
         self.assertEqual([args[0] for args, _ in loader.call_args_list], [3, 4, 5, 6])
         self.assertIn("archived", payload["input"][0]["content"][1]["text"])
-        for item in payload["input"][2:]:
+        for item in [i for i in payload["input"] if i.get("role") == "user"][2:]:
             self.assertEqual(item["content"][1]["image_url"], "data:image/png;base64," + png)
             self.assertEqual(item["content"][1]["detail"], "high")
         self.assertEqual(self.observe.call_args.args[0], payload)
@@ -152,6 +152,25 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(200, self.request(prototype, tools=offered[:1])[0])
         self.assertEqual([t["name"] for t in self.wire[-1][0]["tools"]], names[:1])
 
+    def test_fresh_clock_precedes_latest_input_without_rewriting_history(self):
+        history = [{"role": "user", "content": "Previous turn, at noon UTC."},
+                   {"role": "assistant", "content": "Acknowledged."}]
+        current = {"role": "user", "content": "What time is it here?"}
+        calls = [{"type": "function_call", "name": "chess", "call_id": "one"},
+                 {"type": "function_call_output", "call_id": "one", "output": "result"}]
+        times = ["2026-11-21 11:50 CST (UTC-06:00)", "2026-11-21 12:01 CST (UTC-06:00)"]
+        with patch("lantern.transport.central_time", side_effect=times), self.gateway("fastest", resuming=True) as gate:
+            self.assertEqual(200, self.request(gate, input=history + [current] + calls)[0])
+            steer = {"role": "user", "content": "One follow-up from Mike."}
+            self.assertEqual(200, self.request(gate, input=history + [current] + calls + [steer])[0])
+        for wire, prefix, suffix, stamp in zip(self.wire, [history, history + [current] + calls],
+                                               [[current] + calls, [steer]], times):
+            inputs = wire[0]["input"]
+            self.assertEqual(inputs[:len(prefix)], prefix)
+            self.assertEqual(inputs[len(prefix)]["role"], "developer")
+            self.assertIn(stamp, inputs[len(prefix)]["content"][0]["text"])
+            self.assertEqual(inputs[len(prefix) + 1:], suffix)
+
     def test_retired_call_receipts_cover_only_matching_inert_history(self):
         history = [{"type": "function_call", "name": "workspace_read", "call_id": "earlier"},
                    {"type": "function_call_output", "call_id": "earlier", "output": "from private notes"}]
@@ -165,7 +184,7 @@ class TransportTests(unittest.TestCase):
             self.stream = event("response.output_item.done", item=history[0])
             _, response = self.request(gate, input=history)
         receipts.assert_called_once()
-        self.assertEqual(self.wire[0][0]["input"], history)
+        self.assertEqual(self.wire[0][0]["input"][1:], history)
         self.assertEqual([t["name"] for t in self.wire[0][0]["tools"]], ["chess"])
         self.assertNotIn(b"workspace_read", response)
         self.unregistered.assert_called_once_with("workspace_read", None)
@@ -194,7 +213,7 @@ class TransportTests(unittest.TestCase):
                 self.assertEqual(self.observe.call_args.args[0], sent)
                 self.assertIn("Authenticated private operator.", sent["instructions"])
                 self.assertIn("Pinned base instructions.", sent["instructions"])
-                self.assertEqual(sent["input"], "A move?")
+                self.assertEqual(sent["input"][-1], {"role": "user", "content": "A move?"})
                 return sent["instructions"]
 
             self.assertIn("notes/handoff.md", send(declared))
@@ -350,7 +369,7 @@ class TransportTests(unittest.TestCase):
 
         @contextmanager
         def upstream(body, headers):
-            if json.loads(body)["input"] == "original":
+            if json.loads(body)["input"][-1]["content"] == "original":
                 waiting.set()
                 if not release.wait(4):
                     raise TimeoutError("Test did not release provider")

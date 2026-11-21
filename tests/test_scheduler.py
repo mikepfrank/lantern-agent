@@ -7,6 +7,7 @@ import unittest
 
 from lantern.chat_store import ChatStore
 from lantern.chat_worker import process_batch
+from lantern.local_time import central_time
 from lantern.scheduler import DailyBudgetHold, dispatch_schedule, next_reset
 
 
@@ -41,10 +42,12 @@ class SchedulerTests(unittest.TestCase):
                 store.configure_heartbeat(invalid)
         paused = dispatch_schedule(store, "call-a", "heartbeat", {"minutes": 0})
         self.assertIsNone(paused["next_heartbeat"])
+        self.assertIsNone(paused["next_heartbeat_central"])
         store.initialize_heartbeat(60)
         self.now += timedelta(days=3)
         self.assertIsNone(store.claim())
         update = store.configure_heartbeat(5, call_id="call-b")
+        self.assertEqual(update["next_heartbeat_central"], central_time(update["next_heartbeat"]))
         self.now += timedelta(minutes=2)
         self.assertEqual(update, store.configure_heartbeat(5, call_id="call-b"))
         self.assertIsNone(store.claim())
@@ -58,6 +61,7 @@ class SchedulerTests(unittest.TestCase):
         second = self.store.set_alarm("2026-11-19T18:05Z", "Cancel me", call_id="alarm-2")
         self.assertEqual("cancelled", self.store.cancel_alarm(second["alarm_id"], call_id="cancel-1")["status"])
         self.assertEqual("2026-11-19T18:04:00+00:00", first["at_utc"])
+        self.assertEqual(first["at_central"], central_time(first["at_utc"]))
         self.now += timedelta(minutes=8)
         self.assertEqual(first, dispatch_schedule(self.reopen(), "alarm-1", "set_alarm", alarm_input))
         with self.assertRaisesRegex(ValueError, "different schedule change"):
@@ -70,6 +74,7 @@ class SchedulerTests(unittest.TestCase):
         alarm = self.store.claim()
         self.assertEqual("system", alarm.messages[0].role)
         self.assertIn("Scheduled alarm", alarm.messages[0].text)
+        self.assertIn(first["at_central"], alarm.messages[0].text)
         self.assertIn(r"Try a line.\n", alarm.messages[0].text)
         steered = self.store.submit("Actually, stop")
         self.assertEqual([steered], [event.id for event in self.store.claim_steer(alarm.id)])
@@ -95,6 +100,16 @@ class SchedulerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dispatch_schedule(self.store, "unexpected", "heartbeat", {"minutes": 60, "days": 1})
 
+    def test_schedule_shows_daylight_and_standard_times_for_the_repeated_hour(self):
+        self.now = datetime(2026, 11, 1, 6, 30, tzinfo=timezone.utc)
+        self.store.configure_heartbeat(60)
+        self.store.set_alarm("2026-11-01T01:30:00-06:00", "After the clock change", call_id="fall")
+        result = dispatch_schedule(self.store, "read", "schedule_status", {})
+        self.assertIn("CDT", result["central_now"])
+        self.assertIn("CST", result["next_heartbeat_central"])
+        self.assertEqual(result["next_heartbeat_central"], result["pending_alarms"][0]["at_central"])
+        self.assertEqual(result["next_heartbeat"], "2026-11-01T07:30:00+00:00")
+
     def test_budget_holds_work_and_wakes_across_restart_until_exact_utc_reset(self):
         self.now = self.now.replace(hour=23, minute=59)
         self.store.initialize_heartbeat(60)
@@ -102,6 +117,8 @@ class SchedulerTests(unittest.TestCase):
         self.assertIsNone(self.store.claim(budget_check=lambda: False))
         cutoff = next_reset(self.now)
         self.assertEqual(cutoff.isoformat(), self.store.schedule_status()["budget_until"])
+        self.assertEqual(central_time(cutoff), self.store.schedule_status()["budget_until_central"])
+        self.assertIn(central_time(cutoff), self.store.recent(1)[0].text)
         store = self.reopen()
         self.now = cutoff - timedelta(microseconds=1)
         self.assertIsNone(store.claim(budget_check=lambda: self.fail("Cap check repeated while held")))

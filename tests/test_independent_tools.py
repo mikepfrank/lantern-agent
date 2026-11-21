@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from lantern.budget import Budget, BudgetUnavailable, units
 from lantern.independent_tools import BUDGET_TOOL, RESEARCH_TOOL, budget_status, can_start_request, web_search
+from lantern.local_time import central_time
 from lantern.review_vendors import ReviewerVendors
 from lantern.supervision import supervised_tools
 
@@ -38,6 +39,9 @@ class IndependentToolsTests(unittest.TestCase):
                                                                        tzinfo=timezone.utc))
             self.assertEqual(status["seconds_until_reset"], 1)
             self.assertEqual(status["reset_at_utc"], "2027-01-01T00:00:00+00:00")
+            self.assertEqual(status["as_of_central"], central_time(status["as_of_utc"]))
+            self.assertEqual(status["reset_at_central"], central_time(status["reset_at_utc"]))
+            self.assertIn("CST", status["reset_at_central"])
             self.assertEqual(status["openrouter"]["available_usd"], "6.75")
             self.assertEqual(status["supervisors"]["limit_usd"], "6.25")
             self.assertEqual(status["supervisors"]["available_usd"], "6.125")

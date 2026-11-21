@@ -28,11 +28,12 @@ SCHEDULE_TOOLS = [
           "Use 0 to pause, or 5 through 10080 to enable or adjust. One-shot alarms are separate.",
           {"minutes": {"type": "integer", "minimum": 0, "maximum": 10080}}),
     _tool("set_alarm", "Set a one-time reminder to yourself. Supply a future ISO 8601 timestamp "
-          "with a timezone, and a brief note. You can read it when the worker wakes.",
+          "with the UTC offset for that date, and a brief note. US Central offsets are "
+          "-06:00 during standard time and -05:00 during daylight time.",
           {"at_utc": {"type": "string"}, "note": {"type": "string", "minLength": 1, "maxLength": 1000}}),
     _tool("cancel_alarm", "Cancel a pending one-time reminder using its alarm ID.",
           {"alarm_id": {"type": "integer", "minimum": 1}}),
-    {"name": "schedule_status", "description": "Read UTC time, heartbeat settings, pending alarms and "
+    {"name": "schedule_status", "description": "Read the current US Central time, heartbeat settings, pending alarms and "
      "any daily budget pause. Use next_after_id as after_id to see another page.",
      "inputSchema": {"type": "object", "additionalProperties": False, "required": [],
                      "properties": {"after_id": {"type": "integer", "minimum": 0}}}},

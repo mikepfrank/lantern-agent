@@ -32,7 +32,9 @@ The [pilot deployment guide](deploy/README.md) covers the private systemd servic
 
 ### Independent work
 
-The Lightsail worker accepts timed wakeups in the same private room. Run `lantern schedule` to see the heartbeat interval, next wake, pending reminders and any budget pause (all times UTC). From a `lantern` login shell, `lantern heartbeat 0` pauses periodic wakes and `lantern heartbeat 60` schedules them hourly. One-time alarms have their own schedule. Lantern can adjust either through supervised tools. The initial hourly setting is applied once, and the first heartbeat is due when the worker becomes idle. Human messages take priority. Missed heartbeats coalesce into one wake after downtime.
+Lantern receives the current US Central date and time for greetings and scheduling. Its schedule and budget tools show local times with the CST or CDT abbreviation and UTC offset. Daily spending allowances reset at midnight UTC, which falls at 6 p.m. Central in winter and 7 p.m. in summer.
+
+The Lightsail worker accepts timed wakeups in the same private room. Run `lantern schedule` to see the heartbeat interval, next wake, pending reminders and any budget pause. From a `lantern` login shell, `lantern heartbeat 0` pauses periodic wakes and `lantern heartbeat 60` schedules them hourly. One-time alarms have their own schedule. Lantern can adjust either through supervised tools. The initial hourly setting is applied once, and the first heartbeat is due when the worker becomes idle. Human messages take priority. Missed heartbeats coalesce into one wake after downtime.
 
 Lantern can list, read and write UTF-8 notes and source files relative to `~/.local/state/lantern/workspace/files/`. Updating an existing file requires the digest returned by the read tool. The worker separately provides read-only access to the private heritage archive.
 
@@ -46,7 +48,7 @@ When something fails, Lantern can call `harness_logs` for recent operational rec
 
 ## Run locally
 
-Use Python 3.11 or later, a compatible native Codex CLI on your PATH, and `OPENROUTER_API_KEY`, `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` in the operator environment. The Anthropic organization needs legacy access to `claude-3-opus-20240229`. The Python harness uses the standard library. Codex receives a short-lived loopback token. Provider keys stay in the operator process.
+Use Python 3.11 or later, a compatible native Codex CLI on your PATH, and `OPENROUTER_API_KEY`, `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` in the operator environment. The Anthropic organization needs legacy access to `claude-3-opus-20240229`. The harness uses Python’s standard library and the IANA time zone database. On Windows, install the time zone data with `python -m pip install tzdata` if needed. Codex receives a short-lived loopback token. Provider keys stay in the operator process.
 
 ```sh
 python -m lantern say "Hello, Lantern."

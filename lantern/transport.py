@@ -16,6 +16,7 @@ import time
 
 from .attachments import MAX_IMAGE_BYTES, MAX_TURN_IMAGES, SIGNATURE
 from .image_ref import parse_reference
+from .local_time import central_time
 
 
 MODEL = "qwen/qwen3.8-27b"
@@ -203,6 +204,18 @@ def _handoff_event(prepared, handoff_due):
         prepared["instructions"] = instructions + "\n\n" + HANDOFF_REMINDER if instructions else HANDOFF_REMINDER
         return "reminded"
     return None
+
+
+def _with_operator_clock(items):
+    """Add current host metadata beside the latest input, leaving stored history and its cacheable prefix intact."""
+    if isinstance(items, str):
+        items = [{"role": "user", "content": items}]
+    latest_user = next((i for i in range(len(items) - 1, -1, -1) if items[i].get("role") == "user"), 0)
+    clock = {"role": "developer", "content": [{"type": "input_text", "text":
+        f"Current time for the operator (US Central): {central_time()}. "
+        "Use this local date and time for greetings and calendar references. "
+        "Codex environment timestamps describe the server."}]}
+    return items[:latest_user] + [clock] + items[latest_user:]
 
 
 @contextmanager
@@ -478,6 +491,7 @@ class OpenRouterGateway:
                         event = _handoff_event(prepared, gateway.handoff_due)
                         if event:
                             evidence["handoff_event"] = event
+                    prepared["input"] = _with_operator_clock(prepared["input"])
                     body = json.dumps(prepared, allow_nan=False, separators=(",", ":")).encode()
                 except (KeyError, ValueError, TypeError, RecursionError, OSError) as exc:
                     evidence["error"] = str(exc) if isinstance(exc, ProtocolError) else "malformed request"

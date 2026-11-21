@@ -105,6 +105,10 @@ class NativeCodexSmoke(unittest.TestCase):
                 self.assertIn("Michael P. Frank", instructions)
                 self.assertIn("only human", instructions.lower())
             history = request["input"]
+            latest_user = max(i for i, item in enumerate(history) if item.get("role") == "user")
+            clock = history[latest_user - 1]
+            self.assertEqual(clock["role"], "developer")
+            self.assertIn("Current time for the operator (US Central)", clock["content"][0]["text"])
             first_user = next(i for i, item in enumerate(history) if item.get("role") == "user")
             developers = [part["text"] for item in history[:first_user] if item.get("role") == "developer"
                           for part in item["content"] if part["type"] == "input_text"]
