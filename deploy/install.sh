@@ -141,6 +141,11 @@ install -o root -g root -m 0600 "$stage/worker.env" /etc/lantern/worker.env
 install -o root -g root -m 0755 "$src/deploy/lantern" /usr/local/bin/lantern
 install -o root -g root -m 0644 "$src/deploy/$unit" "/etc/systemd/system/$unit"
 install -o root -g root -m 0644 "$src/deploy/lantern-review-shadow.service" /etc/systemd/system/
+# Both browser services use the same systemd restrictions. Public sign-in has
+# its own loopback port, credentials and opt-in HTTPS origin.
+install -o root -g root -m 0644 "$src/deploy/lantern-web.service" /etc/systemd/system/lantern-admin-web.service
+install -d -m 0755 /etc/systemd/system/lantern-admin-web.service.d
+install -o root -g root -m 0644 "$src/deploy/lantern-admin-web.conf" /etc/systemd/system/lantern-admin-web.service.d/origin.conf
 mv -Tf -- "$stage/worker-current" "$base/worker-current"
 if ! $worker_only; then
     install -o root -g root -m 0644 "$src/deploy/lantern-web.service" /etc/systemd/system/
@@ -156,4 +161,5 @@ fi
 systemctl enable lantern-web.service
 systemctl restart lantern-web.service
 systemctl is-active --quiet lantern-web.service
+systemctl try-restart lantern-admin-web.service
 printf 'Lantern release %s active; run lantern in the lantern account.\n' "$revision"

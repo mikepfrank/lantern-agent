@@ -170,7 +170,7 @@ class NativeIndependentWorker(unittest.TestCase):
                 self.assertEqual(store.status()["thread_id"], tid)
                 self.assertEqual(len(requests), 8)
                 self.assertIn("coding_run", {tool["name"] for tool in requests[5]["tools"]})
-                self.assertIn("SSH-forwarded browser", requests[5]["instructions"])
+                self.assertIn("administrator sign-in or his SSH operator link", requests[5]["instructions"])
                 self.assertIn("Python offline-coding-fixture", json.dumps(requests[-1]["input"]))
                 self.assertIn("private journal is saved", json.dumps(requests[-1]["input"]))
                 diagnostic = next(item for item in requests[-1]["input"] if item.get("type") == "function_call_output"

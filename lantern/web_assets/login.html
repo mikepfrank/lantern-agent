@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Lantern · Administrator sign-in</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/room.css">
+  <script src="/login.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <div class="brand"><span class="lamp" aria-hidden="true"></span>Lantern</div>
+    </div>
+  </header>
+  <main class="sign-in">
+    <form method="post" id="login-form" class="sign-in-card">
+      <h1>Administrator sign-in</h1>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+      <button type="submit" id="login-submit" disabled>Sign in</button>
+      <p role="alert" id="login-error"></p>
+      <noscript>Enable JavaScript to sign in to Lantern.</noscript>
+    </form>
+  </main>
+</body>
+</html>

@@ -81,6 +81,31 @@ button:disabled, textarea:disabled { cursor: default; }
   color: var(--muted);
 }
 .connection i { width: .48rem; height: .48rem; border-radius: 50%; background: currentColor; }
+.room-actions { display: flex; align-items: center; gap: clamp(.55rem, 3vw, 1.15rem); }
+#sign-out {
+  font-size: .86rem; padding: .45rem .7rem; color: var(--ink);
+  border: 1px solid var(--edge); border-radius: .45rem; background: transparent;
+}
+#sign-out:hover { border-color: var(--muted); }
+.sign-in { justify-content: flex-start; padding-top: clamp(2.5rem, 12vh, 7rem); }
+.sign-in-card {
+  width: min(100%, 24rem); margin-inline: auto;
+  padding: clamp(1.2rem, 4vw, 2rem); border: 1px solid var(--edge);
+  border-radius: .85rem; background: #202222;
+}
+.sign-in-card h1 { margin-bottom: 1.5rem; }
+.sign-in-card label { display: block; margin-bottom: .45rem; font-size: .93rem; }
+.sign-in-card input {
+  width: 100%; padding: .65rem .75rem; color: var(--ink); border: 1px solid #625f59;
+  border-radius: .45rem; background: #171919; font: inherit;
+}
+.sign-in-card button {
+  width: 100%; margin-top: 1.15rem; padding: .65rem; border: 0; border-radius: .45rem;
+  color: #302313; background: var(--amber); font-weight: 650;
+}
+.sign-in-card button:disabled { opacity: .65; }
+#login-error { margin: .8rem 0 0; color: #f2b2a1; font-size: .9rem; }
+#login-error:empty { margin: 0; }
 .connection[data-state="live"] i { background: var(--teal); }
 .connection[data-state="offline"], .connection[data-state="locked"] { color: #edbb99; }
 main { display: flex; flex: 1; min-height: 0; flex-direction: column; padding-bottom: max(1.15rem, env(safe-area-inset-bottom)); }

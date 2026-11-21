@@ -1,6 +1,6 @@
 # Lightsail private chat and coding pilot
 
-The systemd worker serves the private `lantern` account over its local SQLite chat queue. The operator can leave the SSH session and return later. There is no public listener, DNS record, or reverse proxy for this pilot.
+The systemd worker serves the private `lantern` account over its local SQLite chat queue. The private SSH room and the optional administrator HTTPS room use that same queue.
 
 ## Install a reviewed revision
 
@@ -22,7 +22,7 @@ sudo systemctl status --no-pager lantern-chat.service
 sudo -iu lantern lantern status
 ```
 
-The installer uses the verified Codex 0.169.0 archive staged during the host maintenance. An optional archive argument after the revision selects another copy of that same archive, with the digest checked on first installation. It installs the complete runtime under `/opt/lantern/runtime/` and the Python app with its persona under `/opt/lantern/releases/<revision>/`. The launcher resolves the selected archive at process startup. The `worker`, `say`, and `smoke` commands use `/opt/lantern/worker-current` when installed. Other commands use `/opt/lantern/current`. The private state remains in `/home/lantern/.local/state/lantern`, including the existing usage and persona records.
+The installer uses the verified Codex 0.169.0 archive staged during the host maintenance. An optional archive argument after the revision selects another copy of that same archive, with the digest checked on first installation. It installs the complete runtime under `/opt/lantern/runtime/` and the Python app with its persona under `/opt/lantern/releases/<revision>/`. The launcher resolves the selected archive at process startup. Worker, review administration, usage and administrator sign-in commands use `/opt/lantern/worker-current` when installed. The SSH browser and its link command use `/opt/lantern/current`. The private state remains in `/home/lantern/.local/state/lantern`, including the existing usage and persona records.
 
 The installer obtains the three API keys in a login shell running as `lantern` and writes only those values to `/etc/lantern/worker.env` with root-only permissions. The unit reads this file before starting the worker as `lantern`. Codex receives the loopback token from the worker. The unit mounts the system read-only, hides the home directories except for the bound state directory, and disallows privilege elevation.
 
@@ -56,6 +56,31 @@ Repeating the same deadline preserves the original grant even after it expires. 
 
 Use `lantern reviewer-pilot status` for counts and spending, or `lantern reviewer-pilot results` for private, per-case decisions, reasons, costs, and timings. Agreement covers the proposed action and each concern's disposition and tool scope. Evaluate differing reasons and proposed operator questions against Mike's recorded permissions. To close the pilot early, run `lantern reviewer-pilot stop`. A call already in flight can finish settling. The collector exits when collection ends.
 
+## Administrator sign-in
+
+The installer provides `lantern-admin-web.service` on loopback port 8766. To opt in, create `/etc/lantern/admin-web.env` as root with mode 0600. Set `LANTERN_PUBLIC_ORIGIN=https://lantern.example.net`, replacing the example with the exact HTTPS origin you own. Set the password in an interactive terminal, then start the service.
+
+```sh
+sudo -u lantern -H /usr/local/bin/lantern web-admin set-password
+sudo systemctl enable --now lantern-admin-web.service
+```
+
+Only the operator's shell can set a password. The host stores a salted password digest and digests of expiring session tokens in the private state file `web-auth.sqlite`. The password and tokens stay outside the conversation and the coding workspace. Eight unsuccessful password checks in five minutes temporarily limit sign-in. To revoke every administrator session while keeping the password, run:
+
+```sh
+sudo -u lantern -H /usr/local/bin/lantern web-admin revoke-sessions
+```
+
+Once the hostname resolves to the instance, add its own site to the existing HTTPS proxy. This example uses Caddy. Preserve the browser's Host and Origin headers. Keep both backend ports bound to loopback. The SSH room on port 8765 uses a separate credential.
+
+```caddyfile
+lantern.example.net {
+    reverse_proxy 127.0.0.1:8766
+}
+```
+
+On the shared Lightsail host, use the existing Caddy configuration lock and validation/reload procedure. Verify certificate trust, a signed-out visit, and access to the existing room after signing in. Restart the administrator service after changing its configured origin. A normal restart preserves sessions. The operator can recover access by setting a fresh password over SSH.
+
 ## Chat
 
 From the laptop's normal terminal:
@@ -70,7 +95,7 @@ The unit passes `--heartbeat-minutes 60`. At startup the worker uses its active 
 
 ## Browser
 
-Use the [SSH command in the project README](../README.md#talk-to-lantern-on-lightsail) on the laptop. The local and remote ports must both be 8765. Only the private SSH tunnel carries browser traffic. The web service listens on host loopback, issues a fresh key at startup, and saves it in the owner-only `web-key` file in Lantern's private state. The operator link passes the key in the URL fragment. The browser clears it from the address bar and authenticates API requests from the tab. To rotate access, restart `lantern-web.service` and get a fresh link. Starting or stopping the web service does not interrupt the model worker.
+Use the [SSH command in the project README](../README.md#talk-to-lantern-on-lightsail) on the laptop. The local and remote ports for the SSH room are both 8765. Its web service listens on host loopback, issues a fresh key at startup, and saves it in the owner-only `web-key` file in Lantern's private state. The operator link passes the key in the URL fragment. The browser clears it from the address bar and authenticates API requests from the tab. To rotate tunnel access, restart `lantern-web.service` and get a fresh link. Starting or stopping the web service does not interrupt the model worker.
 
 ## Coding environment
 
@@ -78,7 +103,7 @@ For a PDF viewer upgrade, install the coding broker and image first, then update
 
 For a new installation, make the seed with `git bundle create lantern.bundle --branches --tags` from the reviewed repository. The coding installer builds a dedicated Python and Git image. Only the broker can reach Docker. The worker sends approved commands over `/run/lantern-code.sock`. Docker uses a pinned local image ID and starts a fresh unprivileged container with its own process namespace, offline networking, a read-only root and a writable coding volume. Each command gets 30 seconds, half a CPU, 256 MiB of RAM, 64 processes and 16 KiB of output. The 256 MiB ext4 volume is backed by `/var/lib/lanterncode/work.ext4` and mounts across boots.
 
-The full editable clone is `/work/lantern`, also available as `~/src/lantern` inside the container. This differs from the operator checkout in the host's `~lantern/src/lantern`. The installer seeds the coding clone once. Subsequent service updates preserve branches and uncommitted work. GitHub publication needs a separate host-side proposal tool. The worker loads the root-owned release under `/opt/lantern/worker-current`, and the browser loads its release under `/opt/lantern/current`.
+The full editable clone is `/work/lantern`, also available as `~/src/lantern` inside the container. This differs from the operator checkout in the host's `~lantern/src/lantern`. The installer seeds the coding clone once. Subsequent service updates preserve branches and uncommitted work. GitHub publication needs a separate host-side proposal tool. The worker loads the root-owned release under `/opt/lantern/worker-current`, as does the password-authenticated browser. The SSH-link browser loads its release under `/opt/lantern/current`.
 
 The same broker accepts a supervised one-page PDF rendering request. Poppler runs in a separate disposable, offline container with one read-only mount. An absolute `/work/` PDF comes from the coding volume. For `heritage/lmstudio-chat.pdf`, the mount contains only the operator-provisioned PDF. The installer verifies its digest against the private page-text companion and stages it under the root-only `/var/lib/lanterncode` directory. Pages fit within 1,600 pixels per side and 1 MiB of PNG data. Rerun the coding installer after replacing or removing the heritage archive. A standalone coding deployment can operate with workspace PDFs alone.
 

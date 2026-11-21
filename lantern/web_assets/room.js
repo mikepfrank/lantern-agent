@@ -16,22 +16,46 @@ const reviewAnswer = byId("review-answer");
 const reviewSubmit = byId("review-submit");
 const idleHint = matchMedia("(pointer: fine)").matches ? "Enter to send · Shift + Enter for a new line" : "";
 const storageKey = (name) => "lantern.room." + name;
+const cookieRoom = location.protocol === "https:";
+const signOut = byId("sign-out");
+let authenticated = cookieRoom;
+
+function clearPrivateStorage() {
+  try {
+    for (const name of Object.keys(sessionStorage)) {
+      if (name.startsWith(storageKey(""))) sessionStorage.removeItem(name);
+    }
+  } catch { /* Private browsing can disable storage. */ }
+}
 
 function stored(name) {
   try { return sessionStorage.getItem(storageKey(name)); } catch { return null; }
 }
 
 function remember(name, value) {
+  if (cookieRoom && !authenticated) return;
   try {
     if (value === null) sessionStorage.removeItem(storageKey(name));
     else sessionStorage.setItem(storageKey(name), value);
   } catch { /* Chat still works for the lifetime of this tab. */ }
 }
 
-const fragmentKey = new URLSearchParams(location.hash.slice(1)).get("key");
+// The HTTPS room uses only its HttpOnly session cookie. The loopback SSH
+// room retains its separate fragment-key and bearer-header flow.
+const fragmentKey = !cookieRoom && new URLSearchParams(location.hash.slice(1)).get("key");
 if (location.hash) history.replaceState(null, "", location.pathname);
 if (fragmentKey) remember("key", fragmentKey);
-let key = fragmentKey || stored("key");
+const linkKey = cookieRoom ? null : fragmentKey || stored("key");
+authenticated = cookieRoom || Boolean(linkKey);
+if (cookieRoom) {
+  try {
+    const epoch = localStorage.getItem("lantern.signin.epoch");
+    if (epoch !== stored("epoch")) {
+      clearPrivateStorage();
+      remember("epoch", epoch);
+    }
+  } catch { /* Cookies suffice when browser storage is disabled. */ }
+}
 let pending;
 try { pending = JSON.parse(stored("pending")); } catch { pending = null; }
 draft.value = pending ? pending.text : (stored("draft") || "");
@@ -65,11 +89,11 @@ function connection(state, label) {
 }
 
 function controls() {
-  draft.disabled = !key || !initialized;
+  draft.disabled = !authenticated || !initialized;
   draft.readOnly = Boolean(pending);
-  attach.disabled = !key || !initialized || Boolean(pending) || preparingImage;
+  attach.disabled = !authenticated || !initialized || Boolean(pending) || preparingImage;
   byId("image-remove").disabled = Boolean(pending) || preparingImage;
-  send.disabled = !key || !initialized || sending || preparingImage || (!draft.value.trim() && !attachment);
+  send.disabled = !authenticated || !initialized || sending || preparingImage || (!draft.value.trim() && !attachment);
   send.firstChild.textContent = sending ? "Sending " : pending ? "Retry send " : "Send ";
   const state = byId("send-state");
   state.dataset.error = String(Boolean(sendError));
@@ -78,7 +102,25 @@ function controls() {
 }
 
 function locked() {
-  key = null;
+  authenticated = false;
+  if (cookieRoom) {
+    // Conceal the previous session immediately while the server selects the
+    // new landing page. Also remove private drafts, images and pending sends.
+    document.body.hidden = true;
+    clearTimeout(timer);
+    clearPrivateStorage();
+    pending = null;
+    attachment = null;
+    draft.value = "";
+    reviewAnswer.value = "";
+    if (reviewDialog.open) reviewDialog.close();
+    if (imageDialog.open) imageDialog.close();
+    feed.replaceChildren();
+    byId("image-preview").removeAttribute("src");
+    byId("image-full").removeAttribute("src");
+    location.replace("/");
+    return;
+  }
   remember("key", null);
   connection("locked", "Link required");
   byId("worker").textContent = "";
@@ -101,8 +143,9 @@ async function request(path, body, responseType = "json") {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
-    const headers = { Authorization: "Bearer " + key };
-    const options = { headers, signal: controller.signal, cache: "no-store", credentials: "omit", redirect: "error" };
+    const headers = cookieRoom ? {} : { Authorization: "Bearer " + linkKey };
+    const options = { headers, signal: controller.signal, cache: "no-store",
+      credentials: cookieRoom ? "same-origin" : "omit", redirect: "error" };
     if (body) {
       options.method = "POST";
       headers["Content-Type"] = "application/json";
@@ -114,7 +157,9 @@ async function request(path, body, responseType = "json") {
       const detail = await response.json().catch(() => ({}));
       throw new RequestError(response.status, detail.error || "Request failed.");
     }
-    return responseType === "image" ? await response.blob() : await response.json();
+    const result = responseType === "image" ? await response.blob() : await response.json();
+    if (!authenticated) throw new RequestError(401, "Session ended.");
+    return result;
   } finally {
     clearTimeout(timeout);
   }
@@ -261,13 +306,13 @@ function updateReviewQueue(items) {
 }
 
 async function pollReviews() {
-  if (!key || document.hidden || reviewSending || reviewFetching || Date.now() < nextReviewPoll) return;
+  if (!authenticated || document.hidden || reviewSending || reviewFetching || Date.now() < nextReviewPoll) return;
   const revision = reviewRevision;
   reviewFetching = true;
   try {
     const page = await request("/api/review-questions");
     // A fetch started before a submission can still include the answered question.
-    if (revision === reviewRevision && key) {
+    if (revision === reviewRevision && authenticated) {
       const notice = byId("review-notice");
       if (notice.dataset.offline) {
         notice.textContent = "";
@@ -276,7 +321,7 @@ async function pollReviews() {
       updateReviewQueue(page.questions);
     }
   } catch {
-    if (key && revision === reviewRevision) {
+    if (authenticated && revision === reviewRevision) {
       const notice = byId("review-notice");
       notice.dataset.offline = "true";
       notice.textContent = "Couldn’t check for Opus questions. Retrying…";
@@ -323,11 +368,11 @@ byId("review-form").addEventListener("submit", async (event) => {
   byId("review-error").textContent = "";
   try {
     await request("/api/review-questions/" + encodeURIComponent(id) + "/answer", { answer: reviewAnswer.value });
-    if (!key) return;
+    if (!authenticated) return;
     updateReviewQueue(reviewQuestions.filter((item) => item.id !== id));
     byId("review-notice").textContent = "Your answer to Opus was recorded.";
   } catch (error) {
-    if (!key) return;
+    if (!authenticated) return;
     if ([404, 409, 410].includes(error.status)) {
       updateReviewQueue(reviewQuestions.filter((item) => item.id !== id));
       byId("review-notice").textContent = "That question is no longer pending.";
@@ -371,11 +416,11 @@ function messageImage(event) {
   button.append(image, retry);
   let loading = false;
   async function load() {
-    if (loading || !key) return;
+    if (loading || !authenticated) return;
     loading = true;
     try {
       const blob = await request("/api/messages/" + event.id + "/image", undefined, "image");
-      if (!key) return;
+      if (!authenticated) return;
       image.src = URL.createObjectURL(blob);
       image.hidden = false;
       retry.hidden = true;
@@ -474,7 +519,7 @@ function appendEvents(rows) {
 }
 
 async function poll() {
-  if (polling || !key) return;
+  if (polling || !authenticated) return;
   clearTimeout(timer);
   polling = true;
   let delay = 1500;
@@ -502,16 +547,16 @@ async function poll() {
     updateWorker(page.status);
     void pollReviews();
   } catch {
-    if (key) {
+    if (authenticated) {
       connection("offline", "Reconnecting");
       byId("worker").textContent = "";
-      if (!initialized) byId("empty").textContent = "Waiting for the SSH connection…";
+      if (!initialized) byId("empty").textContent = cookieRoom ? "Waiting for Lantern…" : "Waiting for the SSH connection…";
       delay = 3500;
     }
   } finally {
     polling = false;
     controls();
-    if (key) timer = setTimeout(poll, delay);
+    if (authenticated) timer = setTimeout(poll, delay);
   }
 }
 
@@ -528,9 +573,9 @@ older.addEventListener("click", async () => {
     historyView.scrollTop += anchor.getBoundingClientRect().top - offset;
     syncJump();
   } catch {
-    if (key) byId("announcer").textContent = "Earlier messages could not be loaded. Try again.";
+    if (authenticated) byId("announcer").textContent = "Earlier messages could not be loaded. Try again.";
   } finally {
-    older.disabled = !key;
+    older.disabled = !authenticated;
   }
 });
 
@@ -565,7 +610,7 @@ byId("composer").addEventListener("submit", async (event) => {
       remember("pending", null);
       if (attachment) remember("image-draft", JSON.stringify(attachment));
       sendError = error.message;
-    } else if (key) {
+    } else if (authenticated) {
       sendError = "Delivery unconfirmed. Retry send to check or deliver this message.";
     }
   } finally {
@@ -590,11 +635,35 @@ jump.addEventListener("click", latest);
 historyView.addEventListener("scroll", syncJump, { passive: true });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void poll(); });
 window.addEventListener("online", poll);
-window.addEventListener("hashchange", () => {
-  // Opening a fresh link in this same tab can be a same-document navigation.
-  if (new URLSearchParams(location.hash.slice(1)).has("key")) location.reload();
-});
+if (cookieRoom) {
+  signOut.hidden = false;
+  signOut.addEventListener("click", async () => {
+    signOut.disabled = true;
+    try {
+      await request("/api/sign-out", {});
+      try { localStorage.removeItem("lantern.signin.epoch"); } catch { /* Optional. */ }
+      locked();
+    } catch {
+      if (authenticated) {
+        byId("review-notice").textContent = "Couldn’t confirm sign-out. Check your connection and try again.";
+        signOut.disabled = false;
+      }
+    }
+  });
+  window.addEventListener("storage", event => {
+    if (event.key === "lantern.signin.epoch") locked();
+  });
+  // A back/forward cache can retain an entire rendered page. Recheck the
+  // server before displaying that page on a restored navigation.
+  window.addEventListener("pagehide", () => { document.body.hidden = true; });
+  window.addEventListener("pageshow", event => { if (event.persisted) location.reload(); });
+} else {
+  window.addEventListener("hashchange", () => {
+    // Opening a fresh SSH link in this same tab can be a same-document navigation.
+    if (new URLSearchParams(location.hash.slice(1)).has("key")) location.reload();
+  });
+}
 if (pending) sendError = "A previous send is unconfirmed. Retry send to check delivery.";
 displayAttachment();
-if (key) void poll();
+if (authenticated) void poll();
 else locked();

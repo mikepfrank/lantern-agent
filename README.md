@@ -4,7 +4,15 @@ Lantern is a private browser and terminal chat with Qwen3.8 27B. Each turn runs 
 
 ## Talk to Lantern on Lightsail
 
-To start or re-establish the browser connection, run this in a terminal on the laptop. The `-L` option opens the port forward and `--wait` keeps the SSH session alive. Open the private link printed there and leave that terminal open while chatting.
+Once the operator has connected a domain to the [HTTPS room](deploy/README.md#administrator-sign-in), bookmark its root address. Enter your administrator password to open the same conversation you see in the terminal. A sign-in lasts up to 30 days and survives a browser or web-service restart. **Sign out** ends access for that browser.
+
+Set or change the password privately from your own terminal. The command prompts twice and revokes previous browser sessions. Choose a password of 15 to 256 characters.
+
+```sh
+ssh -t lightsail "sudo -u lantern -H /usr/local/bin/lantern web-admin set-password"
+```
+
+The original SSH room is also available. To open it, run the following command on the laptop and leave the terminal open. The `-L` option opens the port forward and `--wait` keeps the SSH session alive. Open the private link printed in that terminal.
 
 ```sh
 ssh -t -o ExitOnForwardFailure=yes -L 127.0.0.1:8765:127.0.0.1:8765 lightsail "sudo -u lantern -H /usr/local/bin/lantern web-link --wait"

@@ -1,4 +1,4 @@
-"""Private operator chat served on IPv4 loopback, behind operator SSH forwarding."""
+"""Private operator chat served on loopback for SSH forwarding or an HTTPS proxy."""
 
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,12 +19,15 @@ from .attachments import MAX_IMAGE_BASE64, parse_image
 from .chat_store import ChatStore
 from .chat_worker import worker_online
 from .operator_review import MAX_ANSWER, ReviewRoom
+from .web_auth import LoginThrottled, SESSION_SECONDS, WebAuth
 
 
 DEFAULT_PORT = 8765
 PAGE_SIZE = 40
 MAX_MESSAGE = 16000
 TEXT_BODY_LIMIT = 128000
+SIGN_IN_BODY_LIMIT = 4096
+SESSION_COOKIE = "__Host-lantern-session"
 ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/room.css": ("room.css", "text/css; charset=utf-8"),
@@ -34,20 +37,40 @@ ASSETS = {
 }
 
 
+def canonical_origin(origin: str) -> str:
+    """Normalize a configured HTTPS origin to the Host and Origin browsers send."""
+    if not re.fullmatch(r"https://(?:[A-Za-z0-9.-]+|\[[A-Fa-f0-9:]+\])(?::[0-9]+)?/?", origin):
+        raise ValueError("Supply an HTTPS origin with a hostname and optional port")
+    address = urlsplit(origin)
+    host = address.hostname
+    port = address.port
+    if not host or port == 0:
+        raise ValueError("Invalid HTTPS origin")
+    if ":" in host:
+        host = f"[{host}]"
+    return f"https://{host}" + (f":{port}" if port and port != 443 else "")
+
+
 class RoomServer(ThreadingHTTPServer):
-    def __init__(self, state: Path, port: int):
+    def __init__(self, state: Path, port: int, *, public_origin: str | None = None):
+        self.public_origin = canonical_origin(public_origin) if public_origin is not None else None
         self.state = state
         self.store = ChatStore(state)
         self.reviews = ReviewRoom(self.store)
         # Large JSON uploads need simultaneous buffers for UTF-8, base64, the
         # verified raster and the SQLite write. Keep room inside MemoryMax.
         self.large_uploads = BoundedSemaphore(2)
-        self.key = secrets.token_urlsafe(32)
+        self.key = None if self.public_origin else secrets.token_urlsafe(32)
+        self.auth = WebAuth(state) if self.public_origin else None
         directory = files("lantern").joinpath("web_assets")
         self.assets = {path: (directory.joinpath(name).read_bytes(), mime)
                        for path, (name, mime) in ASSETS.items()}
+        if self.public_origin:
+            self.login_page = directory.joinpath("login.html").read_bytes()
+            self.assets["/login.js"] = (directory.joinpath("login.js").read_bytes(), "text/javascript; charset=utf-8")
         super().__init__(("127.0.0.1", port), RoomHandler)
-        self.hosts = {f"127.0.0.1:{self.server_port}", f"localhost:{self.server_port}"}
+        self.hosts = ({urlsplit(self.public_origin).netloc} if self.public_origin else
+                      {f"127.0.0.1:{self.server_port}", f"localhost:{self.server_port}"})
 
     def get_request(self):
         connection, address = super().get_request()
@@ -55,6 +78,8 @@ class RoomServer(ThreadingHTTPServer):
         return connection, address
 
     def publish_key(self):
+        if self.key is None:
+            return
         # Publish only after a successful bind. An unsuccessful second launch
         # must not invalidate the link to the running service.
         stream = NamedTemporaryFile(dir=self.state, delete=False, mode="w", encoding="ascii")
@@ -81,7 +106,7 @@ class RoomHandler(BaseHTTPRequestHandler):
     def send_error(self, code, message=None, explain=None):
         self._json(code, {"error": "Unsupported request."})
 
-    def _reply(self, status, data, mime):
+    def _reply(self, status, data, mime, headers=()):
         self.send_response(status)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
@@ -92,27 +117,56 @@ class RoomHandler(BaseHTTPRequestHandler):
                          "script-src 'self'; style-src 'self'; connect-src 'self'; img-src data: blob:; "
                          "base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        if self.server.public_origin:
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
+        for name, value in headers:
+            self.send_header(name, value)
         self.end_headers()
         try:
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError):
             pass  # A tab can disconnect while an acknowledged write is in flight.
 
-    def _json(self, status, value):
-        self._reply(status, json.dumps(value, separators=(",", ":")).encode(), "application/json; charset=utf-8")
+    def _json(self, status, value, headers=()):
+        self._reply(status, json.dumps(value, separators=(",", ":")).encode(), "application/json; charset=utf-8", headers)
 
     def _check_host(self):
         hosts = self.headers.get_all("Host", [])
         if len(hosts) != 1 or hosts[0] not in self.server.hosts:
-            self._json(403, {"error": "Open the loopback address in the operator link."})
+            self._json(403, {"error": "Open the configured operator address."})
             return False
         origins = self.headers.get_all("Origin", [])
-        if origins and origins != [f"http://{hosts[0]}"]:
-            self._json(403, {"error": "Request origin does not match the operator link."})
+        expected = self.server.public_origin or f"http://{hosts[0]}"
+        origin_required = self.server.public_origin is not None and self.command == "POST"
+        if (origins or origin_required) and origins != [expected]:
+            self._json(403, {"error": "This request must come from the operator room."})
             return False
         return True
 
+    def _session_token(self):
+        values = []
+        for header in self.headers.get_all("Cookie", []):
+            for part in header.split(";"):
+                name, _, value = part.strip().partition("=")
+                if name == SESSION_COOKIE:
+                    values.append(value)
+        return values[0] if len(values) == 1 else ""
+
+    def _signed_in(self):
+        """None means the store failed and the HTTP error was already sent."""
+        token = self._session_token()
+        try:
+            return bool(token and self.server.auth.valid_session(token))
+        except (sqlite3.Error, OSError):
+            self._json(503, {"error": "The sign-in service is temporarily unavailable."})
+            return None
+
     def _authorized(self):
+        if self.server.auth is not None:
+            valid = self._signed_in()
+            if valid is False:
+                self._json(401, {"error": "Sign in to open the operator room."})
+            return valid is True
         auth = self.headers.get_all("Authorization", [])
         if len(auth) != 1 or not secrets.compare_digest(
                 auth[0].encode("latin-1"), f"Bearer {self.server.key}".encode("ascii")):
@@ -123,6 +177,13 @@ class RoomHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._check_host():
             return
+        if self.path == "/" and self.server.auth is not None:
+            signed_in = self._signed_in()
+            if signed_in is None:
+                return
+            if not signed_in:
+                self._reply(200, self.server.login_page, "text/html; charset=utf-8")
+                return
         if self.path in self.server.assets:
             self._reply(200, *self.server.assets[self.path])
             return
@@ -195,6 +256,8 @@ class RoomHandler(BaseHTTPRequestHandler):
             return
         length = int(lengths[0])
         max_body = TEXT_BODY_LIMIT + (MAX_IMAGE_BASE64 if self.path == "/api/messages" else 0)
+        if self.path in ("/api/sign-in", "/api/sign-out"):
+            max_body = SIGN_IN_BODY_LIMIT
         if length > max_body:
             self._json(413, {"error": "Message is too large."})
             self._drain_rejected(length)
@@ -238,6 +301,9 @@ class RoomHandler(BaseHTTPRequestHandler):
         except OSError:
             return
         if not self._check_host():
+            return
+        if self.server.auth is not None and self.path in ("/api/sign-in", "/api/sign-out"):
+            self._change_session(content, length)
             return
         answer_route = re.fullmatch(r"/api/review-questions/([1-9][0-9]{0,18})/answer", self.path)
         if self.path != "/api/messages" and not answer_route:
@@ -299,8 +365,43 @@ class RoomHandler(BaseHTTPRequestHandler):
             return
         self._json(200, {"id": receipt})
 
+    def _change_session(self, content, length):
+        if self.headers.get_content_type() != "application/json":
+            self._json(415, {"error": "Send JSON."})
+            return
+        try:
+            if len(content) != length:
+                raise ValueError
+            body = json.loads(content.decode("utf-8"))
+            if self.path == "/api/sign-in":
+                if not isinstance(body, dict) or set(body) != {"password"} or not isinstance(body["password"], str):
+                    raise ValueError
+                token = self.server.auth.sign_in(body["password"])
+                if token is None:
+                    self._json(401, {"error": "Sign-in failed. Check your password."})
+                    return
+                lifetime = SESSION_SECONDS
+            else:
+                if body != {}:
+                    raise ValueError
+                token = self._session_token()
+                if token:
+                    self.server.auth.sign_out(token)
+                token, lifetime = "", 0
+        except LoginThrottled as exc:
+            self._json(429, {"error": "Please wait before trying again."}, [("Retry-After", str(exc.retry_after))])
+            return
+        except (ValueError, RecursionError):
+            self._json(400, {"error": "Invalid sign-in request."})
+            return
+        except (OSError, sqlite3.Error):
+            self._json(503, {"error": "The sign-in service is temporarily unavailable."})
+            return
+        cookie = f"{SESSION_COOKIE}={token}; Path=/; Max-Age={lifetime}; Secure; HttpOnly; SameSite=Strict"
+        self._json(200, {"ok": True}, [("Set-Cookie", cookie)])
 
-def serve_web(state: Path, port: int = DEFAULT_PORT):
-    with RoomServer(state, port) as server:
+
+def serve_web(state: Path, port: int = DEFAULT_PORT, *, public_origin: str | None = None):
+    with RoomServer(state, port, public_origin=public_origin) as server:
         server.publish_key()
         server.serve_forever()

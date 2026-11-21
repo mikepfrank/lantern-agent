@@ -90,6 +90,11 @@ def arguments():
     retry.add_argument("review_id", type=int)
     web = commands.add_parser("web", help="Serve the private browser interface on loopback")
     web.add_argument("--port", type=int, default=8765)
+    admin_web = commands.add_parser("admin-web", help="Serve administrator sign-in behind an HTTPS proxy")
+    admin_web.add_argument("--public-origin", required=True, help="Exact HTTPS origin of the operator room")
+    admin_web.add_argument("--port", type=int, default=8766)
+    admin = commands.add_parser("web-admin", help="Manage the private room's administrator credentials")
+    admin.add_argument("operation", choices=("set-password", "revoke-sessions"))
     link = commands.add_parser("web-link", help="Print the private browser link inside an operator SSH terminal")
     link.add_argument("--wait", action="store_true", help="Keep the SSH port forward open until Ctrl-C")
     send = commands.add_parser("send", help="Queue a message without attaching to chat")
@@ -168,9 +173,24 @@ async def main(args):
         review_id = ReviewRoom(ChatStore(state)).retry_concern(args.review_id)
         print(f"Review #{review_id} is the follow-up question in the private browser room.")
         return
-    if args.command == "web":
+    if args.command in {"web", "admin-web"}:
         from .web import serve_web
-        serve_web(state, args.port)
+        serve_web(state, args.port, public_origin=getattr(args, "public_origin", None))
+        return
+    if args.command == "web-admin":
+        from .web_auth import WebAuth
+        if args.operation == "set-password":
+            from getpass import getpass
+            if not sys.stdin.isatty():
+                raise ValueError("Open an interactive terminal (ssh -t) to set the administrator password.")
+            password = getpass("New Lantern administrator password: ")
+            if password != getpass("Confirm password: "):
+                raise ValueError("The passwords did not match.")
+            WebAuth(state).set_password(password)
+            print("Password saved. Previous administrator sessions have been revoked.")
+        else:
+            count = WebAuth(state).revoke_all()
+            print(f"Revoked {count} administrator session(s).")
         return
     if args.command == "web-link":
         # The fragment goes only to the operator's terminal and browser.
