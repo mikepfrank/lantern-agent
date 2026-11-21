@@ -1,9 +1,11 @@
 """Claude 3 Opus adjudication, voluntary advice, and its read-only research tools."""
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from html import unescape
 import http.client
 import json
+import logging
 import re
 from urllib.parse import quote, urlencode, urlsplit
 import xml.etree.ElementTree as ET
@@ -46,9 +48,10 @@ class OpusResponseError(ValueError):
 class AuditedReply(dict):
     """Associate a decoded reply with its private audit receipt outside the vendor JSON."""
 
-    def __init__(self, reply: dict, record_validation):
+    def __init__(self, reply: dict, record_validation, *, request_id: str | None = None):
         super().__init__(reply)
         self.record_validation = record_validation
+        self.request_id = request_id
 
 
 def _record_validation(reply, outcome):
@@ -138,8 +141,9 @@ def _batch_format(numbers, can_ask):
     return instruction
 
 
-def _system(mode: str, *, can_ask=False, final=False, concern_ids=(), tool=None, can_ask_concern=False) -> str:
-    today = datetime.now(timezone.utc).date().isoformat()
+def _system(mode: str, *, can_ask=False, final=False, concern_ids=(), tool=None, can_ask_concern=False,
+            today=None) -> str:
+    today = today or datetime.now(timezone.utc).date().isoformat()
     if mode == "review":
         if len(concern_ids) > 1:
             response_format = _batch_format(concern_ids, can_ask)
@@ -441,7 +445,7 @@ def _ruling(reply, root, concerns, *, tool, can_ask, can_ask_concern):
     return result
 
 
-def _request(vendor_call, evidence: dict, mode: str, research: list, operator_context: str):
+def _request(vendor_call, evidence: dict, mode: str, research: list, operator_context: str, observation=None):
     packet = {"case": dict(evidence)}
     can_ask = False
     can_ask_concern = False
@@ -488,8 +492,16 @@ def _request(vendor_call, evidence: dict, mode: str, research: list, operator_co
     if len(case.encode("utf-8")) > 64 * 1024:
         raise OpusCaseTooLarge("Opus case exceeds the review packet size limit")
     messages = [{"role": "user", "content": case}]
-    system = _system(mode, can_ask=can_ask, final=final, concern_ids=[item["id"] for item in concerns],
-                     tool=tool, can_ask_concern=can_ask_concern)
+    today = datetime.now(timezone.utc).date().isoformat()
+    concern_ids = [item["id"] for item in concerns]
+    system = _system(mode, can_ask=can_ask, final=final, concern_ids=concern_ids,
+                     tool=tool, can_ask_concern=can_ask_concern, today=today)
+    if observation is not None:
+        # Freeze the actual evidence string and host-owned response permissions before
+        # the first vendor call. Later research or an operator reply is a different input.
+        observation["snapshot"] = {"case_text": case, "operator_context": operator_context, "utc_date": today,
+                                   "can_ask": can_ask, "can_ask_concern": can_ask_concern, "final": final,
+                                   "has_action": bool(tool), "concern_ids": concern_ids}
     if "host_facts" in packet:
         system += "\n\n" + ACTION_FACTS_POLICY
     if operator_context:
@@ -505,6 +517,8 @@ def _request(vendor_call, evidence: dict, mode: str, research: list, operator_co
         reply = vendor_call("opus", {"model": OPUS_MODEL, "max_tokens": output_tokens,
                                     "system": system, "messages": list(messages)},
                             purpose=purpose)
+        if observation is not None and searches == 0 and isinstance(reply, AuditedReply):
+            observation["request_id"] = reply.request_id
         try:
             element = _element(reply, mode=mode, tool=tool, structured=bool(concerns), text_limit=text_limit)
         except OpusResponseError:
@@ -538,6 +552,8 @@ def _request(vendor_call, evidence: dict, mode: str, research: list, operator_co
         _record_validation(reply, "search")
         source = element.attrib["source"]
         searches += 1
+        if observation is not None:
+            observation["researched"] = True
         try:
             words = re.findall(r"\w+", text.casefold())
             case_words = " " + " ".join(re.findall(r"\w+", case.casefold())) + " "
@@ -558,9 +574,31 @@ def _request(vendor_call, evidence: dict, mode: str, research: list, operator_co
         ])
 
 
-def review(vendor_call, evidence: dict, *, operator_context: str = "") -> dict:
+def review(vendor_call, evidence: dict, *, operator_context: str = "", observer=None) -> dict:
     """Return the final decision for the host's exact proposed action."""
-    return _request(vendor_call, evidence, "review", [], operator_context)
+    if observer is None:
+        return _request(vendor_call, evidence, "review", [], operator_context)
+    observation = {}
+    result = None
+    error = None
+    try:
+        result = _request(vendor_call, evidence, "review", [], operator_context, observation)
+        return result
+    except OpusResponseError as exc:
+        error = exc.code
+        raise
+    finally:
+        # An audited, completed request is the unit of comparison. A research case is
+        # counted once as excluded, even if the later research round failed. Observers
+        # only enqueue private records and never share an object with the binding result.
+        researched = observation.get("researched", False)
+        if observation.get("request_id") and (result is not None or error or researched):
+            try:
+                observer({"request_id": observation["request_id"], "snapshot": observation["snapshot"],
+                          "opus_result": deepcopy(result), "error": error,
+                          "status": "excluded_research" if researched else "invalid_opus" if error else "ok"})
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Could not record shadow review (%s)", type(exc).__name__)
 
 
 def consult(vendor_call, evidence: dict, *, operator_context: str = "") -> dict:

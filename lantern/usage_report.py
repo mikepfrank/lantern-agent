@@ -121,7 +121,7 @@ def usage_report(state: Path, day: str | None = None, *, calls: bool = False, ba
     rows = daily if batch is None else [r for r in daily if r.get("batch_id") == batch]
     # Trial rows carry their exact API model ID in the vendor field. Keep the
     # established live model keys, even on days with no calls to those models.
-    trial_models = sorted({r["vendor"] for r in daily if r.get("purpose") == "reviewer_trial"})
+    trial_models = sorted({r["vendor"] for r in daily if r.get("purpose") in ("reviewer_trial", "shadow_review")})
     models = MODELS.copy()
     for model in trial_models:
         models.setdefault(model, model)

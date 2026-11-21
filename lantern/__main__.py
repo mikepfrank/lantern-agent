@@ -49,6 +49,13 @@ def default_state() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "lantern"
 
 
+def supervisor_limit():
+    try:
+        return Decimal(os.environ.get("LANTERN_REVIEW_DAILY_USD", str(DEFAULT_DAILY_USD)))
+    except InvalidOperation as exc:
+        raise ValueError("LANTERN_REVIEW_DAILY_USD must be a dollar amount") from exc
+
+
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", type=Path, default=default_state(), help="Private operator state directory")
@@ -75,6 +82,8 @@ def arguments():
     responses = commands.add_parser("opus-responses", help="Locate private Opus replies and inspect validation outcomes")
     responses.add_argument("--batch", type=int, help="Restrict responses to this worker batch")
     responses.add_argument("--limit", type=int, default=20, help="Number of recent responses to show (1 to 200)")
+    pilot = commands.add_parser("reviewer-pilot", help="Operate the private Sonnet comparison")
+    pilot.add_argument("operation", choices=("start", "stop", "status", "results", "collect"))
     commands.add_parser("chat", help="Attach to the persistent operator conversation")
     retry = commands.add_parser("retry-concern", help="Reopen an unavailable final context ruling for a fresh operator answer")
     retry.add_argument("review_id", type=int)
@@ -105,6 +114,32 @@ def arguments():
 
 async def main(args):
     state = args.state.resolve()
+    if args.command == "reviewer-pilot":
+        from .shadow_pilot import ShadowPilot, run_shadow
+        from .shadow_vendor import call_sonnet
+
+        pilot = ShadowPilot(state)
+        if args.operation == "collect":
+            limit = supervisor_limit()
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                raise ValueError("ANTHROPIC_API_KEY is missing from the shadow collector environment")
+
+            def judge(row, deadline):
+                return call_sonnet(state, request_id=row["request_id"], sample=row["sample"],
+                                   daily_limit=limit, deadline=deadline, thread_id=row["thread_id"],
+                                   batch_id=row["batch_id"], tool=row["tool"])
+            run_shadow(state, judge)
+            return
+        if args.operation == "start":
+            report = pilot.activate()
+        elif args.operation == "stop":
+            report = pilot.stop()
+        elif args.operation == "results":
+            report = pilot.results()
+        else:
+            report = pilot.status()
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
     if args.command == "logs":
         filters = {"limit": args.limit}
         if args.batch is not None:
@@ -168,11 +203,7 @@ async def main(args):
     reservation = Decimal(MODEL_CONTEXT_TOKENS * MAX_PROMPT_PRICE +
                           MAX_OUTPUT_TOKENS * MAX_COMPLETION_PRICE) / 1_000_000
     ledger = Budget(state / "usage.sqlite", reservation)
-    try:
-        limit = Decimal(os.environ.get("LANTERN_REVIEW_DAILY_USD", str(DEFAULT_DAILY_USD)))
-    except InvalidOperation as exc:
-        raise ValueError("LANTERN_REVIEW_DAILY_USD must be a dollar amount") from exc
-    vendors = ReviewerVendors(state, limit)
+    vendors = ReviewerVendors(state, supervisor_limit())
     if args.command == "usage":
         print(json.dumps({**ledger.today(), "supervisors": vendors.today(),
                           "review_events_all_time": review_summary(state)}, indent=2))
@@ -199,6 +230,11 @@ async def main(args):
         directory.mkdir(exist_ok=True, mode=0o700)
     store = ChatStore(state) if args.command == "worker" else None
     operator_room = ReviewRoom(store) if private_chat and store is not None else None
+    if operator_room is not None and independent:
+        from .shadow_pilot import ShadowPilot
+        shadow = ShadowPilot(state)
+    else:
+        shadow = None
     files = workspace / "files"
     if independent:
         files.mkdir(exist_ok=True, mode=0o700)
@@ -298,8 +334,23 @@ async def main(args):
                 hold_day = exc.day
                 raise
 
-        supervisor = Supervisor(state, Luna(vendor_call, operator_context=context),
-                                partial(opus.review, vendor_call, operator_context=context),
+        def record_shadow(event):
+            snapshot = event["snapshot"]
+            name, _ = reviewing_tool.get()
+            kind = "action" if snapshot["has_action"] else "context"
+            if snapshot["final"]:
+                kind += "_after_answer"
+            elif snapshot["has_action"] and snapshot["concern_ids"]:
+                kind += "_with_concerns"
+            shadow.record(key=event["request_id"], thread_id=supervisor.thread, batch_id=batch_id,
+                          tool=name, kind=kind, sample=snapshot,
+                          opus={"status": event["status"], "verdict": event["opus_result"], "error": event["error"]},
+                          exclusion="unmatched_research" if event["status"] == "excluded_research" else None)
+
+        judge = partial(opus.review, vendor_call, operator_context=context)
+        if shadow is not None and batch_id is not None:
+            judge = partial(judge, observer=record_shadow)
+        supervisor = Supervisor(state, Luna(vendor_call, operator_context=context), judge,
                                 partial(opus.consult, vendor_call, operator_context=context),
                                 sample_every=int(os.environ.get("LANTERN_SPOT_EVERY", "12")),
                                 tool_names=[tool["name"] for tool in tools], batch_id=batch_id, operator_room=operator_room)

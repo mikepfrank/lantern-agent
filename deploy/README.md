@@ -30,6 +30,22 @@ For an update, allow the current turn to finish before running the installer. A 
 
 After steering a turn, its superseded provider request can continue reporting usage in the background even after the replacement reply is visible. Allow that settlement to finish before a planned restart. A forced stop retains any unresolved reservation against the admission day's budget.
 
+## Live Sonnet reviewer comparison
+
+Opus 3 decides each live referral. The private room worker can enqueue the evidence from a completed, audited adjudication for a separate process to send to Anthropic's Sonnet 4.6. Sonnet sees the same case and operator permissions and returns a structured judgment. Its answer is available only to the operator. Cases in which Opus requested research are recorded as exclusions because the reviewers would have seen different evidence. Voluntary consultations and Luna-only approvals do not enter the comparison.
+
+To activate the seven-day pilot on an installed worker, run these commands on the host. Starting the same campaign again preserves its original deadline, sample, and spend.
+
+```sh
+sudo -iu lantern lantern reviewer-pilot start
+sudo systemctl enable --now lantern-review-shadow.service
+sudo -iu lantern lantern reviewer-pilot status
+```
+
+The pilot admits up to 20 referrals. Its total Sonnet reservation and spend ceiling is $0.50, within the existing supervisor budget. Admission also preserves $0.50 of the current UTC day's allowance for live review. A request whose delivery is uncertain retains its reservation. A worker restart cannot resend a paid request with the same ID.
+
+Use `lantern reviewer-pilot status` for counts and spending, or `lantern reviewer-pilot results` for private, per-case decisions, reasons, costs, and timings. Agreement covers the proposed action and each concern's disposition and tool scope. Evaluate differing reasons and proposed operator questions against Mike's recorded permissions. To close the pilot early, run `lantern reviewer-pilot stop`. A call already in flight can finish settling. The collector exits when collection ends.
+
 ## Chat
 
 From the laptop's normal terminal:

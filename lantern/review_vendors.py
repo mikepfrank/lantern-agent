@@ -48,11 +48,13 @@ def request_json(vendor: str, key: str, body: bytes, *, audit: OpusCapture | Non
     if vendor == "luna":
         host, path = "api.openai.com", "/v1/responses"
         headers = {"Authorization": "Bearer " + key}
-    else:
-        if audit is None:
+    elif vendor in ("opus", "sonnet"):
+        if vendor == "opus" and audit is None:
             raise VendorError("Opus response capture is required")
         host, path = "api.anthropic.com", "/v1/messages"
         headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    else:
+        raise VendorError("Unknown supervisor vendor")
     connection = http.client.HTTPSConnection(host, timeout=60)
     try:
         connection.request("POST", path, body, {**headers, "Content-Type": "application/json"})
@@ -221,7 +223,7 @@ class ReviewerVendors:
                     raise OpusResponseError("invalid_usage") from None
                 raise
             tokens, charge, status = (ins, outs, reads, writes), units(cost), "metered"
-            return AuditedReply(result, audit.record_validation) if audit is not None else result
+            return AuditedReply(result, audit.record_validation, request_id=request_id) if audit is not None else result
         except OpusResponseError as exc:
             audit.failure = exc.code
             raise

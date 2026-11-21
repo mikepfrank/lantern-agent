@@ -1,0 +1,36 @@
+[Unit]
+Description=Lantern private Sonnet comparison
+After=network-online.target lantern-chat.service
+Wants=network-online.target
+ConditionPathExists=/home/lantern/.local/state/lantern/operator-trials/sonnet-live-v1/pilot.sqlite
+
+[Service]
+Type=exec
+User=lantern
+WorkingDirectory=/opt/lantern/worker-current
+EnvironmentFile=/etc/lantern/worker.env
+UnsetEnvironment=OPENAI_API_KEY OPENROUTER_API_KEY
+Environment=HOME=/home/lantern/.local/state/lantern
+ExecStart=/usr/local/bin/lantern reviewer-pilot collect
+Restart=on-failure
+RestartSec=15
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindPaths=/home/lantern/.local/state/lantern
+InaccessiblePaths=-/home/lantern/.local/state/lantern/heritage -/home/lantern/.local/state/lantern/workspace -/home/lantern/.local/state/lantern/codex
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=yes
+LockPersonality=yes
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

@@ -140,6 +140,7 @@ fi
 install -o root -g root -m 0600 "$stage/worker.env" /etc/lantern/worker.env
 install -o root -g root -m 0755 "$src/deploy/lantern" /usr/local/bin/lantern
 install -o root -g root -m 0644 "$src/deploy/$unit" "/etc/systemd/system/$unit"
+install -o root -g root -m 0644 "$src/deploy/lantern-review-shadow.service" /etc/systemd/system/
 mv -Tf -- "$stage/worker-current" "$base/worker-current"
 if ! $worker_only; then
     install -o root -g root -m 0644 "$src/deploy/lantern-web.service" /etc/systemd/system/
