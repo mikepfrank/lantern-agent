@@ -75,6 +75,43 @@ class OperatorReleaseTests(unittest.TestCase):
         self.assertEqual(self.latest(1)["status"], "watch")
         self.assertEqual(self.latest(2)["status"], "watch")
 
+    def test_first_operator_confirmation_of_reviewer_retirement_keeps_ruling_and_last_scope(self):
+        with self.ledger as db:
+            concerns.record(db, self.thread, 1, 1, "watch", "Narrowed watch.", ["workspace_write"])
+            concerns.record(db, self.thread, 1, 2, "retire", "Reviewer ended the incident.", [])
+        original = self.latest(1)
+        command = f"/release-concern 1 --cite {self.source}"
+        command_id = self.store.submit(command, "first-confirmation")
+        self.assertIsNone(self.store.claim(budget_check=lambda: self.fail("unexpected wake")))
+        receipt = self.store.recent(1)[0]
+        self.assertIn("confirmed the retirement of context concern #1", receipt.text)
+        self.assertEqual(receipt.role, "system")
+        self.assertEqual(self.latest(1), original)
+        self.assertEqual(self.store.status()["queued"], 0)
+        evidence, = self.room.concern_releases(self.thread, "workspace_write")
+        self.assertIn("existing retirement at ruling version 3", evidence["reason"])
+        self.assertEqual((evidence["command_event_id"], evidence["source_event_id"], evidence["receipt_event_id"]),
+                         (command_id, self.source, receipt.id))
+        self.assertEqual(self.room.concern_releases(self.thread, "workspace_read"), [])
+        self.assertEqual(self.room.concern_releases(self.thread, "consult_opus"), [evidence])
+        self.assertEqual(self.store.submit(command, "first-confirmation"), command_id)
+        self.store.submit(command)
+        self.assertIsNone(self.store.claim(budget_check=lambda: self.fail("unexpected wake")))
+        self.assertEqual(self.room.concern_releases(self.thread, "workspace_write"), [evidence])
+        self.assertIn(f"receipt #{receipt.id} is on record", self.store.recent(1)[0].text)
+        self.assertEqual(self.latest(1), original)
+
+    def test_immediately_retired_finding_supplies_confirmation_only_to_consultations(self):
+        with self.ledger as db:
+            concern = concerns.create(db, self.thread, 3, "Reported", "No watch issued")
+            concerns.record(db, self.thread, concern, 0, "retire", "No issue.", [])
+        self.store.submit(f"/release-concern {concern}")
+        self.assertIsNone(self.store.claim())
+        self.assertEqual(self.room.concern_releases(self.thread, "workspace_write"), [])
+        confirmation, = self.room.concern_releases(self.thread, "consult_opus")
+        self.assertEqual(confirmation["concern_id"], concern)
+        self.assertEqual(self.latest(concern)["version"], 1)
+
     def test_release_during_active_budget_pause_preserves_prior_answer(self):
         review = self.room.open(self.thread, "context-concern:1", "context_concern", "one", "Concern", "", "End?")
         answer_id = self.room.answer(review, "Please explain.")

@@ -71,21 +71,36 @@ def _release(store, db, thread, command_event_id, concern_id, reason):
     item = concerns.get(db, thread, concern_id)
     if item is None:
         raise ValueError(f"This conversation has no context concern #{concern_id}.")
-    if item["status"] == "retired":
-        store._append(db, "system", f"Context concern #{concern_id} was already retired. "
-                      f"Operator command #{command_event_id} acknowledged.")
-        return None
-    reason = reason or "The operator explicitly ended this watch."
+    already_retired = item["status"] == "retired"
+    if already_retired:
+        existing = db.execute("""SELECT receipt_event_id FROM operator_concern_releases
+            WHERE thread=? AND concern_id=?""", (thread, concern_id)).fetchone()
+        if existing:
+            store._append(db, "system", f"Context concern #{concern_id} was already retired. "
+                          f"Operator receipt #{existing[0]} is on record.")
+            return None
+        # A reviewer may retire the concern before the worker admits the operator's
+        # command. Preserve that ruling and separately attest the operator's decision.
+        last_scope = db.execute("""SELECT tools FROM supervision.concern_rulings
+            WHERE concern_id=? AND status IN ('watch','question') ORDER BY version DESC LIMIT 1""",
+            (concern_id,)).fetchone()
+        prior_tools = last_scope[0] if last_scope else "[]"
+        headline = f"Mike confirmed the retirement of context concern #{concern_id}."
+        reason = f"Confirmed the existing retirement at ruling version {item['version']}." + (f" {reason}" if reason else "")
+    else:
+        prior_tools = json.dumps(item["tools"] or ["*"])
+        headline = f"Mike retired context concern #{concern_id}."
+        reason = reason or "The operator explicitly ended this watch."
     explanation = f"Direct operator release from room event #{command_event_id}. {reason}"
-    if not concerns.record(db, thread, concern_id, item["version"], "retire", explanation, []):
-        raise RuntimeError("Concurrent change to the concern ledger. The command remains queued.")
-    receipt = store._append(db, "system", f"Mike retired context concern #{concern_id}. {explanation} "
+    if not already_retired:
+        if not concerns.record(db, thread, concern_id, item["version"], "retire", explanation, []):
+            raise RuntimeError("Concurrent change to the concern ledger. The command remains queued.")
+    receipt = store._append(db, "system", f"{headline} {explanation} "
                             "This ruling applies only to that context concern. Individual action decisions keep their own status.")
     stamp = store.clock().isoformat()
     db.execute("""INSERT INTO operator_concern_releases
         (thread,concern_id,prior_tools,reason,released_at,command_event_id,source_event_id,receipt_event_id)
-        VALUES(?,?,?,?,?,?,?,?)""", (thread, concern_id, json.dumps(item["tools"] or ["*"]),
-                                     reason, stamp, command_event_id, source_id, receipt))
+        VALUES(?,?,?,?,?,?,?,?)""", (thread, concern_id, prior_tools, reason, stamp, command_event_id, source_id, receipt))
     if db.execute("SELECT 1 FROM main.sqlite_schema WHERE name='operator_reviews'").fetchone():
         # Preserve any answer already given, including its original wake event.
         db.execute("""UPDATE operator_reviews SET status='answered',answer=COALESCE(answer,?),
@@ -94,4 +109,4 @@ def _release(store, db, thread, command_event_id, concern_id, reason):
             WHERE thread=? AND scope=? AND tool='context_concern' AND final_decision IS NULL""",
             (explanation, stamp, receipt, f"operator-release:{command_event_id}", explanation, thread,
              f"context-concern:{concern_id}"))
-    return receipt
+    return None if already_retired else receipt
