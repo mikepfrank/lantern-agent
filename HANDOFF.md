@@ -2,6 +2,8 @@
 
 ## Current state
 
+**Provider reliability reporting, November 22 (Central).** `provider_stats` and `lantern usage --routes` show classified request failures and timeouts by route and provider. API completion and usable output are separate observations. A successful room turn is one the chat worker marked complete; this can include a plain-text reply when the operator wanted a tool. `room_turns` groups terminal turns by their UTC completion date and includes the Qwen charges for their constituent requests, including failed turns, when calculating cost per success. Consult the coverage counts when comparing small samples or periods with missing billing data.
+
 **Tool-call provider routing, November 22 (Central).** The Qwen gateway excludes `darkbloom` whenever the request offers a callable tool. All three route choices retain their usual sorting and price ceilings. Requests with no callable tools, including native compaction, use their normal provider pool. To restore a provider, retest its pinned OpenRouter Responses endpoint with a fresh request and a tool-call continuation, verify structured calls and matching results, then remove its slug from `TOOL_PROVIDER_EXCLUSIONS` in `lantern/routing.py` and redeploy the worker.
 
 **Balanced provider routing, November 21 (Central).** Worker `e35e7fc` offers `set_provider_route` with `default`, `cheapest`, and `fastest`. The default selection omits OpenRouter's `provider.sort` field while retaining the same price ceilings. It has its own group in `provider_stats`. The worker-only deployment preserved the room's fastest selection and both web sessions. Verified the updated schema in the room's native header and all five saved compaction checkpoints. The Lightsail suite ran 334 tests, with two skips.

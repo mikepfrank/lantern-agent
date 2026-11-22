@@ -6,12 +6,45 @@ import sqlite3
 import tempfile
 import unittest
 
-from lantern.budget import Budget, BudgetUnavailable
+from lantern.budget import Budget, BudgetUnavailable, routing_receipt_sql
 from lantern.diagnostics import read_diagnostics
 from lantern.usage_report import usage_report
 
 
 class BudgetTests(unittest.TestCase):
+    def test_request_outcome_survives_late_billing_and_legacy_migration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "usage.sqlite"
+            ledger = Budget(path, Decimal(".1"))
+            old = ledger.reserve({})
+            ledger.finish(old, Decimal(".01"), status="completed", evidence={}, ms=100, charge_source="openrouter")
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute("ALTER TABLE request_metrics DROP COLUMN request_outcome")
+                fields, _ = routing_receipt_sql(db, {"request_metrics"})
+                self.assertNotIn("m.request_outcome", fields)
+                fields, joins = routing_receipt_sql(db, {"request_metrics", "request_routes"},
+                                                    only={"route", "request_outcome"})
+                self.assertEqual(fields, ", p.route")
+                self.assertIn("request_routes", joins)
+                self.assertNotIn("request_metrics", joins)
+
+            ledger = Budget(path, Decimal(".1"))
+            timed_out = ledger.reserve({})
+            ledger.finish(timed_out, None, status="interrupted", evidence={"request_outcome": "timeout"},
+                          ms=300_000, charge_source=None)
+            ledger.finish(timed_out, Decimal(".04"), status="completed", evidence={"request_outcome": "usable"},
+                          ms=12, charge_source="openrouter")
+            unknown = ledger.reserve({})
+            ledger.finish(unknown, Decimal("0"), status="completed", evidence={"request_outcome": "provider text"},
+                          ms=35, charge_source="openrouter")
+            with closing(sqlite3.connect(path)) as db:
+                fields, _ = routing_receipt_sql(db, {"request_metrics"})
+                self.assertIn("m.request_outcome", fields)
+                self.assertEqual(dict(db.execute("SELECT request_id,request_outcome FROM request_metrics")),
+                                 {old: None, timed_out: "timeout", unknown: None})
+                self.assertEqual(db.execute("SELECT actual FROM requests WHERE id=?", (timed_out,)).fetchone(),
+                                 (40_000_000,))
+
     def test_routing_measurements_distinguish_missing_terminal_and_unbilled_requests(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "usage.sqlite"

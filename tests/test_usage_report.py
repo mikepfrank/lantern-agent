@@ -146,6 +146,26 @@ class UsageReportTests(unittest.TestCase):
         timings = provider_summary(self.state)["qwen_by_route"]["cheapest"]["completed_timings"]
         self.assertEqual((timings["first_token_ms"]["samples"], timings["first_token_ms"]["mean_ms"]), (1, 0))
 
+    def test_failure_counts_separate_protocol_completion_from_useful_output(self):
+        ledger = Budget(self.state / "usage.sqlite", Decimal(".01"))
+        for status, outcome in (("completed", "usable"), ("completed", "empty_output"),
+                                ("interrupted", "timeout"), ("interrupted", "superseded"),
+                                ("completed", None)):
+            rid = ledger.reserve({"provider": {}})
+            ledger.finish(rid, Decimal(".001"), status=status, ms=30,
+                          evidence={"provider": "endpoint", "request_outcome": outcome}, charge_source="openrouter")
+        ledger.reserve({"provider": {}})
+        report = provider_summary(self.state)
+        group = report["qwen_by_provider_and_route"][0]
+        self.assertEqual((group["calls"], group["completed_calls"], group["failed_calls"], group["timeout_calls"]),
+                         (5, 3, 2, 1))
+        self.assertEqual(group["request_outcomes"],
+                         {"usable": 1, "empty_output": 1, "timeout": 1, "superseded": 1, "unknown": 1})
+        self.assertEqual(report["qwen_by_route"]["default"]["request_outcomes"]["pending"], 1)
+        self.assertEqual(report["request_failures_by_provider"],
+                         [{"provider": "endpoint", "failed_calls": 2, "timeout_calls": 1,
+                           "failure_types": {"empty_output": 1, "timeout": 1}}])
+
     def test_trial_charges_are_visible_by_exact_model_and_purpose(self):
         self.legacy()
         models = ("claude-3-opus-20240229", "claude-sonnet-4-6", "gpt-5.4")

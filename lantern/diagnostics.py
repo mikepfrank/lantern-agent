@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import sqlite3
 
-from .budget import TIMING_FIELDS, UNITS_PER_DOLLAR, dispatch_utc, reported_usd, routing_receipt_sql
+from .budget import REQUEST_OUTCOMES, TIMING_FIELDS, UNITS_PER_DOLLAR, dispatch_utc, reported_usd, routing_receipt_sql
 from .routing import ROUTES, safe_provider
 
 
@@ -103,6 +103,7 @@ def _record(kind, row):
         ("purpose", {"tool", "spot", "consult", "escalation", "context_review", "shadow_review"}),
         ("trigger", {"operator", "heartbeat", "alarm", "continuation", "turn", "worker"}),
         ("charge_source", {"openrouter", "router_no_eligible_endpoint"}), ("route", ROUTES),
+        ("request_outcome", REQUEST_OUTCOMES),
         ("flag_kind", {"tool", "context", "unregistered_tool"}),
         ("capture_status", {"pending", "complete", "partial", "archive_error", "no_response"}),
     ]:

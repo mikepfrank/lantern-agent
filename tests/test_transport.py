@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
-from lantern.transport import MODEL, OpenRouterGateway, _open_upstream
+from lantern.transport import MODEL, OpenRouterGateway, UpstreamStreamEnded, _open_upstream
 from lantern.image_ref import image_reference
 from lantern.independent_tools import PROVIDER_STATS_TOOL
 from lantern.routing import ROUTE_TOOL
@@ -281,11 +281,13 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(self.request(gate)[0], 200)
             self.assertEqual(finish.call_args.args, (31, None))
             self.assertEqual(finish.call_args.kwargs["status"], "incomplete")
+            self.assertEqual(finish.call_args.kwargs["evidence"]["request_outcome"], "incomplete")
             self.assertIsNone(finish.call_args.kwargs["charge_source"])
             self.observe.side_effect = RuntimeError("unavailable")
             self.assertEqual(self.request(gate)[0], 503)
             self.assertEqual(finish.call_args.args, (31, Decimal(0)))
             self.assertEqual(finish.call_args.kwargs["charge_source"], "context_review_blocked")
+            self.assertEqual(finish.call_args.kwargs["evidence"]["request_outcome"], "local")
         self.assertEqual(finish.call_count, 3)
         self.settle.assert_not_called()
 
@@ -418,10 +420,56 @@ class TransportTests(unittest.TestCase):
         finish.assert_called_once()
         self.assertEqual(finish.call_args.args, (31, Decimal(".000032")))
         self.assertEqual(finish.call_args.kwargs["status"], "interrupted")
+        self.assertEqual(finish.call_args.kwargs["evidence"]["request_outcome"], "failed")
         self.assertEqual(finish.call_args.kwargs["charge_source"], "openrouter")
         self.assertIn("response_end_ms", gate.evidence[-1])
         self.assertNotIn("first_output_ms", gate.evidence[-1])
         self.unregistered.assert_called_once_with("unregistered", None)
+
+    def test_completed_request_outcomes_preserve_structured_calls_and_empty_replies(self):
+        call = {"type": "function_call", "name": "chess", "call_id": "c21", "arguments": "{}"}
+        terminal = event("response.completed", response={"output": [], "usage": {"cost": .001}})
+        tests = [
+            (event("response.completed", response={"output": [{"type": "reasoning"}]}), "empty_output"),
+            (event("response.output_text.delta", delta=" \n ") + terminal, "empty_output"),
+            (event("response.output_text.done", text="done") + terminal, "usable"),
+            (event("response.output_item.done", item=call) + terminal, "usable"),
+            (event("response.completed", response={"output": [call]}), "usable"),
+            (event("response.completed", response={"output": [{**call, "call_id": "  "}]}), "failed"),
+            (event("response.completed", response={"output": [{**call, "call_id": 12}]}), "failed"),
+            (event("response.completed", response={"output": [{**call, "arguments": "["}]}), "failed"),
+            (event("response.completed", response={"output": [{**call, "arguments": "[]"}]}), "failed"),
+            (event("error", error={"code": 500}) + terminal, "failed"),
+            (event("response.refusal.done", refusal="declined") + terminal, "failed"),
+            (event("response.completed", response={"usage": {}}), None),
+        ]
+        finish = Mock()
+        with self.gateway("default", finish=finish) as gate:
+            for self.stream, expected in tests:
+                with self.subTest(outcome=expected, frame=self.stream):
+                    self.assertEqual(self.request(gate), (200, self.stream))
+                    self.assertEqual(finish.call_args.kwargs["status"], "completed")
+                    self.assertEqual(finish.call_args.kwargs["evidence"].get("request_outcome"), expected)
+
+    def test_timeout_and_interruption_are_distinct_at_any_stream_stage(self):
+        finish = Mock()
+        for err, expected in ((TimeoutError, "timeout"), (ConnectionResetError, "interrupted")):
+            for before_headers in (True, False):
+                class BrokenStream(Stream):
+                    def readline(self, *args):
+                        raise err()
+
+                @contextmanager
+                def upstream(body, headers):
+                    if before_headers:
+                        raise err()
+                    yield BrokenStream()
+
+                with self.subTest(error=err, before_headers=before_headers), \
+                     patch("lantern.transport._open_upstream", upstream), self.gateway("default", finish=finish) as gate:
+                    self.assertEqual(self.request(gate)[0], 502 if before_headers else 200)
+                    self.assertEqual(finish.call_args.kwargs["status"], "interrupted")
+                    self.assertEqual(finish.call_args.kwargs["evidence"]["request_outcome"], expected)
 
     def test_nonstreaming_error_uses_confirmed_cost_and_distinguishes_incomplete_body(self):
         self.http_status = 429
@@ -524,6 +572,7 @@ class TransportTests(unittest.TestCase):
                     self.assertEqual(self.request(gate), (200, b""))
                     self.assertEqual(gate.evidence[-1]["status"], expected_status)
                     self.assertTrue(gate.evidence[-1]["client_disconnected"])
+                    self.assertEqual(gate.evidence[-1]["request_outcome"], "superseded")
         self.unregistered.assert_called_once_with("outside", None)
         self.settle.assert_not_called()
         self.assertEqual(len(self.wire), 3)
@@ -664,16 +713,16 @@ class UpstreamDeadlineTests(unittest.TestCase):
             with patch("lantern.transport.http.client.HTTPSConnection", return_value=connection), \
                  patch.object(connection, "connect", lambda: setattr(connection, "sock", upstream)), \
                  patch("lantern.transport.UPSTREAM_DEADLINE_SECONDS", .15):
-                with _open_upstream(b"{}", {}) as response:
-                    self.assertEqual(response.readline(), b": keepalive\n")
-                    self.assertEqual(response.readline(), b"\n")
-                    start = time.monotonic()
-                    pool.submit(keepalive)
-                    try:
+                start = time.monotonic()
+                try:
+                    with self.assertRaises(TimeoutError), _open_upstream(b"{}", {}) as response:
+                        self.assertEqual(response.readline(), b": keepalive\n")
+                        self.assertEqual(response.readline(), b"\n")
+                        pool.submit(keepalive)
                         while response.readline():
                             pass
-                    except OSError:
-                        pass  # Windows may report the timeout directly.
-                    finally:
-                        stop.set()
-                    self.assertLess(time.monotonic() - start, 2)
+                        # An expired socket may signal EOF rather than raising.
+                        raise UpstreamStreamEnded("stream ended")
+                finally:
+                    stop.set()
+                self.assertLess(time.monotonic() - start, 2)

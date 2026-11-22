@@ -15,6 +15,7 @@ MODEL_CONTEXT_TOKENS = 1_024_000
 HANDOFF_REMINDER_TOKENS = 180_000
 DAILY_USD = Decimal("10")
 TIMING_FIELDS = ("response_start_ms", "first_token_ms", "first_output_ms", "response_end_ms")
+REQUEST_OUTCOMES = ("usable", "empty_output", "timeout", "interrupted", "failed", "incomplete", "local", "superseded")
 
 
 def reported_usd(value):
@@ -40,17 +41,21 @@ def dispatch_utc(value):
         return None
 
 
-def routing_receipt_sql(db, tables, prefix=""):
+def routing_receipt_sql(db, tables, prefix="", *, only=None):
     """Read the receipt fields that exist in this ledger version without upgrading it."""
     fields, joins = [], []
     for table, alias, names in (
         ("request_routes", "p", ("route",)),
-        ("request_metrics", "m", ("dispatch_at", *TIMING_FIELDS, "provider", "reported_cost_usd")),
+        ("request_metrics", "m", ("dispatch_at", *TIMING_FIELDS, "provider", "reported_cost_usd", "request_outcome")),
     ):
-        if prefix + table in tables:
+        wanted = [name for name in names if only is None or name in only]
+        if not wanted or prefix + table not in tables:
+            continue
+        columns = {r[1] for r in db.execute(f"PRAGMA {prefix}table_info({table})")}
+        selected = [f"{alias}.{name}" for name in wanted if name in columns]
+        if selected:
+            fields.extend(selected)
             joins.append(f"LEFT JOIN {prefix}{table} {alias} ON {alias}.request_id=d.id")
-            columns = {r[1] for r in db.execute(f"PRAGMA {prefix}table_info({table})")}
-            fields.extend(f"{alias}.{name}" for name in names if name in columns)
     return "".join(", " + field for field in fields), " ".join(joins)
 
 
@@ -93,9 +98,12 @@ class Budget:
             db.execute("""CREATE TABLE IF NOT EXISTS request_metrics (
                 request_id TEXT PRIMARY KEY REFERENCES request_details(id), dispatch_at TEXT,
                 response_start_ms INTEGER, first_token_ms INTEGER, first_output_ms INTEGER, response_end_ms INTEGER,
-                provider TEXT, reported_cost_usd TEXT)""")
-            if "first_token_ms" not in {r[1] for r in db.execute("PRAGMA table_info(request_metrics)")}:
+                provider TEXT, reported_cost_usd TEXT, request_outcome TEXT)""")
+            columns = {r[1] for r in db.execute("PRAGMA table_info(request_metrics)")}
+            if "first_token_ms" not in columns:
                 db.execute("ALTER TABLE request_metrics ADD COLUMN first_token_ms INTEGER")
+            if "request_outcome" not in columns:
+                db.execute("ALTER TABLE request_metrics ADD COLUMN request_outcome TEXT")
             db.execute("""CREATE TABLE IF NOT EXISTS handoff_events (
                 request_id TEXT PRIMARY KEY REFERENCES request_details(id), event TEXT NOT NULL)""")
 
@@ -173,12 +181,14 @@ class Budget:
                 reported = str(cost) if cost is not None and charge_source == "openrouter" else None
                 timings = [evidence.get(key) for key in TIMING_FIELDS]
                 timings = [t if type(t) is int and 0 <= t < 2**63 else None for t in timings]
+                outcome = evidence.get("request_outcome")
                 observations = (dispatch_utc(evidence.get("dispatch_at")), *timings,
-                                safe_provider(evidence.get("provider")), reported)
+                                safe_provider(evidence.get("provider")), reported,
+                                outcome if outcome in REQUEST_OUTCOMES else None)
                 if any(v is not None for v in observations):
                     db.execute("""INSERT INTO request_metrics(request_id, dispatch_at, response_start_ms,
-                                  first_token_ms, first_output_ms, response_end_ms, provider, reported_cost_usd)
-                                  VALUES(?,?,?,?,?,?,?,?)""", (request_id, *observations))
+                                  first_token_ms, first_output_ms, response_end_ms, provider, reported_cost_usd,
+                                  request_outcome) VALUES(?,?,?,?,?,?,?,?,?)""", (request_id, *observations))
             event = evidence.get("handoff_event")
             superseded = evidence.get("steer_acknowledged") or evidence.get("client_disconnected")
             if updated.rowcount and status == "completed" and not superseded and event in ("reminded", "tool_free"):

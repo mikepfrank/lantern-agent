@@ -211,7 +211,8 @@ async def main(args):
         report = usage_report(state, args.day, calls=args.calls, batch=args.batch)
         if args.routes:
             keys = ("utc_day", "batch_id", "qwen_by_route", "qwen_by_provider_and_route", "qwen_calls_without_route",
-                    "routed_calls_without_provider", "omitted_provider_groups", "omitted_provider_calls", "metric_notes")
+                    "routed_calls_without_provider", "omitted_provider_groups", "omitted_provider_calls",
+                    "request_failures_by_provider", "room_turns", "metric_notes")
             summary = {key: report[key] for key in keys}
             if args.calls:
                 summary["calls"] = [call for call in report["calls"] if call["model"] == "qwen"]

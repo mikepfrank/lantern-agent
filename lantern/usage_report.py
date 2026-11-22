@@ -2,22 +2,24 @@
 
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
-from collections import defaultdict
+from collections import Counter, defaultdict
 from decimal import Decimal
 from pathlib import Path
 import sqlite3
 from statistics import median
 
-from .budget import TIMING_FIELDS, UNITS_PER_DOLLAR, reported_usd, routing_receipt_sql
+from .budget import REQUEST_OUTCOMES, TIMING_FIELDS, UNITS_PER_DOLLAR, reported_usd, routing_receipt_sql
 from .luna import MODEL as LUNA_MODEL
 from .opus import OPUS_MODEL
 from .routing import ROUTES, safe_provider
 from .transport import MODEL as QWEN_MODEL
+from .turn_metrics import room_turn_metrics
 
 
 MODELS = {"qwen": QWEN_MODEL, "luna": LUNA_MODEL, "opus": OPUS_MODEL}
 TOKEN_FIELDS = ("input_tokens", "output_tokens", "cache_reads", "cache_writes", "reasoning_tokens")
 PROVIDER_GROUP_LIMIT = 8
+FAILED_REQUEST_OUTCOMES = ("empty_output", "timeout", "interrupted", "failed", "incomplete")
 METRIC_NOTES = ("TTFT is the interval from upstream dispatch to the first observed nonempty generated delta, "
                 "including reasoning and tool arguments. Timing and speed samples use completed calls. "
                 "Estimated decoding tokens/s pools output tokens minus one per call over time from first delta "
@@ -25,7 +27,14 @@ METRIC_NOTES = ("TTFT is the interval from upstream dispatch to the first observ
                 "from dispatch. Cost/token pools the API-reported USD charge and reported input plus output "
                 "tokens on the same calls, including cached or reasoning tokens already counted there. "
                 "Provider labels are untrusted OpenRouter metadata. A routing preference can select different "
-                "providers on different calls.")
+                "providers on different calls. completed_calls counts API completions. failed_calls includes "
+                "empty outputs, timeouts, interruptions, incomplete responses and other observed request failures. "
+                "timeout_calls is a subset. request_outcomes counts each request once; older unclassified calls "
+                "are unknown, and pending calls are still open. Usable output means text or a structured call, "
+                "without judging whether the requested task was fulfilled. request_failures_by_provider covers "
+                "all providers with measured failures, including those outside the timing table; a null provider "
+                "means the endpoint is unknown. room_turns uses the UTC date of each recorded room outcome. "
+                "Cost per successful turn includes Qwen spend for both complete and failed turns.")
 
 
 def _read_period(path, start_day, end_day, *, reviews):
@@ -52,6 +61,8 @@ def _read_period(path, start_day, end_day, *, reviews):
         else:
             record["vendor"] = "qwen"
             record["provider"] = safe_provider(record.get("provider"))
+            if record.get("request_outcome") not in REQUEST_OUTCOMES:
+                record["request_outcome"] = None
             record["reported_cost_usd"] = reported_usd(record.get("reported_cost_usd"))
             record["status"] = record.get("status") or ("settled" if record["cost"] is not None else "unsettled")
     return records
@@ -94,9 +105,16 @@ def _call_detail(r):
     if r["vendor"] == "qwen":
         route = r.get("route")
         detail["route"] = route if route in ROUTES else None
-        for key in ("dispatch_at", *TIMING_FIELDS, "provider", "reported_cost_usd"):
+        for key in ("dispatch_at", *TIMING_FIELDS, "provider", "reported_cost_usd", "request_outcome"):
             detail[key] = r.get(key)
     return detail
+
+
+def _request_reliability(rows):
+    outcomes = Counter(r.get("request_outcome") or ("pending" if r["status"] == "pending" else "unknown")
+                       for r in rows)
+    failures = sum(outcomes[k] for k in FAILED_REQUEST_OUTCOMES)
+    return {"failed_calls": failures, "timeout_calls": outcomes["timeout"], "request_outcomes": dict(outcomes)}
 
 
 def _route_summary(rows):
@@ -123,7 +141,8 @@ def _route_summary(rows):
     priced_tokens = priced_input + priced_output
     cache_reads = [r["cache_reads"] for r in priced if r.get("cache_reads") is not None]
     priced_cost = sum(Decimal(r["reported_cost_usd"]) for r in priced)
-    return {"calls": len(rows), "completed_calls": len(completed), "reported_cost_calls": len(costs),
+    return {"calls": len(rows), "completed_calls": len(completed), **_request_reliability(rows),
+            "reported_cost_calls": len(costs),
             "reported_cost_usd": str(sum(costs)) if costs else None, "completed_timings": timings,
             "decoding_samples": len(decoding),
             "decoding_output_tokens_per_second": round(decoded_tokens * 1000 / decoding_ms, 2) if decoding_ms else None,
@@ -141,9 +160,12 @@ def _route_summary(rows):
 def _provider_groups(rows):
     by_route = {route: [] for route in ROUTES}
     by_provider = defaultdict(list)
+    failures = defaultdict(Counter)
     missing_route = missing_provider = 0
     for row in rows:
         route, provider = row.get("route"), row.get("provider")
+        if row.get("request_outcome") in FAILED_REQUEST_OUTCOMES:
+            failures[provider][row["request_outcome"]] += 1
         if route not in by_route:
             missing_route += 1
             continue
@@ -156,7 +178,11 @@ def _provider_groups(rows):
     shown = [{"provider": provider, "route": route, **_route_summary(group)}
              for (provider, route), group in ranked[:PROVIDER_GROUP_LIMIT]]
     omitted = ranked[PROVIDER_GROUP_LIMIT:]
+    failure_groups = [{"provider": provider, "failed_calls": counts.total(), "timeout_calls": counts["timeout"],
+                       "failure_types": dict(counts)}
+                      for provider, counts in sorted(failures.items(), key=lambda item: (-item[1].total(), item[0] or ""))]
     return {"qwen_by_route": {route: _route_summary(group) for route, group in by_route.items()},
+            "request_failures_by_provider": failure_groups,
             "qwen_by_provider_and_route": shown, "qwen_calls_without_route": missing_route,
             "routed_calls_without_provider": missing_provider, "omitted_provider_groups": len(omitted),
             "omitted_provider_calls": sum(len(group) for _, group in omitted), "metric_notes": METRIC_NOTES}
@@ -179,7 +205,8 @@ def provider_summary(state: Path, day: str | None = None) -> dict:
     else:
         start_day = end_day = _utc_day(day)
     qwen_rows = _read_period(state / "usage.sqlite", start_day, end_day, reviews=False)
-    return {"start_day": start_day, "end_day": end_day, **_provider_groups(qwen_rows)}
+    return {"start_day": start_day, "end_day": end_day, **_provider_groups(qwen_rows),
+            "room_turns": room_turn_metrics(state, start_day, end_day)}
 
 
 def _room_review_rates(state, day, daily):
@@ -243,6 +270,7 @@ def usage_report(state: Path, day: str | None = None, *, calls: bool = False, ba
         "calls_without_batch_id_on_day": unassigned,
         "by_model": by_model, "reviews_by_purpose": by_purpose,
         **_provider_groups(qwen_rows),
+        "room_turns": room_turn_metrics(state, day, day, batch=batch),
         "supervisor_to_qwen_settled_cost_ratio": round(supervisors / qwen, 4) if qwen else None,
         "cost_basis": "Qwen uses settled ledger charges. Reviewer costs use estimates from vendor token usage. "
                       "The ratio uses settled amounts only. Token totals sum available counts.",

@@ -44,7 +44,7 @@ PROVIDER_STATS_TOOL = {
     "name": "provider_stats",
     "description": (
         "Compare this harness's observed OpenRouter providers and requested routes. See sample counts, "
-        "time to first token, output tokens per second and blended billed USD per million tokens. "
+        "timeouts and other failures, speed, token costs, and Qwen spend per successful room turn. "
         "Defaults to the last seven UTC dates including today. Supply day for a single UTC date. "
         "Provider names are labels returned by OpenRouter."
     ),

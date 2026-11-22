@@ -248,6 +248,7 @@ def _open_upstream(body, headers):
     deadline = time.monotonic() + UPSTREAM_DEADLINE_SECONDS
     connection = http.client.HTTPSConnection("openrouter.ai", timeout=UPSTREAM_IDLE_SECONDS)
     timer = None
+    expired = False
     try:
         connection.connect()
         # Keep a reference: HTTPConnection may detach the stream's socket in
@@ -259,6 +260,8 @@ def _open_upstream(body, headers):
         upstream_socket.settimeout(min(UPSTREAM_IDLE_SECONDS, remaining))
 
         def expire():
+            nonlocal expired
+            expired = True
             try:
                 upstream_socket.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -270,6 +273,10 @@ def _open_upstream(body, headers):
         connection.request("POST", "/api/v1/responses", body=body, headers=headers)
         with connection.getresponse() as response:
             yield response
+    except (OSError, http.client.HTTPException, UpstreamStreamEnded) as exc:
+        if expired:
+            raise TimeoutError("OpenRouter request deadline expired") from exc
+        raise
     finally:
         if timer is not None:
             timer.cancel()
@@ -283,6 +290,8 @@ def _frames(upstream):
     while True:
         try:
             line = upstream.readline(MAX_EVENT_BYTES - size + 1)
+        except TimeoutError:
+            raise
         except (OSError, http.client.HTTPException) as exc:
             raise UpstreamStreamEnded("upstream stream interrupted") from exc
         size += len(line)
@@ -307,6 +316,8 @@ def _classify_error(error, evidence):
     if not isinstance(error, dict):
         return
     metadata = error.get("metadata") or {}
+    if isinstance(metadata, dict) and (provider := safe_provider(metadata.get("provider_name"))):
+        evidence.setdefault("provider", provider)
     known_codes = {"invalid_prompt", "invalid_request_error", "rate_limit_exceeded", "server",
                    "insufficient_credits", "model_not_found", "not_found", "provider_error",
                    "content_filter", "context_length_exceeded", "permission_denied"}
@@ -386,24 +397,71 @@ def _inspect(event, names, evidence):
         evidence["output_limit_reached"] = True
 
 
-def _has_visible_text(event):
+def _observe_output(event, observed, evidence, received_ms):
+    """Record content categories, never the text or the tool arguments."""
     kind = event.get("type")
+    if kind == "error":
+        observed.add("error")
+        return
     if kind in ("response.output_text.delta", "response.output_text.done"):
         text = event.get("delta" if kind.endswith(".delta") else "text")
-        return isinstance(text, str) and bool(text)
-    if kind in ("response.content_part.added", "response.content_part.done"):
+        parts = [{"type": "output_text", "text": text}]
+    elif kind in ("response.refusal.delta", "response.refusal.done"):
+        observed.add("refusal")
+        return
+    elif kind in ("response.content_part.added", "response.content_part.done"):
         parts = [event.get("part")]
     else:
         if kind in ("response.output_item.added", "response.output_item.done"):
             items = [event.get("item")]
         elif kind in TERMINAL_EVENTS:
-            items = (event.get("response") or {}).get("output") or []
+            items = (event.get("response") or {}).get("output")
+            if not isinstance(items, list):
+                return
+            observed.add("output_list")
         else:
-            return False
-        parts = (part for item in items if isinstance(item, dict) and item.get("type") == "message"
-                 for part in item.get("content") or [])
-    return any(isinstance(part, dict) and part.get("type") == "output_text" and
-               isinstance(part.get("text"), str) and part["text"] for part in parts)
+            return
+        parts = []
+        for item in items:
+            if item.get("type") == "message":
+                parts.extend(item.get("content") or [])
+            elif item.get("type") == "function_call" and kind != "response.output_item.added":
+                # The name has already passed the active registry check. Bare
+                # argument deltas, or markup in ordinary text, are not calls.
+                call_id, raw_args = item.get("call_id"), item.get("arguments")
+                try:
+                    arguments = json.loads(raw_args) if isinstance(raw_args, str) else None
+                except (ValueError, RecursionError):
+                    arguments = None
+                if isinstance(call_id, str) and call_id.strip() and isinstance(arguments, dict):
+                    observed.add("usable")
+                else:
+                    observed.add("malformed_call")
+    for part in parts:
+        if not isinstance(part, dict):
+            observed.add("unknown")
+        elif part.get("type") == "output_text":
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                evidence.setdefault("first_output_ms", received_ms)
+                if text.strip():
+                    observed.add("usable")
+        elif part.get("type") == "refusal":
+            observed.add("refusal")
+        else:
+            observed.add("unknown")
+
+
+def _completed_outcome(observed):
+    if "error" in observed:
+        return "failed"
+    if "usable" in observed:
+        return "usable"
+    if observed & {"refusal", "malformed_call"}:
+        return "failed"
+    if "output_list" in observed and "unknown" not in observed:
+        return "empty_output"
+    return None
 
 
 def _record_usage(usage, evidence):
@@ -434,6 +492,8 @@ def _inspect_nonstream_response(upstream, evidence, elapsed_ms):
             return None, None
         evidence["response_end_ms"] = elapsed_ms()
         detail = json.loads(raw, parse_float=Decimal)
+    except TimeoutError:
+        raise
     except (ValueError, OSError, http.client.HTTPException):
         return None, None
     if not isinstance(detail, dict):
@@ -607,7 +667,11 @@ class OpenRouterGateway:
                     return self.fail(402, "budget reservation refused")
                 admitted_at = time.monotonic()
 
-                def meter(status, cost=None, source=None):
+                def meter(status, outcome, cost=None, source=None):
+                    if evidence.get("steer_acknowledged") or evidence.get("client_disconnected"):
+                        outcome = "superseded"
+                    if outcome is not None:
+                        evidence["request_outcome"] = outcome
                     if cost is not None:
                         evidence["cost_usd"] = str(cost)
                     if gateway.finish is not None:
@@ -619,7 +683,7 @@ class OpenRouterGateway:
                 try:
                     gateway.observe(prepared)
                 except Exception:
-                    meter("review_blocked", Decimal(0), "context_review_blocked")
+                    meter("review_blocked", "local", Decimal(0), "context_review_blocked")
                     evidence["error"] = "required context review unavailable"
                     return self.fail(503, evidence["error"])
                 evidence["status"] = "unconfirmed"
@@ -643,6 +707,7 @@ class OpenRouterGateway:
                     return round((time.monotonic() - dispatched) * 1000)
 
                 terminal_cost = None
+                observed = set()
                 try:
                     evidence["dispatch_at"] = datetime.now(timezone.utc).isoformat()
                     dispatched = time.monotonic()
@@ -665,7 +730,8 @@ class OpenRouterGateway:
                                 evidence["status"] = "invalid_upstream_response"
                                 status, message = 502, "expected OpenRouter event stream"
                                 evidence["error"] = message
-                            meter(evidence["status"], cost, source)
+                            outcome = "timeout" if upstream.status in (408, 504) else "failed"
+                            meter(evidence["status"], outcome, cost, source)
                             return deliver(self.fail, status, message)
                         self.send_response(200)
                         self.send_header("Content-Type", "text/event-stream")
@@ -686,13 +752,15 @@ class OpenRouterGateway:
                             if kind in GENERATED_DELTAS and "first_token_ms" not in evidence:
                                 if isinstance(event.get("delta"), str) and event["delta"]:
                                     evidence["first_token_ms"] = received_ms
-                            if "first_output_ms" not in evidence and _has_visible_text(event):
-                                evidence["first_output_ms"] = received_ms
+                            _observe_output(event, observed, evidence, received_ms)
                             if terminal:
                                 # Publish the audited status only after any
                                 # confirmed cost has been durably recorded.
                                 status = event["type"].partition(".")[2]
-                                meter(status, terminal_cost, "openrouter" if terminal_cost is not None else None)
+                                outcome = _completed_outcome(observed) if status == "completed" else status
+                                if status == "failed" and evidence.get("upstream_error_code") in (408, 504):
+                                    outcome = "timeout"
+                                meter(status, outcome, terminal_cost, "openrouter" if terminal_cost is not None else None)
                                 evidence["status"] = status
                             deliver(self.wfile.write, frame)
                             if terminal:
@@ -701,12 +769,20 @@ class OpenRouterGateway:
                             raise UpstreamStreamEnded("upstream stream ended before a terminal response")
                 except Exception as exc:
                     evidence["error"] = str(exc) if isinstance(exc, ProtocolError) else "gateway or upstream failure"
-                    if isinstance(exc, UpstreamStreamEnded) or (
+                    if isinstance(exc, (TimeoutError, UpstreamStreamEnded)) or (
                         "http_status" not in evidence and isinstance(exc, (OSError, http.client.HTTPException))
                     ):
                         evidence["upstream_transport_interrupted"] = True
                     evidence["status"] = "interrupted"
-                    meter("interrupted", terminal_cost, "openrouter" if terminal_cost is not None else None)
+                    if isinstance(exc, TimeoutError) or evidence.get("upstream_error_code") in (408, 504):
+                        outcome = "timeout"
+                    elif "error" in observed:
+                        outcome = "failed"
+                    elif evidence.get("upstream_transport_interrupted"):
+                        outcome = "interrupted"
+                    else:
+                        outcome = "failed"
+                    meter("interrupted", outcome, terminal_cost, "openrouter" if terminal_cost is not None else None)
                     if isinstance(exc, UnregisteredCall):
                         try:
                             gateway.unregistered(exc.name, exc.arguments)
