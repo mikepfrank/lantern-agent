@@ -77,18 +77,23 @@ class BudgetTests(unittest.TestCase):
     def test_route_receipts_share_one_cap_and_keep_only_known_sorts(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "usage.sqlite"
-            ledger = Budget(path, Decimal("3"))
-            ids = [ledger.reserve({"provider": {"sort": sort}, "input": "private prompt"}, trigger="heartbeat")
-                   for sort in ("price", "throughput", "unknown provider text")]
+            ledger = Budget(path, Decimal("1.6"))
+            ids = [ledger.reserve(payload, trigger="heartbeat") for payload in (
+                {"provider": {"sort": "price"}}, {"provider": {"sort": "throughput"}},
+                {"provider": {"sort": "unknown provider text"}}, {"provider": {"max_price": {"request": 0}}},
+                {"provider": {"sort": None}}, {},
+            )]
             with self.assertRaises(BudgetUnavailable):
                 ledger.reserve({"provider": {"sort": "price"}})
             with closing(sqlite3.connect(path)) as db:
                 self.assertEqual(dict(db.execute("SELECT request_id,route FROM request_routes")),
-                                 {ids[0]: "cheapest", ids[1]: "fastest"})
+                                 {ids[0]: "cheapest", ids[1]: "fastest", ids[3]: "default"})
                 day, = db.execute("SELECT day FROM requests WHERE id=?", (ids[0],)).fetchone()
-            calls = usage_report(path.parent, day, calls=True)["calls"]
-            self.assertEqual({row["id"]: row["route"] for row in calls},
-                             {ids[0]: "cheapest", ids[1]: "fastest", ids[2]: None})
+            report = usage_report(path.parent, day, calls=True)
+            self.assertEqual({row["id"]: row["route"] for row in report["calls"]},
+                             dict(zip(ids, ("cheapest", "fastest", None, "default", None, None))))
+            self.assertEqual(report["qwen_by_route"]["default"]["calls"], 1)
+            self.assertEqual(report["qwen_calls_without_route"], 3)
 
     def test_handoff_reminder_survives_restart_and_rearms_for_new_context(self):
         with tempfile.TemporaryDirectory() as folder:

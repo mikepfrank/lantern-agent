@@ -194,13 +194,15 @@ def _prepare(payload, route, tools, *, resuming=False, managed_registry=False, r
     forwarded = {k: payload[k] for k in ("instructions", "reasoning", "include") if k in payload}
     forwarded.update(
         model=MODEL, input=prepared_input, stream=True, store=False, max_output_tokens=MAX_OUTPUT_TOKENS,
-        provider={"sort": ROUTES[route], "max_price": {
+        provider={"max_price": {
             "prompt": MAX_PROMPT_PRICE, "completion": MAX_COMPLETION_PRICE, "request": 0, "image": 0,
         }},
         tools=[{"type": "function", "name": tool["name"], "description": tool["description"],
                 "parameters": tool["inputSchema"], "strict": False} for tool in tools if incoming],
         tool_choice=choice, parallel_tool_calls=False,
     )
+    if ROUTES[route] is not None:
+        forwarded["provider"]["sort"] = ROUTES[route]
     return forwarded
 
 

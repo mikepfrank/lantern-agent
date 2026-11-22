@@ -17,7 +17,7 @@ class ChatStoreTests(unittest.TestCase):
         self.store = ChatStore(self.state)
 
     def test_routing_uses_startup_default_until_chosen_and_survives_replay(self):
-        for default in ("fastest", "cheapest"):
+        for default in ("fastest", "cheapest", "default"):
             self.assertEqual(default, self.store.provider_route(default))
         old = self.store.set_provider_route("fastest", call_id="first")
         self.assertEqual({"route": "fastest", "sort": "throughput"}, old)
@@ -29,6 +29,8 @@ class ChatStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different routing choice"):
             reopened.set_provider_route("cheapest", call_id="first")
         self.assertEqual("cheapest", reopened.provider_route("fastest"))
+        self.assertEqual(reopened.set_provider_route("default", call_id="balanced"), {"route": "default", "sort": None})
+        self.assertEqual(ChatStore(self.state).provider_route("fastest"), "default")
 
     def test_invalid_route_or_receipt_preserves_room_choice(self):
         self.store.set_provider_route("cheapest", call_id="good")

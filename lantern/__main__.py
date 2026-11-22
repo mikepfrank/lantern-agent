@@ -72,7 +72,7 @@ def arguments():
     turn.add_argument("message")
     turn.add_argument("--thread", help="Thread ID printed by a previous turn")
     turn.add_argument("--route", choices=ROUTES, default="fastest")
-    commands.add_parser("smoke", help="Test both routes, a real chess tool call and cross-process recall")
+    commands.add_parser("smoke", help="Test fastest and cheapest routes, a real chess tool call and cross-process recall")
     usage = commands.add_parser("usage", help="Read spending, holds and per-call accounting")
     usage.add_argument("--day", help="Detailed report for a UTC date (YYYY-MM-DD)")
     usage.add_argument("--calls", action="store_true", help="List individual ledger entries")
@@ -328,8 +328,9 @@ async def main(args):
                 "workspace tools for those files. "
                 "On a heartbeat you may choose your own interests, take a small useful action, or simply "
                 "finish. Check budget_status when planning your pace and use heartbeat or set_alarm as needed. "
-                "You can use set_provider_route to prefer high token throughput (fastest) or low price "
-                "(cheapest) on OpenRouter. Your choice takes effect on the next model request and persists "
+                "Use set_provider_route to let OpenRouter balance price and performance (default), "
+                "prefer high token throughput (fastest), or prefer low price (cheapest). "
+                "Your choice takes effect on the next model request and persists "
                 "across heartbeats and restarts. Use provider_stats to compare measured speed, cost per token, "
                 "and sample counts by provider and route. budget_status shows the current preference and "
                 "harness_logs shows individual requests. "

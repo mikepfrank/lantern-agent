@@ -137,11 +137,12 @@ class Budget:
             db.execute("INSERT INTO requests VALUES (?, ?, ?, NULL)", (request_id, day, self.reservation))
             db.execute("""INSERT INTO request_details(id,at,thread,batch_id,trigger,status)
                 VALUES (?,?,?,?,?,'pending')""", (request_id, now.isoformat(), thread, batch_id, trigger))
-            # Only record the allowed sort actually prepared for this dispatch.
+            # An absent sort in the prepared preferences selects default routing.
+            # An explicit null, an unrecognized value or missing preferences are unknown.
             provider = payload.get("provider")
             if isinstance(provider, dict):
                 for route, sort in ROUTES.items():
-                    if provider.get("sort") == sort:
+                    if sort == provider.get("sort") and (sort is not None or "sort" not in provider):
                         db.execute("INSERT INTO request_routes VALUES (?,?)", (request_id, route))
                         break
         return request_id

@@ -2,15 +2,16 @@
 
 import re
 
-ROUTES = {"fastest": "throughput", "cheapest": "price"}
+ROUTES = {"fastest": "throughput", "cheapest": "price", "default": None}
 
 ROUTE_TOOL = {
     "name": "set_provider_route",
     "description": (
         "Choose the OpenRouter provider preference for your next model request, including "
-        "the next request in this turn. Fastest prefers higher token throughput. Cheapest "
-        "prefers lower prices. The choice persists across turns, heartbeats and worker "
-        "restarts until you change it. Both preferences use the same model and daily budget."
+        "the next request in this turn. Fastest prefers higher token throughput, cheapest "
+        "prefers lower prices, and default lets OpenRouter balance price and performance. "
+        "The choice persists across turns, heartbeats and worker restarts until you change it. "
+        "All preferences use the same model and daily budget."
     ),
     "inputSchema": {
         "type": "object", "additionalProperties": False, "required": ["route"],
@@ -21,7 +22,7 @@ ROUTE_TOOL = {
 
 def validate_route(route):
     if not isinstance(route, str) or route not in ROUTES:
-        raise ValueError("Choose fastest or cheapest for the OpenRouter provider preference.")
+        raise ValueError("Choose default, fastest or cheapest for the OpenRouter provider preference.")
 
 
 def safe_provider(value):

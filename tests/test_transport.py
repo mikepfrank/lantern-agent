@@ -290,14 +290,18 @@ class TransportTests(unittest.TestCase):
         self.settle.assert_not_called()
 
     def test_routing_accounting_and_canonical_tools(self):
-        for route, sort in (("cheapest", "price"), ("fastest", "throughput")):
+        for route, sort in (("cheapest", "price"), ("fastest", "throughput"), ("default", None)):
             with self.subTest(route=route), self.gateway(route) as gate:
                 status, received = self.request(gate, provider={"only": ["untrusted"]},
                                                 plugins=[{"id": "web"}], store=True, max_output_tokens=8192)
                 self.assertEqual((status, received), (200, self.stream))
                 sent, headers = self.wire[-1]
                 self.assertEqual(sent["max_output_tokens"], 32_768)
-                self.assertEqual(sent["provider"]["sort"], sort)
+                if sort is None:
+                    self.assertNotIn("sort", sent["provider"])
+                else:
+                    self.assertEqual(sent["provider"]["sort"], sort)
+                self.assertEqual(gate.evidence[-1]["route"], route)
                 self.assertEqual(sent["provider"]["max_price"]["request"], 0)
                 self.assertNotIn("require_parameters", sent["provider"])
                 self.assertNotIn("only", sent["provider"])
