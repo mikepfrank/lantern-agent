@@ -82,7 +82,7 @@ class DiagnosticsTests(TestCase):
         second = store.claim().id
         store.complete(second, secret)
         budget = Budget(self.state / "usage.sqlite", Decimal("0.2"))
-        rid = budget.reserve({}, thread=secret, batch_id=first, trigger="operator")
+        rid = budget.reserve({"provider": {"sort": "price"}}, thread=secret, batch_id=first, trigger="operator")
         budget.finish(rid, Decimal("0.03"), status="incomplete", evidence={"output_tokens": 8192},
                       ms=3655, charge_source="openrouter")
         Supervisor(self.state, None, None, None)
@@ -118,6 +118,7 @@ class DiagnosticsTests(TestCase):
         qwen, = (r for r in rows if r["type"] == "qwen")
         self.assertEqual((qwen["ref"], qwen["status"], qwen["duration_ms"], qwen["settled_usd"]),
                          ("qwen:" + rid, "incomplete", 3655, "0.03"))
+        self.assertEqual(qwen["route"], "cheapest")
         self.assertTrue(any(r.get("validation") == "malformed_xml" and r["http_status"] == 200 for r in rows))
         self.assertTrue(any(r.get("evidence_topics") == ["credentials"] for r in rows))
         self.assertTrue(any(r.get("outcome_code") == "opus_budget_unavailable" for r in rows))

@@ -6,10 +6,88 @@ import sqlite3
 import tempfile
 import unittest
 
-from lantern.budget import Budget
+from lantern.budget import Budget, BudgetUnavailable
+from lantern.diagnostics import read_diagnostics
+from lantern.usage_report import usage_report
 
 
 class BudgetTests(unittest.TestCase):
+    def test_routing_measurements_distinguish_missing_terminal_and_unbilled_requests(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "usage.sqlite"
+            ledger = Budget(path, Decimal("3"))
+            evidence = {"dispatch_at": "2026-11-21T03:04:05.123456+00:00", "response_start_ms": 30,
+                        "first_token_ms": 100, "first_output_ms": 200, "response_end_ms": 1000,
+                        "input_tokens": 80, "output_tokens": 20, "provider": "Host A"}
+            billed = ledger.reserve({"provider": {"sort": "price"}})
+            ledger.finish(billed, Decimal("0.0010000004"), status="completed", evidence=evidence,
+                          ms=2001, charge_source="openrouter")
+            free = ledger.reserve({"provider": {"sort": "price"}})
+            ledger.finish(free, Decimal("0"), status="completed",
+                          evidence={**evidence, "first_token_ms": 2000, "response_end_ms": 3000, "first_output_ms": None},
+                          ms=4000, charge_source="openrouter")
+            held = ledger.reserve({"provider": {"sort": "price"}})
+            ledger.finish(held, None, status="interrupted", evidence={
+                "dispatch_at": evidence["dispatch_at"], "provider": "private\ncontent", "response_start_ms": 11},
+                ms=40, charge_source=None)
+            rejected = ledger.reserve({"provider": {"sort": "throughput"}})
+            ledger.finish(rejected, Decimal("0"), status="upstream_http_error", evidence={},
+                          ms=27, charge_source="router_no_eligible_endpoint")
+            # A duplicate finalization cannot replace the first stream measurements.
+            ledger.finish(billed, Decimal("0.0010000004"), status="completed", evidence={**evidence, "response_end_ms": 1},
+                          ms=1, charge_source="openrouter")
+            with closing(sqlite3.connect(path)) as db:
+                day, = db.execute("SELECT day FROM requests WHERE id=?", (billed,)).fetchone()
+                self.assertEqual(db.execute("SELECT actual FROM requests WHERE id=?", (held,)).fetchone(), (None,))
+                self.assertEqual(db.execute("SELECT actual FROM requests WHERE id=?", (billed,)).fetchone(), (1_000_001,))
+            report = usage_report(path.parent, day, calls=True)
+            calls = {r["id"]: r for r in report["calls"]}
+            self.assertEqual(calls[billed]["reported_cost_usd"], "0.0010000004")
+            self.assertEqual(calls[free]["reported_cost_usd"], "0")
+            self.assertIsNone(calls[held]["reported_cost_usd"])
+            self.assertIsNone(calls[rejected]["reported_cost_usd"])
+            self.assertIsNone(calls[held]["response_end_ms"])
+            self.assertIsNone(calls[held]["provider"])
+            self.assertEqual(calls[held]["held_usd"], "3")
+            cheap = report["qwen_by_route"]["cheapest"]
+            self.assertEqual((cheap["calls"], cheap["completed_calls"], cheap["reported_cost_calls"],
+                              cheap["reported_cost_usd"]), (3, 2, 2, "0.0010000004"))
+            self.assertEqual(cheap["completed_timings"]["response_end_ms"],
+                             {"samples": 2, "mean_ms": 2000, "median_ms": 2000})
+            self.assertEqual(cheap["completed_timings"]["first_output_ms"]["samples"], 1)
+            self.assertEqual(cheap["completed_timings"]["first_token_ms"], {"samples": 2, "mean_ms": 1050, "median_ms": 1050})
+            self.assertEqual((cheap["decoding_samples"], cheap["decoding_output_tokens_per_second"]), (2, 20))
+            self.assertEqual((cheap["priced_token_samples"], cheap["priced_tokens"],
+                              cheap["calls_without_paired_cost_and_tokens"]), (2, 200, 1))
+            self.assertEqual(Decimal(cheap["usd_per_token"]), Decimal("0.0010000004") / 200)
+            self.assertEqual(Decimal(cheap["usd_per_million_tokens"]), Decimal("5.000002"))
+            self.assertEqual((cheap["throughput_samples"], cheap["effective_output_tokens_per_second"]), (2, 10))
+            fast = report["qwen_by_route"]["fastest"]
+            self.assertEqual(fast["completed_timings"]["response_start_ms"]["samples"], 0)
+            self.assertIsNone(fast["reported_cost_usd"])
+            logs = {r["ref"]: r for r in read_diagnostics(path.parent, {})["records"]}
+            for key in ("dispatch_at", "response_start_ms", "first_token_ms", "first_output_ms", "response_end_ms", "provider"):
+                self.assertEqual(logs["qwen:" + billed][key], evidence[key])
+            self.assertEqual(logs["qwen:" + free]["reported_cost_usd"], "0")
+            self.assertNotIn("response_end_ms", logs["qwen:" + held])
+            self.assertNotIn("provider", logs["qwen:" + held])
+
+    def test_route_receipts_share_one_cap_and_keep_only_known_sorts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "usage.sqlite"
+            ledger = Budget(path, Decimal("3"))
+            ids = [ledger.reserve({"provider": {"sort": sort}, "input": "private prompt"}, trigger="heartbeat")
+                   for sort in ("price", "throughput", "unknown provider text")]
+            with self.assertRaises(BudgetUnavailable):
+                ledger.reserve({"provider": {"sort": "price"}})
+            with closing(sqlite3.connect(path)) as db:
+                self.assertEqual(dict(db.execute("SELECT request_id,route FROM request_routes")),
+                                 {ids[0]: "cheapest", ids[1]: "fastest"})
+                day, = db.execute("SELECT day FROM requests WHERE id=?", (ids[0],)).fetchone()
+            calls = usage_report(path.parent, day, calls=True)["calls"]
+            self.assertEqual({row["id"]: row["route"] for row in calls},
+                             {ids[0]: "cheapest", ids[1]: "fastest", ids[2]: None})
+
     def test_handoff_reminder_survives_restart_and_rearms_for_new_context(self):
         with tempfile.TemporaryDirectory() as folder:
             ledger = Budget(Path(folder) / "usage.sqlite", Decimal(".1"))

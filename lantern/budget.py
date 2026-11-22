@@ -2,16 +2,56 @@
 
 from contextlib import closing
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 import sqlite3
 from uuid import uuid4
+
+from .routing import ROUTES, safe_provider
 
 
 UNITS_PER_DOLLAR = 1_000_000_000
 MODEL_CONTEXT_TOKENS = 1_024_000
 HANDOFF_REMINDER_TOKENS = 180_000
 DAILY_USD = Decimal("10")
+TIMING_FIELDS = ("response_start_ms", "first_token_ms", "first_output_ms", "response_end_ms")
+
+
+def reported_usd(value):
+    """Validate a serialized provider charge before showing it or summing samples."""
+    if not isinstance(value, str) or len(value) > 80:
+        return None
+    try:
+        amount = Decimal(value)
+    except InvalidOperation:
+        return None
+    if amount.is_finite() and amount >= 0:
+        return str(amount)
+
+
+def dispatch_utc(value):
+    if not isinstance(value, str) or len(value) > 40:
+        return None
+    try:
+        stamp = datetime.fromisoformat(value)
+        if stamp.tzinfo is not None:
+            return stamp.astimezone(timezone.utc).isoformat()
+    except (ValueError, OverflowError):
+        return None
+
+
+def routing_receipt_sql(db, tables, prefix=""):
+    """Read the receipt fields that exist in this ledger version without upgrading it."""
+    fields, joins = [], []
+    for table, alias, names in (
+        ("request_routes", "p", ("route",)),
+        ("request_metrics", "m", ("dispatch_at", *TIMING_FIELDS, "provider", "reported_cost_usd")),
+    ):
+        if prefix + table in tables:
+            joins.append(f"LEFT JOIN {prefix}{table} {alias} ON {alias}.request_id=d.id")
+            columns = {r[1] for r in db.execute(f"PRAGMA {prefix}table_info({table})")}
+            fields.extend(f"{alias}.{name}" for name in names if name in columns)
+    return "".join(", " + field for field in fields), " ".join(joins)
 
 
 class BudgetUnavailable(ValueError):
@@ -36,6 +76,7 @@ class Budget:
             raise ValueError("A request needs a positive reservation")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute("""CREATE TABLE IF NOT EXISTS requests (
                 id TEXT PRIMARY KEY, day TEXT NOT NULL, reserved INTEGER NOT NULL,
                 actual INTEGER CHECK(actual >= 0))""")
@@ -47,6 +88,14 @@ class Budget:
                 output_tokens INTEGER, cache_reads INTEGER, cache_writes INTEGER,
                 reasoning_tokens INTEGER, ms INTEGER, charge_source TEXT)""")
             db.execute("CREATE INDEX IF NOT EXISTS details_by_thread ON request_details(thread)")
+            db.execute("""CREATE TABLE IF NOT EXISTS request_routes (
+                request_id TEXT PRIMARY KEY REFERENCES request_details(id), route TEXT NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS request_metrics (
+                request_id TEXT PRIMARY KEY REFERENCES request_details(id), dispatch_at TEXT,
+                response_start_ms INTEGER, first_token_ms INTEGER, first_output_ms INTEGER, response_end_ms INTEGER,
+                provider TEXT, reported_cost_usd TEXT)""")
+            if "first_token_ms" not in {r[1] for r in db.execute("PRAGMA table_info(request_metrics)")}:
+                db.execute("ALTER TABLE request_metrics ADD COLUMN first_token_ms INTEGER")
             db.execute("""CREATE TABLE IF NOT EXISTS handoff_events (
                 request_id TEXT PRIMARY KEY REFERENCES request_details(id), event TEXT NOT NULL)""")
 
@@ -88,6 +137,13 @@ class Budget:
             db.execute("INSERT INTO requests VALUES (?, ?, ?, NULL)", (request_id, day, self.reservation))
             db.execute("""INSERT INTO request_details(id,at,thread,batch_id,trigger,status)
                 VALUES (?,?,?,?,?,'pending')""", (request_id, now.isoformat(), thread, batch_id, trigger))
+            # Only record the allowed sort actually prepared for this dispatch.
+            provider = payload.get("provider")
+            if isinstance(provider, dict):
+                for route, sort in ROUTES.items():
+                    if provider.get("sort") == sort:
+                        db.execute("INSERT INTO request_routes VALUES (?,?)", (request_id, route))
+                        break
         return request_id
 
     def settle(self, request_id: str, cost: Decimal) -> None:
@@ -110,6 +166,18 @@ class Budget:
             updated = db.execute("""UPDATE request_details SET status=?,input_tokens=?,output_tokens=?,cache_reads=?,
                 cache_writes=?,reasoning_tokens=?,ms=?,charge_source=? WHERE id=? AND status='pending'""",
                        (status, *counters, ms, charge_source, request_id))
+            if updated.rowcount:
+                # A missing bill keeps its full reservation. Explicit OpenRouter
+                # charges (including zero) retain the returned decimal precision.
+                reported = str(cost) if cost is not None and charge_source == "openrouter" else None
+                timings = [evidence.get(key) for key in TIMING_FIELDS]
+                timings = [t if type(t) is int and 0 <= t < 2**63 else None for t in timings]
+                observations = (dispatch_utc(evidence.get("dispatch_at")), *timings,
+                                safe_provider(evidence.get("provider")), reported)
+                if any(v is not None for v in observations):
+                    db.execute("""INSERT INTO request_metrics(request_id, dispatch_at, response_start_ms,
+                                  first_token_ms, first_output_ms, response_end_ms, provider, reported_cost_usd)
+                                  VALUES(?,?,?,?,?,?,?,?)""", (request_id, *observations))
             event = evidence.get("handoff_event")
             superseded = evidence.get("steer_acknowledged") or evidence.get("client_disconnected")
             if updated.rowcount and status == "completed" and not superseded and event in ("reminded", "tool_free"):

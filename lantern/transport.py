@@ -2,6 +2,7 @@
 
 import base64
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from decimal import Decimal
 from functools import cache
 import hashlib
@@ -17,6 +18,7 @@ import time
 from .attachments import MAX_IMAGE_BYTES, MAX_TURN_IMAGES, SIGNATURE
 from .image_ref import parse_reference
 from .local_time import central_time
+from .routing import ROUTES, safe_provider
 
 
 MODEL = "qwen/qwen3.8-27b"
@@ -36,12 +38,15 @@ MAX_OUTPUT_TOKENS = 32_768
 # USD per million tokens. Admission uses the same ceilings as the upstream filter.
 MAX_PROMPT_PRICE = 1
 MAX_COMPLETION_PRICE = 4
-ROUTES = {"fastest": "throughput", "cheapest": "price"}
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_EVENT_BYTES = 2 * 1024 * 1024
 UPSTREAM_IDLE_SECONDS = 120
 UPSTREAM_DEADLINE_SECONDS = 300
 TERMINAL_EVENTS = {"response.completed", "response.failed", "response.incomplete"}
+GENERATED_DELTAS = {
+    "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta",
+    "response.reasoning.delta", "response.refusal.delta", "response.function_call_arguments.delta",
+}
 IMAGE_CONTENT_TYPES = frozenset(("input_image", "output_image", "image", "image_url"))
 HANDOFF_REMINDER = (
     "This conversation is approaching automatic compaction. Before finishing this turn, use your workspace "
@@ -323,9 +328,23 @@ def _no_eligible_endpoint(status, error):
     return message in (known, known + ".", known + docs)
 
 
+def _record_provider(response, metadata, evidence):
+    provider = safe_provider(response.get("provider"))
+    endpoints = metadata.get("endpoints") if isinstance(metadata, dict) else None
+    available = endpoints.get("available") if isinstance(endpoints, dict) else None
+    if isinstance(available, list):
+        for endpoint in available:
+            if isinstance(endpoint, dict) and endpoint.get("selected") is True:
+                provider = safe_provider(endpoint.get("provider")) or provider
+                break
+    if provider:
+        evidence["provider"] = provider
+
+
 def _inspect(event, names, evidence):
     kind = event.get("type", "")
     response = event.get("response") or {}
+    _record_provider(response, event.get("openrouter_metadata") or response.get("openrouter_metadata"), evidence)
     items = list(response.get("output") or [])
     if kind in ("response.content_part.added", "response.content_part.done"):
         if (event.get("part") or {}).get("type") in IMAGE_CONTENT_TYPES:
@@ -349,16 +368,36 @@ def _inspect(event, names, evidence):
         evidence["request_id"] = response["id"]
     if isinstance(response.get("model"), str):
         evidence["observed_model"] = response["model"]
-    metadata = event.get("openrouter_metadata") or response.get("openrouter_metadata") or {}
-    for endpoint in metadata.get("endpoints", {}).get("available", []):
-        if endpoint.get("selected") is True:
-            evidence["provider"] = endpoint.get("provider")
     if kind not in TERMINAL_EVENTS:
-        return None
+        return
     incomplete = response.get("incomplete_details") or {}
     if isinstance(incomplete, dict) and incomplete.get("reason") == "max_output_tokens":
         evidence["output_limit_reached"] = True
-    usage = response.get("usage") or {}
+
+
+def _has_visible_text(event):
+    kind = event.get("type")
+    if kind in ("response.output_text.delta", "response.output_text.done"):
+        text = event.get("delta" if kind.endswith(".delta") else "text")
+        return isinstance(text, str) and bool(text)
+    if kind in ("response.content_part.added", "response.content_part.done"):
+        parts = [event.get("part")]
+    else:
+        if kind in ("response.output_item.added", "response.output_item.done"):
+            items = [event.get("item")]
+        elif kind in TERMINAL_EVENTS:
+            items = (event.get("response") or {}).get("output") or []
+        else:
+            return False
+        parts = (part for item in items if isinstance(item, dict) and item.get("type") == "message"
+                 for part in item.get("content") or [])
+    return any(isinstance(part, dict) and part.get("type") == "output_text" and
+               isinstance(part.get("text"), str) and part["text"] for part in parts)
+
+
+def _record_usage(usage, evidence):
+    if not isinstance(usage, dict):
+        return None
     inputs = usage.get("input_tokens_details")
     outputs = usage.get("output_tokens_details")
     for source, field, target in (
@@ -375,6 +414,27 @@ def _inspect(event, names, evidence):
     return None
 
 
+def _inspect_nonstream_response(upstream, evidence, elapsed_ms):
+    # Error bodies can contain billable usage. Read bounded JSON, retaining only evidence.
+    limit = MAX_EVENT_BYTES if upstream.status == 200 else 16384
+    try:
+        raw = upstream.read(limit + 1)
+        if len(raw) > limit or getattr(upstream, "length", None) not in (None, 0):
+            return None, None
+        evidence["response_end_ms"] = elapsed_ms()
+        detail = json.loads(raw, parse_float=Decimal)
+    except (ValueError, OSError, http.client.HTTPException):
+        return None, None
+    if not isinstance(detail, dict):
+        return None, None
+    response = detail.get("response", detail)
+    if not isinstance(response, dict):
+        return detail.get("error"), None
+    metadata = detail.get("openrouter_metadata") or response.get("openrouter_metadata")
+    _record_provider(response, metadata, evidence)
+    return detail.get("error"), _record_usage(response.get("usage"), evidence)
+
+
 class OpenRouterGateway:
     """A fresh local token for one Codex client. Reserve/settle are durable host callbacks.
 
@@ -386,10 +446,11 @@ class OpenRouterGateway:
 
     def __init__(self, api_key, *, route, tools, reserve, settle, observe, unregistered, resuming=False,
                  operator_context="", finish=None, handoff_due=None, image_loader=None, page_image_loader=None,
-                 managed_registry=False, reviewed_calls=None, image_by_digest=None):
+                 managed_registry=False, reviewed_calls=None, image_by_digest=None, route_source=None):
         if route not in ROUTES or not api_key:
             raise ValueError("a valid route and OpenRouter key are required")
         self.route = route
+        self.route_source = route_source
         self.tools = list(tools)
         self.reserve, self.settle = reserve, settle
         self.finish = finish
@@ -482,14 +543,22 @@ class OpenRouterGateway:
                 expected = "Bearer " + gateway.token
                 if not hmac.compare_digest(self.headers.get("Authorization", "").encode(), expected.encode()):
                     return self.reject_unread(401, "unauthorized")
-                evidence = {"model": MODEL, "sort": ROUTES[gateway.route], "status": "rejected"}
+                evidence = {"model": MODEL, "status": "rejected"}
                 gateway.evidence.append(evidence)
+                # One snapshot belongs to this request, including its billing
+                # evidence when a concurrent tool call changes the room setting.
+                try:
+                    route = gateway.route_source() if gateway.route_source is not None else gateway.route
+                    evidence.update(route=route, sort=ROUTES[route])
+                except Exception:
+                    evidence["error"] = "provider routing preference unavailable"
+                    return self.reject_unread(503, evidence["error"])
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
                     if not 0 < length <= MAX_REQUEST_BYTES:
                         evidence["error"] = "invalid request size"
                         return self.reject_unread(413, "invalid request size")
-                    prepared = _prepare(json.loads(self.rfile.read(length)), gateway.route, gateway.tools,
+                    prepared = _prepare(json.loads(self.rfile.read(length)), route, gateway.tools,
                                         resuming=gateway.resuming, image_loader=gateway.image_loader,
                                         image_by_digest=gateway.image_by_digest,
                                         page_image_loader=gateway.page_image_loader,
@@ -515,6 +584,8 @@ class OpenRouterGateway:
                 admitted_at = time.monotonic()
 
                 def meter(status, cost=None, source=None):
+                    if cost is not None:
+                        evidence["cost_usd"] = str(cost)
                     if gateway.finish is not None:
                         gateway.finish(reservation, cost, status=status, evidence=evidence,
                                        ms=round((time.monotonic() - admitted_at) * 1000), charge_source=source)
@@ -544,45 +615,60 @@ class OpenRouterGateway:
                         evidence["client_disconnected"] = True
                         self.close_connection = True
 
+                def elapsed_ms():
+                    return round((time.monotonic() - dispatched) * 1000)
+
+                terminal_cost = None
                 try:
+                    evidence["dispatch_at"] = datetime.now(timezone.utc).isoformat()
+                    dispatched = time.monotonic()
                     with _open_upstream(body, headers) as upstream:
+                        evidence["response_start_ms"] = elapsed_ms()
                         evidence["http_status"] = upstream.status
-                        if upstream.status != 200:
-                            evidence["status"] = "upstream_http_error"
-                            try:
-                                detail = json.loads(upstream.read(16384))
-                            except (ValueError, OSError):
-                                detail = None
-                            error = detail.get("error") if isinstance(detail, dict) else None
-                            _classify_error(error, evidence)
-                            if _no_eligible_endpoint(upstream.status, error):
-                                meter("upstream_http_error", Decimal(0), "router_no_eligible_endpoint")
-                                evidence["cost_usd"] = "0"
-                                evidence["settlement_reason"] = "router_no_eligible_endpoint"
+                        media_type = upstream.getheader("Content-Type", "").split(";")[0].strip().lower()
+                        if upstream.status != 200 or media_type != "text/event-stream":
+                            error, cost = _inspect_nonstream_response(upstream, evidence, elapsed_ms)
+                            source = "openrouter" if cost is not None else None
+                            if upstream.status != 200:
+                                evidence["status"] = "upstream_http_error"
+                                _classify_error(error, evidence)
+                                if cost is None and _no_eligible_endpoint(upstream.status, error):
+                                    cost, source = Decimal(0), "router_no_eligible_endpoint"
+                                    evidence["settlement_reason"] = source
+                                status = upstream.status if 400 <= upstream.status < 600 else 502
+                                message = "OpenRouter declined the request"
                             else:
-                                meter("upstream_http_error")
-                            return deliver(self.fail, upstream.status if 400 <= upstream.status < 600 else 502,
-                                           "OpenRouter declined the request")
-                        if upstream.getheader("Content-Type", "").split(";")[0].strip().lower() != "text/event-stream":
-                            evidence["status"] = "invalid_upstream_response"
-                            evidence["error"] = "expected OpenRouter event stream"
-                            meter("invalid_upstream_response")
-                            return deliver(self.fail, 502, "expected OpenRouter event stream")
+                                evidence["status"] = "invalid_upstream_response"
+                                status, message = 502, "expected OpenRouter event stream"
+                                evidence["error"] = message
+                            meter(evidence["status"], cost, source)
+                            return deliver(self.fail, status, message)
                         self.send_response(200)
                         self.send_header("Content-Type", "text/event-stream")
                         deliver(self.end_headers)
                         started = True
                         names = {tool["name"] for tool in prepared["tools"]}
                         for frame, event in _frames(upstream):
-                            cost = _inspect(event, names, evidence)
-                            terminal = event.get("type") in TERMINAL_EVENTS
+                            kind = event.get("type")
+                            terminal = kind in TERMINAL_EVENTS
+                            received_ms = elapsed_ms()
+                            if terminal:
+                                evidence["response_end_ms"] = received_ms
+                                response = event.get("response")
+                                if isinstance(response, dict):
+                                    # A refused output can still carry a genuine billable charge.
+                                    terminal_cost = _record_usage(response.get("usage"), evidence)
+                            _inspect(event, names, evidence)
+                            if kind in GENERATED_DELTAS and "first_token_ms" not in evidence:
+                                if isinstance(event.get("delta"), str) and event["delta"]:
+                                    evidence["first_token_ms"] = received_ms
+                            if "first_output_ms" not in evidence and _has_visible_text(event):
+                                evidence["first_output_ms"] = received_ms
                             if terminal:
                                 # Publish the audited status only after any
                                 # confirmed cost has been durably recorded.
                                 status = event["type"].partition(".")[2]
-                                meter(status, cost, "openrouter" if cost is not None else None)
-                                if cost is not None:
-                                    evidence["cost_usd"] = str(cost)
+                                meter(status, terminal_cost, "openrouter" if terminal_cost is not None else None)
                                 evidence["status"] = status
                             deliver(self.wfile.write, frame)
                             if terminal:
@@ -596,7 +682,7 @@ class OpenRouterGateway:
                     ):
                         evidence["upstream_transport_interrupted"] = True
                     evidence["status"] = "interrupted"
-                    meter("interrupted")
+                    meter("interrupted", terminal_cost, "openrouter" if terminal_cost is not None else None)
                     if isinstance(exc, UnregisteredCall):
                         try:
                             gateway.unregistered(exc.name, exc.arguments)

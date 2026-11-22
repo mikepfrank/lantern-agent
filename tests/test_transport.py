@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from datetime import datetime, timedelta
 from decimal import Decimal
 import base64
 import hashlib
@@ -272,6 +273,146 @@ class TransportTests(unittest.TestCase):
                 self.assertEqual(gate.evidence[-1]["status"], "completed")
                 self.assertEqual(gate.evidence[-1]["input_tokens"], 100)
 
+    def test_provider_timing_excludes_review_and_skips_reasoning_and_empty_text(self):
+        now = 20
+        finish = Mock()
+        clock = self.enterContext(patch("lantern.transport.time", wraps=time))
+        clock.monotonic.side_effect = lambda: now
+
+        def review(prepared):
+            nonlocal now
+            now += 15
+
+        original_frames = [
+            event("response.created", response={"id": "r"}),
+            event("response.reasoning_summary_text.delta", delta="thinking"),
+            event("response.output_text.delta", delta=""),
+            event("response.output_text.delta", delta="visible"),
+            event("response.output_text.delta", delta="again"),
+            event("response.completed", response={"usage": {"cost": 0}, "openrouter_metadata": {
+                "endpoints": {"available": [
+                    {"provider": "Ignored", "selected": False}, {"provider": "Valid Provider", "selected": True}
+                ]}}}),
+        ]
+
+        class MeasuredStream(Stream):
+            def readline(self, *args):
+                nonlocal now
+                line = super().readline(*args)
+                if line.startswith(b"data:"):
+                    now += 0.125
+                return line
+
+        @contextmanager
+        def upstream(body, headers):
+            nonlocal now
+            now += 0.25
+            yield MeasuredStream(b"".join(original_frames))
+
+        self.observe.side_effect = review
+        with patch("lantern.transport._open_upstream", upstream), self.gateway("fastest", finish=finish) as gate:
+            self.assertEqual(self.request(gate)[0], 200)
+        call = finish.call_args
+        record = call.kwargs["evidence"]
+        self.assertEqual(call.args, (31, Decimal(0)))
+        self.assertEqual(call.kwargs["charge_source"], "openrouter")
+        self.assertEqual(call.kwargs["ms"], 16000)
+        self.assertEqual(record["provider"], "Valid Provider")
+        self.assertEqual(record["response_start_ms"], 250)
+        self.assertEqual(record["first_token_ms"], 500)
+        self.assertEqual(record["first_output_ms"], 750)
+        self.assertEqual(record["response_end_ms"], 1000)
+        self.assertEqual(datetime.fromisoformat(record["dispatch_at"]).utcoffset(), timedelta(0))
+
+    def test_first_visible_text_can_arrive_complete_without_observed_token_deltas(self):
+        part = {"type": "output_text", "text": "answer"}
+        item = {"type": "message", "content": [part]}
+        completed = event("response.completed", response={"output": []})
+        cases = [
+            event("response.output_text.done", text="answer") + completed,
+            event("response.content_part.done", part=part) + completed,
+            event("response.output_item.done", item=item) + completed,
+            event("response.completed", response={"output": [item]}),
+        ]
+        with self.gateway("fastest") as gate:
+            for self.stream in cases:
+                self.assertEqual(self.request(gate), (200, self.stream))
+                record = gate.evidence[-1]
+                self.assertGreaterEqual(record["first_output_ms"], record["response_start_ms"])
+                self.assertLessEqual(record["first_output_ms"], record["response_end_ms"])
+                self.assertNotIn("first_token_ms", record)
+            for kind in ("response.refusal.delta", "response.function_call_arguments.delta",
+                         "response.reasoning_text.delta"):
+                self.stream = event(kind, delta="content") + completed
+                self.assertEqual(self.request(gate), (200, self.stream))
+                self.assertIn("first_token_ms", gate.evidence[-1])
+                self.assertNotIn("first_output_ms", gate.evidence[-1])
+            self.stream = event("response.output_text.delta", delta="") + completed
+            self.assertEqual(self.request(gate)[0], 200)
+            self.assertNotIn("first_token_ms", gate.evidence[-1])
+            self.assertNotIn("first_output_ms", gate.evidence[-1])
+
+    def test_rejected_terminal_frame_is_charged_without_relaying_its_contents(self):
+        finish = Mock()
+        self.stream = event("response.completed", response={"usage": {"cost": .000032},
+                            "output": [{"type": "function_call", "name": "unregistered"}]})
+        with self.gateway("fastest", finish=finish) as gate:
+            self.assertEqual(self.request(gate), (200, b""))
+        finish.assert_called_once()
+        self.assertEqual(finish.call_args.args, (31, Decimal(".000032")))
+        self.assertEqual(finish.call_args.kwargs["status"], "interrupted")
+        self.assertEqual(finish.call_args.kwargs["charge_source"], "openrouter")
+        self.assertIn("response_end_ms", gate.evidence[-1])
+        self.assertNotIn("first_output_ms", gate.evidence[-1])
+        self.unregistered.assert_called_once_with("unregistered", None)
+
+    def test_nonstreaming_error_uses_confirmed_cost_and_distinguishes_incomplete_body(self):
+        self.http_status = 429
+        finish = Mock()
+        with self.gateway("fastest", finish=finish) as gate:
+            self.stream = json.dumps({"usage": {"cost": .00001}, "provider": "bad\nprovider"}).encode()
+            self.assertEqual(self.request(gate)[0], 429)
+            record = gate.evidence[-1]
+            self.assertEqual(finish.call_args.args, (31, Decimal(".00001")))
+            self.assertEqual(finish.call_args.kwargs["charge_source"], "openrouter")
+            self.assertGreaterEqual(record["response_end_ms"], record["response_start_ms"])
+            self.assertNotIn("first_output_ms", record)
+            self.assertNotIn("provider", record)
+            self.stream = b"x" * 18000
+            self.assertEqual(self.request(gate)[0], 429)
+            self.assertIsNone(finish.call_args.args[1])
+            self.assertNotIn("response_end_ms", gate.evidence[-1])
+
+    def test_room_route_switch_is_sampled_once_per_request_and_shares_spending_checks(self):
+        source = Mock(side_effect=["fastest", "cheapest", "fastest"])
+        self.reserve.side_effect = [31, 32, ValueError("cap")]
+        finish = Mock()
+        with self.gateway("fastest", route_source=source, finish=finish) as gate:
+            for expected in (200, 200, 402):
+                self.assertEqual(self.request(gate, provider={"sort": "latency"})[0], expected)
+        self.assertEqual(source.call_count, 3)
+        self.assertEqual([r["sort"] for r in gate.evidence], ["throughput", "price", "throughput"])
+        self.assertEqual([r["route"] for r in gate.evidence], ["fastest", "cheapest", "fastest"])
+        self.assertEqual([p["provider"]["sort"] for p, _ in self.wire], ["throughput", "price"])
+        self.assertEqual(self.wire[0][0]["provider"]["max_price"], self.wire[1][0]["provider"]["max_price"])
+        self.assertEqual([call.args[0]["provider"]["sort"] for call in self.reserve.call_args_list],
+                         ["throughput", "price", "throughput"])
+        self.assertEqual([(call.args[0], call.kwargs["evidence"]["sort"]) for call in finish.call_args_list],
+                         [(31, "throughput"), (32, "price")])
+
+    def test_unavailable_route_does_not_send_or_reserve(self):
+        source = Mock(side_effect=[RuntimeError("private details"), "invalid", "cheapest"])
+        with self.gateway("fastest", route_source=source) as gate:
+            for _ in range(2):
+                status, body = self.request(gate)
+                self.assertEqual(status, 503)
+                self.assertNotIn(b"private details", body)
+                self.assertNotIn("sort", gate.evidence[-1])
+            self.reserve.assert_not_called()
+            self.assertFalse(self.wire)
+            self.assertEqual(self.request(gate)[0], 200)
+            self.assertEqual(self.wire[0][0]["provider"]["sort"], "price")
+
     def test_rejections_do_not_reach_provider(self):
         with self.gateway("cheapest") as gate:
             self.assertEqual(self.request(gate, token="wrong")[0], 401)
@@ -296,6 +437,7 @@ class TransportTests(unittest.TestCase):
         with self.gateway("cheapest") as gate:
             self.assertEqual(self.request(gate)[0], 503)
             self.assertFalse(self.wire)
+            self.assertNotIn("dispatch_at", gate.evidence[-1])
             self.settle.assert_called_once_with(31, Decimal(0))
 
     def test_missing_cost_conserves_reservation(self):
@@ -304,6 +446,8 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(self.request(gate)[1], self.stream)
             self.reserve.assert_called_once()
             self.settle.assert_not_called()
+            self.assertNotIn("cost_usd", gate.evidence[-1])
+            self.assertNotIn("first_output_ms", gate.evidence[-1])
 
     def test_disconnected_client_cannot_hide_upstream_errors(self):
         write = _SocketWriter.write

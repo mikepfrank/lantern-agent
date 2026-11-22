@@ -6,7 +6,8 @@ from pathlib import Path
 import re
 import sqlite3
 
-from .budget import UNITS_PER_DOLLAR
+from .budget import TIMING_FIELDS, UNITS_PER_DOLLAR, dispatch_utc, reported_usd, routing_receipt_sql
+from .routing import ROUTES, safe_provider
 
 
 DIAGNOSTICS_TOOL = {
@@ -23,7 +24,7 @@ DIAGNOSTICS_TOOL = {
 FILES = {"chat": "chat.sqlite", "usage": "usage.sqlite", "review": "review-costs.sqlite",
          "supervision": "supervision.sqlite"}
 TOOLS = set("""chess_analyze message_operator read_heritage consult_opus workspace_list workspace_read
-workspace_write heartbeat set_alarm cancel_alarm schedule_status web_search budget_status coding_run
+workspace_write heartbeat set_alarm cancel_alarm schedule_status set_provider_route provider_stats web_search budget_status coding_run
 harness_logs view_pdf_page unregistered""".split())
 STATUSES = set("""complete failed interrupted deferred pending completed incomplete upstream_http_error
 invalid_upstream_response settled unconfirmed rejected metered ambiguous archive_error context_unavailable
@@ -40,8 +41,11 @@ for disposition in ("retire", "watch", "ask_operator"):
     OPUS_CODES.add("concern_" + disposition)
     OPUS_CODES.update("verdict_" + decision + "_concern_" + disposition for decision in ("allow","deny","ask_operator"))
 OPUS_CODES.update("verdict_" + decision + "_concerns" for decision in ("allow", "deny", "ask_operator"))
-COVERAGE = ("Times use UTC. Model call times are admission times. OpenRouter's HTTP code, provider "
-            "identity and running release revision are absent from these ledgers. Supervision events "
+COVERAGE = ("Times use UTC. Model call times are admission times. Qwen route is the requested preference. "
+            "From upstream dispatch, response_start_ms measures time to headers, first_token_ms time to the "
+            "first observed generation delta (including reasoning or tool arguments), first_output_ms time to visible "
+            "text, and response_end_ms time to the terminal response. Provider and reported_cost_usd appear "
+            "when observed. Supervision events "
             "without a recorded batch link appear only in the unfiltered view. Luna concern topics "
             "indicate words present in the retained evidence.")
 
@@ -90,7 +94,7 @@ def _record(kind, row):
     key = source_id if isinstance(source_id, str) and re.fullmatch(r"[0-9a-f]{32}", source_id) else rid
     event = {"ref": f"{kind}:{key}", "at_utc": row["stamp"], "type": kind}
     for name in ("batch_id", "event_id", "request_sequence", "duration_ms", "input_tokens", "output_tokens",
-                 "cache_reads", "cache_writes", "reasoning_tokens", "http_status"):
+                 "cache_reads", "cache_writes", "reasoning_tokens", "http_status", *TIMING_FIELDS):
         value = row.get(name)
         if type(value) is int and value >= 0:
             event[name] = value
@@ -98,7 +102,7 @@ def _record(kind, row):
         ("tool", TOOLS), ("model", {"luna", "opus", "qwen", "claude-sonnet-4-6"}),
         ("purpose", {"tool", "spot", "consult", "escalation", "context_review", "shadow_review"}),
         ("trigger", {"operator", "heartbeat", "alarm", "continuation", "turn", "worker"}),
-        ("charge_source", {"openrouter", "router_no_eligible_endpoint"}),
+        ("charge_source", {"openrouter", "router_no_eligible_endpoint"}), ("route", ROUTES),
         ("flag_kind", {"tool", "context", "unregistered_tool"}),
         ("capture_status", {"pending", "complete", "partial", "archive_error", "no_response"}),
     ]:
@@ -119,6 +123,11 @@ def _record(kind, row):
     if kind == "flag":
         event["evidence_topics"] = [topic for topic in ("credentials", "privileges", "network", "instructions")
                                     if row.get(topic) == 1]
+    if kind == "qwen":
+        for name, sanitize in (("dispatch_at", dispatch_utc), ("provider", safe_provider),
+                               ("reported_cost_usd", reported_usd)):
+            if (value := sanitize(row.get(name))) is not None:
+                event[name] = value
     if kind in ("review", "qwen"):
         cost, reserved = _amount(row["cost"]), _amount(row["reserved"])
         if cost is not None:
@@ -128,7 +137,7 @@ def _record(kind, row):
     return event
 
 
-def _queries(tables, columns):
+def _queries(db, tables, columns):
     if {"chat.batches", "chat.events"} <= tables:
         yield "chat", """SELECT e.id rid, e.at, b.id batch_id, e.id event_id, b.status,
           CASE WHEN b.status='failed' AND e.text LIKE '%. Codex reported a provider or turn error'
@@ -143,10 +152,11 @@ def _queries(tables, columns):
                WHEN b.status='deferred' THEN 'budget_pause' END outcome_code
           FROM chat.batches b JOIN chat.events e ON e.id=b.outcome"""
     if {"usage.requests", "usage.request_details"} <= tables:
-        yield "qwen", """SELECT d.rowid rid, d.at, d.id source_id, d.batch_id, d.trigger, d.status,
+        fields, join = routing_receipt_sql(db, tables, "usage.")
+        yield "qwen", f"""SELECT d.rowid rid, d.at, d.id source_id, d.batch_id, d.trigger, d.status,
           'qwen' model, d.input_tokens, d.output_tokens, d.cache_reads, d.cache_writes, d.reasoning_tokens,
-          d.ms duration_ms, d.charge_source, r.actual cost, r.reserved
-          FROM usage.request_details d JOIN usage.requests r ON r.id=d.id"""
+          d.ms duration_ms, d.charge_source, r.actual cost, r.reserved {fields}
+          FROM usage.request_details d JOIN usage.requests r ON r.id=d.id {join}"""
     if "review.calls" in tables:
         batch = "c.batch_id" if "batch_id" in columns else "NULL"
         tool = "c.tool" if "tool" in columns else "NULL"
@@ -238,7 +248,7 @@ def read_diagnostics(state: Path, args: dict) -> dict:
                 columns.update(r["name"] for r in db.execute("PRAGMA review.table_info(calls)"))
             except sqlite3.Error:
                 unavailable.add("review")
-        for kind, query in _queries(tables, columns):
+        for kind, query in _queries(db, tables, columns):
             sql = f"""SELECT * FROM (SELECT facts.*, strftime('%Y-%m-%dT%H:%M:%fZ',at) stamp
                      FROM ({query}) AS facts) WHERE stamp IS NOT NULL"""
             params = []

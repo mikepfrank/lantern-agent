@@ -9,6 +9,7 @@ from .budget import Budget, DAILY_USD, UNITS_PER_DOLLAR
 from .local_time import central_time
 from .opus import QueryRejected, public_search
 from .review_vendors import ReviewerVendors
+from .routing import ROUTES
 
 
 SOURCES = ("mwmbl", "wikipedia", "crossref")
@@ -33,11 +34,34 @@ RESEARCH_TOOL = {
 BUDGET_TOOL = {
     "name": "budget_status",
     "description": (
-        "Check current US Central time, OpenRouter and supervisor spending, reservations, "
-        "and funds available. The next midnight UTC reset is also shown in US Central time."
+        "Check the current OpenRouter route, US Central time, OpenRouter and supervisor spending, "
+        "reservations, and funds available. The next midnight UTC reset is also shown in US Central time."
     ),
     "inputSchema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
 }
+
+PROVIDER_STATS_TOOL = {
+    "name": "provider_stats",
+    "description": (
+        "Compare this harness's observed OpenRouter providers and requested routes. See sample counts, "
+        "time to first token, output tokens per second and blended billed USD per million tokens. "
+        "Defaults to the last seven UTC dates including today. Supply day for a single UTC date. "
+        "Provider names are labels returned by OpenRouter."
+    ),
+    "inputSchema": {
+        "type": "object", "additionalProperties": False, "required": [],
+        "properties": {"day": {"type": "string", "description": "One UTC date (YYYY-MM-DD).",
+                               "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}},
+    },
+}
+
+
+def provider_stats(arguments, state, *, route):
+    from .usage_report import provider_summary
+    if (not isinstance(arguments, dict) or set(arguments) - {"day"} or
+            ("day" in arguments and not isinstance(arguments["day"], str))):
+        raise ValueError("provider_stats takes an optional UTC date (YYYY-MM-DD).")
+    return {"current_route": route, **provider_summary(state, arguments.get("day"))}
 
 
 def web_search(arguments: dict) -> dict:
@@ -55,7 +79,7 @@ def web_search(arguments: dict) -> dict:
     return {"source": source, "untrusted_search_results": hits}
 
 
-def budget_status(arguments: dict, ledger: Budget, vendors: ReviewerVendors, *, now=None) -> dict:
+def budget_status(arguments: dict, ledger: Budget, vendors: ReviewerVendors, *, now=None, route=None) -> dict:
     if arguments != {}:
         raise ValueError("budget_status takes no arguments.")
     now = datetime.now(timezone.utc) if now is None else now.astimezone(timezone.utc)
@@ -74,6 +98,7 @@ def budget_status(arguments: dict, ledger: Budget, vendors: ReviewerVendors, *, 
         "reset_at_utc": reset.isoformat(),
         "seconds_until_reset": math.ceil((reset - now).total_seconds()),
         "openrouter": {
+            **({"route": route, "sort": ROUTES[route]} if route is not None else {}),
             "limit_usd": str(DAILY_USD), "spent_usd": charges["spent_usd"],
             "reserved_usd": charges["reserved_usd"], "available_usd": str(max(0, qwen_available)),
             "reservation_per_request_usd": str(reserve),

@@ -16,6 +16,31 @@ class ChatStoreTests(unittest.TestCase):
         self.state = Path(self.enterContext(TemporaryDirectory()))
         self.store = ChatStore(self.state)
 
+    def test_routing_uses_startup_default_until_chosen_and_survives_replay(self):
+        for default in ("fastest", "cheapest"):
+            self.assertEqual(default, self.store.provider_route(default))
+        old = self.store.set_provider_route("fastest", call_id="first")
+        self.assertEqual({"route": "fastest", "sort": "throughput"}, old)
+        self.assertEqual("fastest", self.store.provider_route("cheapest"))
+        current = self.store.set_provider_route("cheapest", call_id="second")
+        self.assertEqual({"route": "cheapest", "sort": "price"}, current)
+        reopened = ChatStore(self.state)
+        self.assertEqual(old, reopened.set_provider_route("fastest", call_id="first"))
+        with self.assertRaisesRegex(ValueError, "different routing choice"):
+            reopened.set_provider_route("cheapest", call_id="first")
+        self.assertEqual("cheapest", reopened.provider_route("fastest"))
+
+    def test_invalid_route_or_receipt_preserves_room_choice(self):
+        self.store.set_provider_route("cheapest", call_id="good")
+        for invalid in ("price", "", "fastest ", True, None, []):
+            with self.subTest(route=invalid), self.assertRaises(ValueError):
+                self.store.set_provider_route(invalid, call_id="unused")
+        for invalid in ("", " ", None, 0):
+            with self.subTest(call=invalid), self.assertRaises(ValueError):
+                self.store.set_provider_route("fastest", call_id=invalid)
+        self.assertEqual("cheapest", self.store.provider_route("fastest"))
+        self.assertEqual("fastest", self.store.set_provider_route("fastest", call_id="unused")["route"])
+
     def test_receipt_is_idempotent_under_concurrent_writers(self):
         def send(_):
             return ChatStore(self.state).submit("first\nsecond", "client-receipt")

@@ -11,6 +11,7 @@ from .attachments import ImageAttachment, MAX_TURN_IMAGES
 from . import operator_release
 from .chat_text import trim_reply_segment
 from .local_time import central_time
+from .routing import ROUTES, validate_route
 from .scheduler import SCHEMA, next_reset
 
 
@@ -69,6 +70,8 @@ class ChatStore:
                 CREATE TABLE IF NOT EXISTS room (
                     id INTEGER PRIMARY KEY CHECK (id = 1), thread_id TEXT, read_cursor INTEGER);
                 INSERT OR IGNORE INTO room(id) VALUES (1);
+                CREATE TABLE IF NOT EXISTS provider_route_changes (
+                    id INTEGER PRIMARY KEY, call_id TEXT NOT NULL UNIQUE, route TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY, role TEXT NOT NULL, text TEXT NOT NULL,
                     at TEXT NOT NULL, client_id TEXT UNIQUE);
@@ -227,6 +230,26 @@ class ChatStore:
                 (SELECT COUNT(*) FROM inbox WHERE batch_id IS NULL) AS queued
                 FROM room WHERE id=1""").fetchone()
             return dict(row)
+
+    def provider_route(self, default: str) -> str:
+        """Use the worker startup preference until Lantern makes its first choice."""
+        validate_route(default)
+        with self._connect() as db:
+            row = db.execute("SELECT route FROM provider_route_changes ORDER BY id DESC LIMIT 1").fetchone()
+            return row["route"] if row else default
+
+    def set_provider_route(self, route: str, *, call_id: str) -> dict:
+        """An approved call records its choice once. Replays never undo later changes."""
+        validate_route(route)
+        if not isinstance(call_id, str) or not call_id.strip():
+            raise ValueError("A routing change needs a nonempty tool call ID.")
+        with self._connect(write=True) as db:
+            prior = db.execute("SELECT route FROM provider_route_changes WHERE call_id=?", (call_id,)).fetchone()
+            if prior is None:
+                db.execute("INSERT INTO provider_route_changes(call_id,route) VALUES(?,?)", (call_id, route))
+            elif prior["route"] != route:
+                raise ValueError("This tool call ID already belongs to a different routing choice.")
+        return {"route": route, "sort": ROUTES[route]}
 
     @staticmethod
     def _pending(db, limit, role="operator", *, image_slots=MAX_TURN_IMAGES):

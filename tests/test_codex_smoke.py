@@ -33,8 +33,10 @@ class FixtureStream(BytesIO):
         return "text/event-stream" if name == "Content-Type" else default
 
 
-def reply(serial, item):
+def reply(serial, item, *, cost=0.00001, provider=None):
     response = {"id": f"resp_fixture_{serial}", "model": MODEL}
+    if provider is not None:
+        response["openrouter_metadata"] = {"endpoints": {"available": [{"selected": True, "provider": provider}]}}
     if item["type"] == "function_call":
         initial = {**item, "status": "in_progress", "arguments": ""}
         delta = {"type": "response.function_call_arguments.delta", "delta": item["arguments"]}
@@ -47,7 +49,7 @@ def reply(serial, item):
         {**delta, "output_index": 0, "item_id": item["id"]},
         {"type": "response.output_item.done", "output_index": 0, "item": item},
         {"type": "response.completed", "response": {**response, "status": "completed", "output": [item],
-            "usage": {"input_tokens": 100, "output_tokens": 40, "total_tokens": 140, "cost": 0.00001}}},
+            "usage": {"input_tokens": 100, "output_tokens": 40, "total_tokens": 140, "cost": cost}}},
     ]
     return FixtureStream(b"".join(b"data: " + json.dumps(e).encode() + b"\n\n" for e in events))
 
