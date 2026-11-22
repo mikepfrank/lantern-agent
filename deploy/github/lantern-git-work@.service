@@ -1,0 +1,30 @@
+[Unit]
+Description=One offline Lantern Git workspace operation
+Requires=docker.service var-lib-lanterncode-work.mount
+After=docker.service var-lib-lanterncode-work.mount
+
+[Service]
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+ExecStart=/usr/bin/python3.12 -I /opt/lantern/github/broker.pyz workspace
+UMask=0077
+Environment=HOME=/nonexistent
+Environment=DOCKER_HOST=unix:///var/run/docker.sock
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lanterncode
+ProtectHome=yes
+InaccessiblePaths=-/var/lib/lantern-github -/etc/lantern/github-token
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=128M
+TasksMax=32
+LimitCORE=0
+RuntimeMaxSec=85

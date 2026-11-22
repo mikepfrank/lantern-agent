@@ -50,7 +50,7 @@ Lantern can call `set_provider_route` to select **default** (OpenRouter balances
 
 Lantern can list, read and write UTF-8 notes and source files relative to `~/.local/state/lantern/workspace/files/`. Updating an existing file requires the digest returned by the read tool. The worker separately provides read-only access to the private heritage archive.
 
-On Lightsail, `coding_run` starts a fresh offline container for each reviewed shell command. Python, Git, and Lantern's full editable project checkout are available in `/work/lantern`. Files and local commits under `/work` persist. The running release, credentials, chat history and private note store live outside that volume. Only the operator deploys releases. GitHub proposal submission is a separate planned capability.
+On Lightsail, `coding_run` starts a fresh offline container for each reviewed shell command. Python, Git, and Lantern's full editable project checkout are available in `/work/lantern`. Files and local commits under `/work` persist. Dedicated tools can sync upstream, preview a committed patch privately, and submit the reviewed patch as a public draft pull request. GitHub credentials stay with the host publisher. Mike and the maintainer review changes before merge and deployment. See the [GitHub setup and test procedure](deploy/README.md#github-sync-and-draft-pull-requests).
 
 When a single Qwen request in the current thread reports at least 180,000 input and output tokens combined, the worker reminds Lantern to update its handoff on the next request where it can write files. Lantern can use its existing handoff or `notes/handoff.md` and skip the write if the notes are current. Codex still controls when compaction runs.
 

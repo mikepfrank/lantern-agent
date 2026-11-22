@@ -9,3 +9,4 @@ deploy/coding/*.service text eol=lf
 deploy/coding/*.socket text eol=lf
 deploy/coding/*.mount text eol=lf
 deploy/coding/Dockerfile text eol=lf
+deploy/github/* text eol=lf

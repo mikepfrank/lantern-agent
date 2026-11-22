@@ -1,0 +1,26 @@
+#!/usr/bin/python3.12 -I
+"""Install or replace the publisher's repository-only token from the operator's terminal."""
+import getpass
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+
+if os.getuid() != 0 or not sys.stdin.isatty():
+    raise SystemExit("Run sudo lantern-github-auth in your SSH terminal.")
+print("Use a fine-grained GitHub token for only mikepfrank/lantern-agent, with Contents and Pull requests set to Read and write.")
+token = getpass.getpass("GitHub token (hidden): ")
+if not re.fullmatch(r"github_pat_[A-Za-z0-9_]{30,240}", token):
+    raise SystemExit("Expected a fine-grained GitHub personal access token.")
+os.umask(0o077)
+directory = Path("/etc/lantern")
+with tempfile.NamedTemporaryFile("w", dir=directory, delete=False) as dest:
+    dest.write(token + "\n")
+    dest.flush()
+    os.fsync(dest.fileno())
+try:
+    os.replace(dest.name, directory / "github-token")
+finally:
+    Path(dest.name).unlink(missing_ok=True)
+print("Saved. The next draft publication will use this credential.")

@@ -2,6 +2,8 @@
 
 ## Current state
 
+**GitHub proposal tools, November 22 (Central).** `github_sync` fetches the designated public main branch for Lantern's offline checkout; a dirty or diverged worktree keeps its changes. `github_preview` freezes a small committed patch privately. `github_open_draft` uses its content-addressed ID and supplies the entire frozen public proposal to supervision. The host submits a single proposal commit on a dedicated branch and returns the draft PR URL. Public API publication needs Mike's repository-only credential, installed with `sudo /usr/local/sbin/lantern-github-auth`. The operator's first real draft is the remaining acceptance check. See the [setup and test procedure](deploy/README.md#github-sync-and-draft-pull-requests).
+
 **Receipt coverage, November 22 (Central).** `provider_stats` checks which finished turns an unlinked billing record could belong to. It uses the room, turn number and timestamps available in the two ledgers. A gap can make one group's average a lower bound while a fully measured route shows an exact average. For older records, the private billing ledger can store links verified against the original worker journal and a verified count of requests for a turn, including zero for a failure before dispatch. Historical links reference the original spending entries. A timeout can incur a charge even if the turn delivers no reply. When reconciling one, verify its generation receipt with OpenRouter and use the ledger's settlement operation to preserve the recorded failure.
 
 **Provider reliability reporting, November 22 (Central).** `provider_stats` and `lantern usage --routes` show classified request failures and timeouts by route and provider. API completion and usable output are separate observations. A successful room turn is one the chat worker marked complete; this can include a plain-text reply when the operator wanted a tool. `room_turns` groups terminal turns by their UTC completion date and includes the Qwen charges for their constituent requests, including failed turns, when calculating cost per success. Consult the coverage counts when comparing small samples or periods with missing billing data.
@@ -152,7 +154,7 @@ Use `readlink -f /opt/lantern/worker-current` to identify the active worker rele
 
 The Lightsail launcher selects `--private-lightsail-cli`. On each model request for this channel, the harness identifies Michael P. Frank as Lantern's developer, the host's administrator, and its only interactive human user. It supplies the same channel information to Luna and Opus. This applies when resuming an existing room independently of its pinned persona. Before adding any other human users or input sources, give each channel its own operator context and separate its conversation history from Mike's private room.
 
-The pilot uses the host account's persistent state at `~lantern/.local/state/lantern`. The host checkout in `~lantern/src/lantern` fetches from the operator-owned `/opt/lantern/source/lantern.bundle`. Lantern already has a separate writable clone in the coding container at `/work/lantern`. A supervised pull-request workflow and importing upstream changes into that clone are open work. The chess and GPT-2 services run independently of the Lantern deployment.
+The pilot uses the host account's persistent state at `~lantern/.local/state/lantern`. The host checkout in `~lantern/src/lantern` fetches from the operator-owned `/opt/lantern/source/lantern.bundle`. Lantern has a separate writable clone in the coding container at `/work/lantern`, which receives upstream updates through `github_sync`. The chess and GPT-2 services run independently of the Lantern deployment.
 
 For routine inspection, log in as `lantern` and open `~/.local/state/lantern`. The running pilot uses a systemd mount namespace. To inspect its exact filesystem view, an administrator can enter the main PID's mount namespace with `nsenter` and use `setpriv` to drop to the `lantern` user and group before opening a shell. In that view the state directory contains `workspace/` and the read-only `heritage/` mount. Lantern itself reads the archive through the supervised tool.
 
@@ -181,7 +183,7 @@ The following development priorities are independent of how often genuine referr
 1. **Private browser sign-in is live.** Mike confirmed he could sign in and reopen the existing conversation. He plans to answer the next genuine reviewer question from that room.
 2. **Clipboard paste and multiple images.** Mike confirmed the live room delivered a selected file and a pasted screenshot together, and Lantern identified both in order.
 3. **Lantern-controlled provider routing and performance.** The supervised `set_provider_route` tool chooses fastest or cheapest for the next Qwen request. The room retains the selected route across heartbeats and restarts. Lantern can compare measured endpoints, first-token latency, output rate and actual blended cost per token with `provider_stats`; `harness_logs` shows individual calls. The operator can run `lantern usage --routes --calls` for the current UTC day.
-4. **GitHub draft pull requests and upstream sync.** Give Lantern a host-mediated way to propose a local commit to the designated repository and bring upstream changes into its editable clone while preserving its own work. Test with a small, useful patch that Mike can inspect. Keep GitHub credentials outside processes that run model-supplied code or Git hooks. Mike and Astra review proposals before merge and deployment.
+4. **GitHub draft pull requests and upstream sync.** Implemented. Mike's acceptance test is to ask Lantern to sync, propose a small useful patch, and open its first real draft for inspection. Mike and Astra review before merge and deployment.
 5. **Full-page web reading.** Add supervised retrieval of readable page text beyond search snippets. Test the prompt-injection safeguards before enabling retrieval.
 
    - Return readable text in a structured tool result labeled as untrusted, with its source URL. Extract visible text and account for hidden material such as HTML comments, metadata and invisible characters. Preserve the source and trust label when excerpts carry over to later turns.
@@ -242,7 +244,7 @@ Lantern should be able to submit a pull request through a reviewed tool call. Th
 2. As Lantern, edit a tracked file, run a test, and commit on a proposal branch. Leave a second edit uncommitted and verify both edits survive container replacement.
 3. Use the submission tool to open a test PR. Check that its base and diff match the proposal, its commits are attributed to Lantern, and the canonical branch and running revision still match their pre-test values.
 
-A local Git smoke test on 2026-11-18 exercised the mirror, bundle, and clone steps with two commits, a second branch, and a tag. GitHub proposal submission is pending.
+A local Git smoke test on 2026-11-18 exercised the mirror, bundle, and clone steps with two commits, a second branch, and a tag. The November 22 tooling adds publication of a reviewed draft.
 
 ## Other agreed design decisions
 

@@ -1,0 +1,33 @@
+[Unit]
+Description=Lantern fixed-repository GitHub operation
+After=network-online.target
+
+[Service]
+User=lantern-git
+Group=lantern-git
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+ExecStart=/usr/bin/python3.12 -I /opt/lantern/github/broker.pyz flow
+LoadCredential=github-token:/etc/lantern/github-token
+StateDirectory=lantern-github
+StateDirectoryMode=0700
+UMask=0077
+Environment=HOME=/var/lib/lantern-github
+Environment=PATH=/usr/bin:/bin
+ProtectSystem=strict
+ProtectHome=yes
+InaccessiblePaths=-/run/docker.sock -/var/lib/lanterncode
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=256M
+TasksMax=32
+LimitCORE=0
+RuntimeMaxSec=155

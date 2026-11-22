@@ -10,6 +10,7 @@ from threading import Condition, local
 from typing import NamedTuple
 
 from . import concerns
+from .github_tools import OPEN_DRAFT
 from .opus import OPERATOR_QUESTION_LIMIT, OpusCaseTooLarge, OpusResponseError
 from .review_policy import action_facts, concern_refs
 from .review_vendors import HTTPRejection, OpusTransportError, ReviewBudgetUnavailable
@@ -171,6 +172,9 @@ def _review_excerpt(case):
     if case["tool"] == "workspace_write" and isinstance(case["arguments"].get("text"), str):
         draft = case["arguments"]["text"]
         excerpt += "\n\nProposed text" + (" (ending)\n…" + draft[-700:] if len(draft) > 700 else "\n" + draft)
+    if case["tool"] == OPEN_DRAFT and (draft := case.get("host_facts", {}).get("public_draft")):
+        text = f"{draft['repository']} → {draft['base_branch']}\n{draft['title']}\n" + "\n".join(draft["paths"])
+        excerpt += "\n\nPublic draft pull request\n" + text[:900]
     return excerpt
 
 
@@ -185,7 +189,7 @@ def recovered_excerpt(error, evidence_excerpt):
 
 class Supervisor:
     def __init__(self, state: Path, luna, review, consult, *, sample_every: int = 12, tool_names=None,
-                 batch_id: int | None = None, operator_room=None):
+                 batch_id: int | None = None, operator_room=None, draft_evidence=None):
         if type(sample_every) is not int or sample_every < 1:
             raise ValueError("Sample interval must be a positive integer")
         self.path = state / DATABASE
@@ -194,6 +198,7 @@ class Supervisor:
         self.tool_names = frozenset(TOOLS if tool_names is None else tool_names)
         self.batch_id = batch_id
         self.operator_room = operator_room
+        self.draft_evidence = draft_evidence
         self.thread = None
         self._observations = Condition()
         self._received = self._processed = 0
@@ -463,6 +468,13 @@ class Supervisor:
                              open_concerns=matching, prior_denial=prior[0] if prior else None,
                              archive_receipt=room.archive_receipt(self.thread)
                              if room and name in ("read_heritage", "view_pdf_page") else None)
+        if name == OPEN_DRAFT:
+            # Resolve the ID outside the agent's arguments. Both reviewers see this exact
+            # immutable document, and the broker verifies its digest again at publication.
+            try:
+                facts["public_draft"] = self.draft_evidence(args) if self.draft_evidence is not None else None
+            except (OSError, ValueError):
+                facts["public_draft"] = None
         packet = {"kind": "tool", "host_facts": facts, "tool": name, "arguments": args,
                   "rationale": rationale, "recent_context": context.recent}
         # Only a version actually inspected and found irrelevant may skip Opus.
@@ -481,6 +493,8 @@ class Supervisor:
             skipped = {(i["id"], i["version"]) for i in checks if i["id"] not in ids}
         with database(self.path) as db:
             self._record_screen(db, scan, context.sequence, "tool", name, call_id)
+        if name == OPEN_DRAFT and facts["public_draft"] is None:
+            raise ReviewUnavailable("The host could not verify the full public patch and destination for this proposal ID")
         if not isinstance(rationale, str) or not rationale.strip() or len(rationale) > RATIONALE_LIMIT:
             if scan["escalate"]:
                 self._retain_finding(context.sequence, scan["evidence"], scan["summary"])

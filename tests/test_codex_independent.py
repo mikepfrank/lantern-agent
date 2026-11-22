@@ -19,6 +19,7 @@ from lantern.__main__ import arguments, main
 from lantern.chat_store import ChatStore
 from lantern.chat_worker import process_batch
 from test_codex_smoke import reply
+from test_github_tools import sample_proposal
 
 
 # The exact November 18 deployment. Its original instructions were persisted by
@@ -58,6 +59,7 @@ class NativeIndependentWorker(unittest.TestCase):
             ("budget_status", {}),
         ]
         requests, reviews, threads = [], [], []
+        proposal = sample_proposal()
 
         @contextmanager
         def provider(body, headers):
@@ -76,6 +78,12 @@ class NativeIndependentWorker(unittest.TestCase):
                 item = {"type": "function_call", "id": "fc_7", "call_id": "call_7", "status": "completed",
                         "name": "harness_logs", "arguments": json.dumps({"batch_id": 2, "limit": 3,
                         "rationale": "Check the recorded outcome of my earlier heartbeat."})}
+            elif serial in (8, 9):
+                name, args = (("github_preview", {"commit": proposal["source_commit"]}) if serial == 8 else
+                              ("github_open_draft", {"proposal_id": proposal["proposal_id"]}))
+                item = {"type": "function_call", "id": f"fc_{serial}", "call_id": f"call_{serial}",
+                        "status": "completed", "name": name,
+                        "arguments": json.dumps({**args, "rationale": "Propose the fixture change for review."})}
             else:
                 answer = old_answer if serial == 1 else new_answer
                 item = {"type": "message", "role": "assistant", "id": f"msg_{serial}", "status": "completed",
@@ -88,6 +96,8 @@ class NativeIndependentWorker(unittest.TestCase):
             packet = json.loads(payload["input"][0]["content"])
             if packet["kind"] == "tool":
                 reviews.append((packet["tool"], payload["instructions"]))
+                if packet["tool"] == "github_open_draft":
+                    self.assertEqual(packet["host_facts"]["public_draft"], proposal)
             report = {"escalate": False, "summary": "Private worker fixture.", "evidence": ""}
             return {"model": payload["model"], "status": "completed",
                     "usage": {"input_tokens": 30, "output_tokens": 15}, "output": [
@@ -164,12 +174,25 @@ class NativeIndependentWorker(unittest.TestCase):
                     return {"exit_code": 0, "output": "Python offline-coding-fixture"}
 
                 store.submit("Check Python from the coding environment.")
-                with patch("lantern.coding_tools.run_code", side_effect=reviewed_run) as runner:
-                    boot(state, "--heartbeat-minutes", "60", "--coding-socket", str(state / "broker.sock"))
+                gh_calls = []
+                def github(socket_path, op, args):
+                    self.assertEqual(socket_path, state / "github.sock")
+                    gh_calls.append(op)
+                    if op == "open_draft":
+                        self.assertEqual(reviews[-1][0], "github_open_draft")
+                        return {"proposal_id": proposal["proposal_id"], "draft": True}
+                    return proposal
+
+                with patch("lantern.coding_tools.run_code", side_effect=reviewed_run) as runner, \
+                        patch("lantern.github_tools._call", side_effect=github):
+                    boot(state, "--heartbeat-minutes", "60", "--coding-socket", str(state / "broker.sock"),
+                         "--github-socket", str(state / "github.sock"))
                     runner.assert_called_once()
+                self.assertEqual(gh_calls, ["preview", "evidence", "open_draft"])
                 self.assertEqual(store.status()["thread_id"], tid)
-                self.assertEqual(len(requests), 8)
-                self.assertIn("coding_run", {tool["name"] for tool in requests[5]["tools"]})
+                self.assertEqual(len(requests), 10)
+                self.assertTrue({"coding_run", "github_sync", "github_preview", "github_open_draft"} <=
+                                {tool["name"] for tool in requests[5]["tools"]})
                 self.assertIn("administrator sign-in or his SSH operator link", requests[5]["instructions"])
                 self.assertIn("Python offline-coding-fixture", json.dumps(requests[-1]["input"]))
                 self.assertIn("private journal is saved", json.dumps(requests[-1]["input"]))
@@ -184,7 +207,7 @@ class NativeIndependentWorker(unittest.TestCase):
                 self.assertEqual({t["name"] for t in requests[-1]["tools"]},
                                  {"chess_analyze", "read_heritage", "message_operator", "consult_opus"})
                 prior = {i["name"] for i in requests[-1]["input"] if i.get("type") == "function_call"}
-                self.assertTrue({"workspace_read", "coding_run", "harness_logs"}.issubset(prior))
+                self.assertTrue({"workspace_read", "coding_run", "harness_logs", "github_open_draft"}.issubset(prior))
 
         requests = requests[:5]
         self.assertEqual(["notes/handoff.md" in request["instructions"] for request in requests],
@@ -214,5 +237,6 @@ class NativeIndependentWorker(unittest.TestCase):
         self.assertIn(note, outputs["call_3"])
         self.assertIn("seconds_until_reset", outputs["call_4"])
         self.assertIn("reserved_usd", outputs["call_4"])
-        self.assertEqual([tool for tool, _ in reviews], [name for name, _ in actions] + ["coding_run", "harness_logs"])
-        self.assertTrue(all(scheduled_marker in instructions for _, instructions in reviews[:-2]))
+        self.assertEqual([tool for tool, _ in reviews], [name for name, _ in actions]
+                         + ["coding_run", "harness_logs", "github_preview", "github_open_draft"])
+        self.assertTrue(all(scheduled_marker in instructions for _, instructions in reviews[:len(actions)]))

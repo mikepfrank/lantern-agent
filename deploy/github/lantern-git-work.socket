@@ -1,0 +1,14 @@
+[Unit]
+Description=Offline Lantern Git workspace helper
+
+[Socket]
+ListenStream=/run/lantern-git-work.sock
+SocketUser=root
+SocketGroup=lantern-git
+SocketMode=0660
+Accept=yes
+MaxConnections=2
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

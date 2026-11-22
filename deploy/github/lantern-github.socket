@@ -1,0 +1,14 @@
+[Unit]
+Description=Lantern's reviewed GitHub tools
+
+[Socket]
+ListenStream=/run/lantern-github.sock
+SocketUser=root
+SocketGroup=lantern
+SocketMode=0660
+Accept=yes
+MaxConnections=6
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

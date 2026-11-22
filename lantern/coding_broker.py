@@ -86,11 +86,11 @@ def read_command(conn):
         raise BadRequest("Expected one UTF-8 shell command of at most 16 KiB.") from exc
 
 
-def create_args(image, pdf=None):
+def container_args(image, name, label):
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
         raise RuntimeError("Invalid operator image pin")
-    args = [
-        DOCKER, "create", "--name", NAME, "--label", LABEL, "--pull=never",
+    return [
+        DOCKER, "create", "--name", name, "--label", label, "--pull=never",
         "--rm", "--interactive", "--network=none", "--ipc=private",
         "--read-only", "--user=65532:65532", "--cap-drop=ALL",
         "--security-opt=no-new-privileges=true", "--pids-limit=64",
@@ -99,6 +99,10 @@ def create_args(image, pdf=None):
         "--tmpfs=/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777",
         "--log-driver=none",
     ]
+
+
+def create_args(image, pdf=None):
+    args = container_args(image, NAME, LABEL)
     if pdf is not None:
         if pdf.path == PDF_HERITAGE:
             mount, path = f"{HERITAGE_COPY}:/document.pdf:ro,z", "/document.pdf"
@@ -119,11 +123,11 @@ def engine(args):
                           timeout=ENGINE_TIMEOUT, check=True)
 
 
-def cleanup():
+def cleanup(name=NAME, label=LABEL):
     # Match both the exclusive name and the operator label. Never remove an
     # unrelated container that happens to occupy our reserved name.
-    found = engine([DOCKER, "ps", "-aq", "--no-trunc", "--filter", f"label={LABEL}",
-                    "--filter", f"name=^/{NAME}$"]).stdout.decode("ascii").split()
+    found = engine([DOCKER, "ps", "-aq", "--no-trunc", "--filter", f"label={label}",
+                    "--filter", f"name=^/{name}$"]).stdout.decode("ascii").split()
     for container in found:
         if not re.fullmatch(r"[0-9a-f]{64}", container):
             raise RuntimeError("Unexpected container identifier")
