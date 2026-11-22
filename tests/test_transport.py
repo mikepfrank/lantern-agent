@@ -302,6 +302,7 @@ class TransportTests(unittest.TestCase):
                 else:
                     self.assertEqual(sent["provider"]["sort"], sort)
                 self.assertEqual(gate.evidence[-1]["route"], route)
+                self.assertEqual(sent["provider"]["ignore"], ["darkbloom"])
                 self.assertEqual(sent["provider"]["max_price"]["request"], 0)
                 self.assertNotIn("require_parameters", sent["provider"])
                 self.assertNotIn("only", sent["provider"])
@@ -313,6 +314,21 @@ class TransportTests(unittest.TestCase):
                 self.settle.assert_called_with(31, Decimal("0.000041"))
                 self.assertEqual(gate.evidence[-1]["status"], "completed")
                 self.assertEqual(gate.evidence[-1]["input_tokens"], 100)
+
+    def test_tool_provider_exclusion_tracks_whether_calls_are_enabled(self):
+        named = {"type": "function", "name": "chess"}
+        with self.gateway("cheapest") as gate:
+            for tools, choice, enabled in (([], "auto", False), ([named], "none", False),
+                                           ([named], "required", True), ([named], named, True)):
+                with self.subTest(tools=tools, choice=choice):
+                    self.assertEqual(200, self.request(gate, tools=tools, tool_choice=choice,
+                                                      provider={"ignore": ["nebius"]})[0])
+                    provider = self.wire[-1][0]["provider"]
+                    self.assertEqual(provider["sort"], "price")
+                    if enabled:
+                        self.assertEqual(provider["ignore"], ["darkbloom"])
+                    else:
+                        self.assertNotIn("ignore", provider)
 
     def test_provider_timing_excludes_review_and_skips_reasoning_and_empty_text(self):
         now = 20

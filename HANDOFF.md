@@ -2,6 +2,8 @@
 
 ## Current state
 
+**Tool-call provider routing, November 22 (Central).** The Qwen gateway excludes `darkbloom` whenever the request offers a callable tool. All three route choices retain their usual sorting and price ceilings. Requests with no callable tools, including native compaction, use their normal provider pool. To restore a provider, retest its pinned OpenRouter Responses endpoint with a fresh request and a tool-call continuation, verify structured calls and matching results, then remove its slug from `TOOL_PROVIDER_EXCLUSIONS` in `lantern/routing.py` and redeploy the worker.
+
 **Balanced provider routing, November 21 (Central).** Worker `e35e7fc` offers `set_provider_route` with `default`, `cheapest`, and `fastest`. The default selection omits OpenRouter's `provider.sort` field while retaining the same price ceilings. It has its own group in `provider_stats`. The worker-only deployment preserved the room's fastest selection and both web sessions. Verified the updated schema in the room's native header and all five saved compaction checkpoints. The Lightsail suite ran 334 tests, with two skips.
 
 **Qwen reasoning configuration.** The harness leaves effort unspecified, as Mike prefers. Seven requests captured using the installed Linux worker with a simulated provider, including turns after restart, sent `"reasoning":{"summary":"auto"}`. Summary selection is separate from effort. Live room metadata also showed no explicit effort. Output is capped at 32,768 tokens per request across reasoning, tool calls, and visible text. [Alibaba's Qwen API reference](https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions) lists the native effort levels as xhigh (its default), medium, and low.

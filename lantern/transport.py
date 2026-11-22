@@ -18,7 +18,7 @@ import time
 from .attachments import MAX_IMAGE_BYTES, MAX_TURN_IMAGES, SIGNATURE
 from .image_ref import parse_reference
 from .local_time import central_time
-from .routing import ROUTES, safe_provider
+from .routing import ROUTES, TOOL_PROVIDER_EXCLUSIONS, safe_provider
 
 
 MODEL = "qwen/qwen3.8-27b"
@@ -203,6 +203,8 @@ def _prepare(payload, route, tools, *, resuming=False, managed_registry=False, r
     )
     if ROUTES[route] is not None:
         forwarded["provider"]["sort"] = ROUTES[route]
+    if forwarded["tools"] and choice != "none" and TOOL_PROVIDER_EXCLUSIONS:
+        forwarded["provider"]["ignore"] = list(TOOL_PROVIDER_EXCLUSIONS)
     return forwarded
 
 
