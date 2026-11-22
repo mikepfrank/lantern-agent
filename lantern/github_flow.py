@@ -302,7 +302,8 @@ class GitHubFlow:
         remote_tree = self._request("POST", "git/trees", {"base_tree": base_tree, "tree": entries})
         if remote_tree.get("sha") != tree:
             raise ProposalError("GitHub's resulting tree differs from the locally verified proposal.")
-        author = {"name": "Lantern", "email": "lantern@users.noreply.github.com", "date": created}
+        # A GitHub noreply address would credit the account that owns the matching username.
+        author = {"name": "Lantern", "email": "lantern@lantern-agent.invalid", "date": created}
         # Explicit timestamps keep a retry after an HTTP disconnect on the same commit.
         commit = self._request("POST", "git/commits", {"tree": tree, "parents": [base],
                                "message": packet["title"], "author": author, "committer": author})

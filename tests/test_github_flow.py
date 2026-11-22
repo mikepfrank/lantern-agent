@@ -135,7 +135,12 @@ class GitHubFlowTests(unittest.TestCase):
         sent = json.dumps(self.api.calls)
         for secret in ("temporary text", "private local message", "uncommitted private change", tip):
             self.assertNotIn(secret, sent)
-        self.assertEqual([d["parents"] for m, p, d in self.api.calls if p == "git/commits"], [[self.base]] * 2)
+        commits = [data for method, path, data in self.api.calls if method == "POST" and path == "git/commits"]
+        self.assertEqual([commit["parents"] for commit in commits], [[self.base]] * 2)
+        for commit in commits:
+            self.assertEqual(commit["author"]["name"], "Lantern")
+            self.assertEqual(commit["author"]["email"], "lantern@lantern-agent.invalid")
+            self.assertEqual(commit["committer"], commit["author"])
         self.assertEqual(self.api.pull["base"]["ref"], "main")
         self.api.pull["state"] = "closed"
         self.assertEqual(self.flow.open_draft(packet["proposal_id"])["state"], "closed")
