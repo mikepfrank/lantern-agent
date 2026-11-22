@@ -20,7 +20,9 @@ ssh -t -o ExitOnForwardFailure=yes -L 127.0.0.1:8765:127.0.0.1:8765 lightsail "s
 
 The browser and terminal show the same conversation. Either interface can send a follow-up while Lantern is working. The host handles `/release-concern` in both interfaces. `/help` runs locally in the terminal and goes to Lantern as an ordinary message in the browser.
 
-Use **+** beside the browser composer to attach one PNG, JPEG or WebP per message. You can add a caption or send the image by itself. The preview shows the dimensions that Lantern will see. The browser reduces large images to fit 1 MiB and 1,600 pixels per side. Click a thumbnail in the conversation to see the saved copy. Qwen receives the four most recent images in its current context. Older uploads remain in chat and can be attached again. Luna receives the pixels during full-context checks. The terminal shows the image dimensions and caption.
+Use **+** to select image files or paste a screenshot into the message box. You can combine both methods to attach up to four images to one message. The previews show their send order. Remove any preview before sending, then add a shared caption or send the images on their own. Ordinary text paste works in the same box.
+
+The browser accepts PNG, JPEG and WebP and reduces each image to fit 1 MiB and 1,600 pixels per side. Click a thumbnail in the conversation to see the saved copy. Qwen receives the four most recent images in its current context, including rendered PDF pages. Older uploads remain in chat and can be attached again. Luna receives the pixels during full-context checks. The terminal shows the image dimensions and caption.
 
 To inspect a PDF from either the terminal or browser, tell Lantern which document and page to look at. For example, “Use `view_pdf_page` on page 2 of `heritage/lmstudio-chat.pdf` and describe the two illustrations.” Lantern can also open PDFs saved under its coding volume, such as `/work/diagram.pdf`. The tool counts from page 1 and returns the selected page as an image along with the total page count. PDF pages and chat uploads share the four-image context window. Lantern can request an older PDF page again.
 

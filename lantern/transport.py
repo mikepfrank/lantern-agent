@@ -66,11 +66,16 @@ class UnregisteredCall(ProtocolError):
         self.arguments = item.get("arguments")
 
 
-def _prepare_input(items, names, image_loader, page_image_loader, reviewed_calls=None):
+def _prepare_input(items, names, image_loader, page_image_loader, reviewed_calls=None, *, image_by_digest=None):
     if isinstance(items, str):
         return items
     if not isinstance(items, list):
         raise ProtocolError("expected a stateless conversation")
+    if image_by_digest is None and image_loader is not None:
+        # Older single-image callers locate their only candidate by event ID.
+        def image_by_digest(event_id, digest):
+            return image_loader(event_id)
+
     images = []
     latest_user = None
     page_calls = set()
@@ -95,7 +100,7 @@ def _prepare_input(items, names, image_loader, page_image_loader, reviewed_calls
                 is_page = kind == "function_call_output"
                 if (part.get("type") != "input_image" or set(part) - {"type", "image_url", "detail"}
                         or (is_page and (not page_image_loader or page_call not in page_calls))
-                        or (not is_page and (not image_loader or item.get("role") != "user"))):
+                        or (not is_page and (not image_by_digest or item.get("role") != "user"))):
                     raise ProtocolError("unsupported content part")
                 try:
                     event_id, digest = parse_reference(part.get("image_url"), page=is_page)
@@ -128,7 +133,10 @@ def _prepare_input(items, names, image_loader, page_image_loader, reviewed_calls
                     "Its pixels are archived outside the current image window.]"}
         else:
             try:
-                data = page_image_loader(event_id, page_call) if page_call is not None else image_loader(event_id)
+                if page_call is not None:
+                    data = page_image_loader(event_id, page_call)
+                else:
+                    data = image_by_digest(event_id, digest)
             except Exception as exc:
                 raise ProtocolError("stored image is unavailable") from exc
             if (not isinstance(data, bytes) or not 0 < len(data) <= MAX_IMAGE_BYTES
@@ -147,7 +155,7 @@ def _prepare_input(items, names, image_loader, page_image_loader, reviewed_calls
 
 
 def _prepare(payload, route, tools, *, resuming=False, managed_registry=False, reviewed_calls=None,
-             image_loader=None, page_image_loader=None):
+             image_loader=None, page_image_loader=None, image_by_digest=None):
     if not isinstance(payload, dict) or payload.get("model") != MODEL or payload.get("stream") is not True:
         raise ProtocolError("expected a streaming request for " + MODEL)
     if payload.get("previous_response_id") is not None:
@@ -156,7 +164,7 @@ def _prepare(payload, route, tools, *, resuming=False, managed_registry=False, r
     # A retired call can remain in native history. Its room-specific receipt
     # permits replay as input only. Outputs and tool_choice use the active list.
     prepared_input = _prepare_input(payload.get("input"), names, image_loader, page_image_loader,
-                                     reviewed_calls if resuming else None)
+                                     reviewed_calls if resuming else None, image_by_digest=image_by_digest)
     incoming = payload.get("tools", [])
     if not isinstance(incoming, list) or any(not isinstance(tool, dict) for tool in incoming):
         raise ProtocolError("invalid tool declarations")
@@ -378,7 +386,7 @@ class OpenRouterGateway:
 
     def __init__(self, api_key, *, route, tools, reserve, settle, observe, unregistered, resuming=False,
                  operator_context="", finish=None, handoff_due=None, image_loader=None, page_image_loader=None,
-                 managed_registry=False, reviewed_calls=None):
+                 managed_registry=False, reviewed_calls=None, image_by_digest=None):
         if route not in ROUTES or not api_key:
             raise ValueError("a valid route and OpenRouter key are required")
         self.route = route
@@ -390,6 +398,7 @@ class OpenRouterGateway:
         self.operator_context = operator_context
         self.handoff_due = handoff_due
         self.image_loader = image_loader
+        self.image_by_digest = image_by_digest
         self.page_image_loader = page_image_loader
         self.managed_registry = managed_registry
         # Historical lookup is needed only when replaying a retired tool.
@@ -482,6 +491,7 @@ class OpenRouterGateway:
                         return self.reject_unread(413, "invalid request size")
                     prepared = _prepare(json.loads(self.rfile.read(length)), gateway.route, gateway.tools,
                                         resuming=gateway.resuming, image_loader=gateway.image_loader,
+                                        image_by_digest=gateway.image_by_digest,
                                         page_image_loader=gateway.page_image_loader,
                                         managed_registry=gateway.managed_registry, reviewed_calls=gateway.reviewed_calls)
                     if gateway.operator_context:

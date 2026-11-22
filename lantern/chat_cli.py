@@ -61,9 +61,9 @@ def _event_line(event):
     body = _display_text(event.text)
     if event.role == "lantern":
         body = _compact_reply(body)
-    if event.image:
-        label = f"[Image {event.image['width']} × {event.image['height']}]"
-        body = f"{label}\n{body}" if body else label
+    if event.images:
+        labels = [f"[Image {image['width']} × {image['height']}]" for image in event.images]
+        body = "\n".join([*labels, body] if body else labels)
     body = body.replace("\n", "\n    ")
     return f"[{timestamp} UTC] {speaker} #{event.id}  {body}"
 

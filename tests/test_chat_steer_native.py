@@ -32,8 +32,8 @@ class NativeSteering(unittest.TestCase):
         self.assertTrue(binary, "Cannot find the native codex executable")
         prompt = "Start the calculation. Reference River-190."
         followup = "Use the amended figure instead. Reference Orchard-843."
-        drawing = parse_image(upload(png()))
-        encoded = base64.b64encode(drawing.data).decode("ascii")
+        drawings = [parse_image(upload(png(pixels=pixels))) for pixels in (b"\x00\xff\x00\x00", b"\x00\x00\x00\xff")]
+        urls = ["data:image/png;base64," + base64.b64encode(image.data).decode("ascii") for image in drawings]
         first_inference = Event()
         acknowledged = Event()
         release_old_response = Event()
@@ -122,7 +122,7 @@ class NativeSteering(unittest.TestCase):
                         if worker.done():
                             await worker
                         await asyncio.sleep(.025)
-                    store.submit(followup, image=drawing)
+                    store.submit(followup, images=drawings)
                     while not any(event.role in ("lantern", "system") for event in store.events()):
                         if worker.done():
                             await worker
@@ -163,15 +163,14 @@ class NativeSteering(unittest.TestCase):
         self.assertEqual(finished, started)
         self.assertEqual(sent[1]["params"]["expectedTurnId"], started[0])
         self.assertEqual(sent[1]["params"]["threadId"], thread_id)
-        self.assertEqual([part["type"] for part in sent[1]["params"]["input"]], ["text", "image"])
+        self.assertEqual([part["type"] for part in sent[1]["params"]["input"]], ["text", "image", "image"])
         self.assertTrue(acknowledged.is_set())
         self.assertEqual(len(requests), 2, reports)
         self.assertEqual([sum(text.count(prompt) for text in users) for users in requests], [1, 1])
         self.assertEqual([sum(text.count(followup) for text in users) for users in requests], [0, 1])
-        self.assertTrue(all(encoded not in text for users in requests for text in users))
+        self.assertTrue(all(url not in text for users in requests for text in users for url in urls))
         self.assertEqual(transmitted_images[0], [])
-        amended, = transmitted_images[1]
-        parts, image_url = amended
-        self.assertTrue(any(followup in part.get("text", "") for part in parts))
-        self.assertEqual(image_url, "data:image/png;base64," + encoded)
+        self.assertEqual([url for _, url in transmitted_images[1]], urls)
+        for parts, _ in transmitted_images[1]:
+            self.assertTrue(any(followup in part.get("text", "") for part in parts))
         self.assertEqual([entry["status"] for entry in reports], ["completed", "completed"])

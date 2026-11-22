@@ -20,7 +20,11 @@ class Event:
     role: str
     text: str
     at: str
-    image: dict | None = None
+    images: tuple[dict, ...] = ()
+
+    @property
+    def image(self):
+        return self.images[0] if self.images else None
 
 
 # The room and CLI read metadata here. Image bytes are loaded only for an
@@ -33,12 +37,19 @@ EVENT_SELECT = """SELECT e.id,e.role,e.text,e.at,im.width,im.height,im.sha256,le
 MAX_CACHED_PDF_RASTERS = 64
 
 
-def _event(row):
-    image = None
+def _image_metadata(row):
+    return {"mime_type": "image/png", "width": row["width"], "height": row["height"],
+            "sha256": row["sha256"], "size": row["size"]}
+
+
+def _event(db, row):
+    images = []
     if row["sha256"] is not None:
-        image = {"mime_type": "image/png", "width": row["width"], "height": row["height"],
-                 "sha256": row["sha256"], "size": row["size"]}
-    return Event(row["id"], row["role"], row["text"], row["at"], image)
+        images.append(_image_metadata(row))
+        extra = db.execute("""SELECT width,height,sha256,length(data) AS size
+            FROM extra_message_images WHERE event_id=? ORDER BY position""", (row["id"],))
+        images.extend(_image_metadata(item) for item in extra)
+    return Event(row["id"], row["role"], row["text"], row["at"], tuple(images))
 
 
 @dataclass(frozen=True)
@@ -64,6 +75,11 @@ class ChatStore:
                 CREATE TABLE IF NOT EXISTS message_images (
                     event_id INTEGER PRIMARY KEY REFERENCES events(id), width INTEGER NOT NULL,
                     height INTEGER NOT NULL, sha256 TEXT NOT NULL, data BLOB NOT NULL);
+                CREATE TABLE IF NOT EXISTS extra_message_images (
+                    event_id INTEGER NOT NULL REFERENCES message_images(event_id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL CHECK(position > 0), width INTEGER NOT NULL,
+                    height INTEGER NOT NULL, sha256 TEXT NOT NULL, data BLOB NOT NULL,
+                    PRIMARY KEY(event_id,position));
                 CREATE TABLE IF NOT EXISTS pdf_rasters (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, data BLOB NOT NULL);
                 CREATE TABLE IF NOT EXISTS pdf_views (
@@ -100,11 +116,15 @@ class ChatStore:
         return db.execute("INSERT INTO events(role,text,at,client_id) VALUES(?,?,?,?)",
                           (role, text, now, client_id)).lastrowid
 
-    def submit(self, text: str, client_id: str | None = None, *, image: ImageAttachment | None = None) -> int:
+    def submit(self, text: str, client_id: str | None = None, *, image: ImageAttachment | None = None,
+               images: tuple[ImageAttachment, ...] | list[ImageAttachment] = ()) -> int:
         """Accept a message durably. Reusing its client ID returns its original receipt."""
-        if image is not None and not isinstance(image, ImageAttachment):
+        if not isinstance(images, (list, tuple)) or len(images) > MAX_TURN_IMAGES or (image is not None and images):
+            raise ValueError(f"Send up to {MAX_TURN_IMAGES} ordered message images")
+        images = (image,) if image is not None else tuple(images)
+        if not all(isinstance(item, ImageAttachment) for item in images):
             raise ValueError("Invalid message image")
-        if not isinstance(text, str) or (not text.strip() and image is None):
+        if not isinstance(text, str) or (not text.strip() and not images):
             raise ValueError("The chat message is empty")
         if client_id is not None and (not isinstance(client_id, str) or not client_id.strip()):
             raise ValueError("A supplied message ID must be a nonempty string")
@@ -112,19 +132,39 @@ class ChatStore:
             if client_id is not None:
                 existing = db.execute(EVENT_SELECT + "WHERE e.client_id=?", (client_id,)).fetchone()
                 if existing is not None:
-                    if existing["text"] != text or existing["sha256"] != (image.sha256 if image else None):
+                    prior_images = _event(db, existing).images
+                    if existing["text"] != text or [i["sha256"] for i in prior_images] != [i.sha256 for i in images]:
                         raise ValueError("This message ID already belongs to different text or image")
                     return existing["id"]
             event_id = self._append(db, "operator", text, client_id)
-            if image:
+            if images:
+                # Position zero stays in its original table for existing databases and older readers.
+                image = images[0]
                 db.execute("INSERT INTO message_images(event_id,width,height,sha256,data) VALUES(?,?,?,?,?)",
                            (event_id, image.width, image.height, image.sha256, image.data))
+                db.executemany("""INSERT INTO extra_message_images(event_id,position,width,height,sha256,data)
+                    VALUES(?,?,?,?,?,?)""", ((event_id, pos, item.width, item.height, item.sha256, item.data)
+                                            for pos, item in enumerate(images[1:], start=1)))
             db.execute("INSERT INTO inbox(event_id) VALUES(?)", (event_id,))
             return event_id
 
-    def image_data(self, event_id: int) -> bytes | None:
+    def image_data(self, event_id: int, index: int = 0) -> bytes | None:
+        if type(index) is not int or not 0 <= index < MAX_TURN_IMAGES:
+            return None
         with self._connect() as db:
-            row = db.execute("SELECT data FROM message_images WHERE event_id=?", (event_id,)).fetchone()
+            if index == 0:
+                row = db.execute("SELECT data FROM message_images WHERE event_id=?", (event_id,)).fetchone()
+            else:
+                row = db.execute("SELECT data FROM extra_message_images WHERE event_id=? AND position=?",
+                                 (event_id, index)).fetchone()
+            return row["data"] if row else None
+
+    def image_data_by_digest(self, event_id: int, sha256: str) -> bytes | None:
+        """Resolve a saved model reference within its original operator message."""
+        with self._connect() as db:
+            row = db.execute("""SELECT data FROM message_images WHERE event_id=? AND sha256=?
+                UNION ALL SELECT data FROM extra_message_images WHERE event_id=? AND sha256=?
+                LIMIT 1""", (event_id, sha256, event_id, sha256)).fetchone()
             return row["data"] if row else None
 
     def save_page_image(self, thread_id: str, call_id: str, image: ImageAttachment) -> dict:
@@ -155,7 +195,7 @@ class ChatStore:
         if after < 0 or limit < 0:
             raise ValueError("Invalid chat event cursor or limit")
         with self._connect() as db:
-            return [_event(row) for row in db.execute(
+            return [_event(db, row) for row in db.execute(
                 EVENT_SELECT + "WHERE e.id>? ORDER BY e.id LIMIT ?", (after, limit))]
 
     def recent(self, limit: int = 20, *, before: int | None = None) -> list[Event]:
@@ -168,7 +208,7 @@ class ChatStore:
             params.append(before)
         with self._connect() as db:
             rows = db.execute(query + " ORDER BY e.id DESC LIMIT ?", (*params, limit)).fetchall()
-            return [_event(row) for row in reversed(rows)]
+            return [_event(db, row) for row in reversed(rows)]
 
     def read_cursor(self) -> int | None:
         with self._connect() as db:
@@ -196,11 +236,11 @@ class ChatStore:
             WHERE i.batch_id IS NULL AND e.role=? ORDER BY i.event_id LIMIT ?""", (role, limit))
         messages = []
         for row in rows:
-            if row["sha256"] is not None:
-                if image_slots <= 0:
-                    break
-                image_slots -= 1
-            messages.append(_event(row))
+            event = _event(db, row)
+            if len(event.images) > image_slots:
+                break
+            image_slots -= len(event.images)
+            messages.append(event)
         return tuple(messages)
 
     @staticmethod
@@ -382,8 +422,10 @@ class ChatStore:
         with self._connect(write=True) as db:
             self._active(db, batch_id)
             operator_release.process_commands(self, db)
-            used = db.execute("""SELECT COUNT(*) FROM inbox i JOIN message_images im ON im.event_id=i.event_id
-                WHERE i.batch_id=?""", (batch_id,)).fetchone()[0]
+            used = db.execute("""SELECT COUNT(DISTINCT im.event_id) + COUNT(x.position)
+                FROM inbox i JOIN message_images im ON im.event_id=i.event_id
+                LEFT JOIN extra_message_images x ON x.event_id=im.event_id WHERE i.batch_id=?""",
+                              (batch_id,)).fetchone()[0]
             messages = self._pending(db, limit, image_slots=MAX_TURN_IMAGES - used)
             self._assign(db, messages, batch_id, True)
             return messages

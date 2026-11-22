@@ -57,15 +57,15 @@ def worker_online(state: Path) -> bool:
 
 
 def _message_parts(events):
-    """Keep each caption beside its image. Codex persists only the private reference."""
-    if not any(event.image for event in events):
+    """Keep each caption with its ordered images. Codex saves only private references."""
+    if not any(event.images for event in events):
         return None
     parts = []
     for event in events:
         if event.text:
             parts.append({"type": "text", "text": event.text})
-        if event.image:
-            url = image_reference(event.id, event.image["sha256"])
+        for image in event.images:
+            url = image_reference(event.id, image["sha256"])
             parts.append({"type": "image", "url": url})
     return parts
 

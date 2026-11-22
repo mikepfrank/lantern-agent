@@ -14,6 +14,7 @@ import uuid
 from lantern.chat_store import ChatStore
 from lantern.operator_review import ReviewRoom
 from lantern.web import PAGE_SIZE, RoomServer
+from test_attachments import chunk, png, upload
 
 
 class MessageFormattingTests(unittest.TestCase):
@@ -182,6 +183,40 @@ class WebRoomTests(unittest.TestCase):
             self.assertEqual(503, self.request("POST", "/api/messages", body=body)[0])
             self.assertEqual(200, self.request("POST", "/api/messages", body={**body, "text": "Hello"})[0])
         self.assertEqual(400, self.request("POST", "/api/messages", body=body)[0])
+
+    def test_four_images_share_one_event_and_keep_their_order_on_retry(self):
+        # Together these uploads exceed the former single-image request ceiling.
+        padding = chunk(b"tEXt", b"Comment\0" + b"x" * 420_000)
+        pixels = [bytes((0, n, 20, 30)) for n in (10, 40, 100, 200)]
+        uploads = [upload(png(pixels=color, extra=padding)) for color in pixels]
+        body = {"text": "Compare these in order", "client_id": str(uuid.uuid4()), "images": uploads}
+        status, _, receipt = self.request("POST", "/api/messages", body=body)
+        self.assertEqual(200, status)
+        self.assertEqual(receipt, self.request("POST", "/api/messages", body=body)[2])
+        self.assertEqual(409, self.request("POST", "/api/messages", body={**body, "images": uploads[::-1]})[0])
+        event, = self.request("GET", "/api/room")[2]["events"]
+        self.assertEqual(receipt["id"], event["id"])
+        self.assertEqual(body["text"], event["text"])
+        self.assertEqual(4, len(event["images"]))
+        self.assertEqual(event["images"][0], event["image"])
+        for index, color in enumerate(pixels):
+            path = f"/api/messages/{event['id']}/images/{index}"
+            self.assertEqual(401, self.request("GET", path, auth=False)[0])
+            status, _, data = self.request("GET", path)
+            self.assertEqual((200, png(pixels=color)), (status, data))
+        self.assertEqual(404, self.request("GET", f"/api/messages/{event['id']}/images/4")[0])
+        self.assertEqual(1, self.store.status()["queued"])
+
+    def test_invalid_batch_does_not_partially_save_a_message(self):
+        first = upload(png())
+        base = {"text": "", "client_id": str(uuid.uuid4())}
+        for fields in ({"images": [first, {}]}, {"images": [first] * 5}, {"images": first},
+                       {"images": []}, {"image": first, "images": [first]}):
+            with self.subTest(keys=list(fields)):
+                self.assertEqual(400, self.request("POST", "/api/messages", body={**base, **fields})[0])
+        self.assertEqual([], self.store.events())
+        self.assertEqual(200, self.request("POST", "/api/messages", body={**base, "images": [first, first]})[0])
+        self.assertEqual(1, self.store.status()["queued"])
 
     def test_history_pages_and_invalid_inputs(self):
         for i in range(PAGE_SIZE + 3):

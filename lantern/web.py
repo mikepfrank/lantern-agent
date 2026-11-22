@@ -15,7 +15,7 @@ from time import monotonic
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
-from .attachments import MAX_IMAGE_BASE64, parse_image
+from .attachments import MAX_IMAGE_BASE64, MAX_TURN_IMAGES, parse_image
 from .chat_store import ChatStore
 from .chat_worker import worker_online
 from .operator_review import MAX_ANSWER, ReviewRoom
@@ -26,6 +26,7 @@ DEFAULT_PORT = 8765
 PAGE_SIZE = 40
 MAX_MESSAGE = 16000
 TEXT_BODY_LIMIT = 128000
+MESSAGE_BODY_LIMIT = TEXT_BODY_LIMIT + MAX_IMAGE_BASE64 * MAX_TURN_IMAGES
 SIGN_IN_BODY_LIMIT = 4096
 SESSION_COOKIE = "__Host-lantern-session"
 ASSETS = {
@@ -187,13 +188,14 @@ class RoomHandler(BaseHTTPRequestHandler):
         if self.path in self.server.assets:
             self._reply(200, *self.server.assets[self.path])
             return
-        image_route = re.fullmatch(r"/api/messages/([1-9][0-9]{0,18})/image", self.path)
+        image_route = re.fullmatch(r"/api/messages/([1-9][0-9]{0,18})/(?:image|images/(0|[1-9][0-9]?))", self.path)
         if image_route:
             if not self._authorized():
                 return
             event_id = int(image_route[1])
             try:
-                data = self.server.store.image_data(event_id) if event_id < 2**63 else None
+                index = int(image_route[2] or 0)
+                data = self.server.store.image_data(event_id, index) if event_id < 2**63 else None
             except sqlite3.Error:
                 self._json(503, {"error": "The conversation store is temporarily unavailable."})
                 return
@@ -243,7 +245,7 @@ class RoomHandler(BaseHTTPRequestHandler):
         except (OSError, sqlite3.Error):
             self._json(503, {"error": "The conversation store is temporarily unavailable."})
             return
-        self._json(200, {"events": [asdict(event) for event in events],
+        self._json(200, {"events": [{**asdict(event), "image": event.image} for event in events],
                          "more": len(rows) > PAGE_SIZE, "status": status})
 
     def do_POST(self):
@@ -255,7 +257,7 @@ class RoomHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": "A valid content length is required."})
             return
         length = int(lengths[0])
-        max_body = TEXT_BODY_LIMIT + (MAX_IMAGE_BASE64 if self.path == "/api/messages" else 0)
+        max_body = MESSAGE_BODY_LIMIT if self.path == "/api/messages" else TEXT_BODY_LIMIT
         if self.path in ("/api/sign-in", "/api/sign-out"):
             max_body = SIGN_IN_BODY_LIMIT
         if length > max_body:
@@ -283,7 +285,7 @@ class RoomHandler(BaseHTTPRequestHandler):
         # Windows may reset sockets closed with unread data. Drain briefly
         # after sending an error so an ordinary client can receive it.
         self.close_connection = True
-        remaining = min(length, TEXT_BODY_LIMIT + MAX_IMAGE_BASE64)
+        remaining = min(length, MESSAGE_BODY_LIMIT)
         deadline = monotonic() + 0.25
         try:
             while remaining and (timeout := deadline - monotonic()) > 0:
@@ -336,11 +338,15 @@ class RoomHandler(BaseHTTPRequestHandler):
                 else:
                     self._json(200, {"id": review_id})
                 return
-            if (not isinstance(body, dict)
-                    or set(body) not in ({"text", "client_id"}, {"text", "client_id", "image"})):
+            if (not isinstance(body, dict) or set(body) not in
+                    ({"text", "client_id"}, {"text", "client_id", "image"}, {"text", "client_id", "images"})):
                 raise ValueError
             message, client_id = body["text"], body["client_id"]
-            if not isinstance(message, str) or len(message) > MAX_MESSAGE or (not message.strip() and "image" not in body):
+            uploads = [body["image"]] if "image" in body else body.get("images", [])
+            if not isinstance(uploads, list) or len(uploads) > MAX_TURN_IMAGES:
+                self._json(400, {"error": f"Attach up to {MAX_TURN_IMAGES} images per message."})
+                return
+            if not isinstance(message, str) or len(message) > MAX_MESSAGE or (not message.strip() and not uploads):
                 raise ValueError
             message.encode("utf-8")  # Reject isolated JSON-escaped surrogates before storing.
             if not isinstance(client_id, str) or str(UUID(client_id)) != client_id:
@@ -351,14 +357,14 @@ class RoomHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": error})
             return
         try:
-            image = parse_image(body["image"]) if "image" in body else None
+            images = [parse_image(upload) for upload in uploads]
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
             return
         try:
-            receipt = self.server.store.submit(message, client_id="web:" + client_id, image=image)
+            receipt = self.server.store.submit(message, client_id="web:" + client_id, images=images)
         except ValueError:
-            self._json(409, {"error": "This message ID already belongs to different text or image."})
+            self._json(409, {"error": "This message ID already belongs to different text or attachments."})
             return
         except sqlite3.Error:
             self._json(503, {"error": "The conversation store is temporarily unavailable."})

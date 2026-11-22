@@ -2,10 +2,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import multiprocessing
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 
+from lantern.attachments import parse_image
 from lantern.chat_store import ChatStore
+from test_attachments import png, upload
 
 
 class ChatStoreTests(unittest.TestCase):
@@ -24,6 +27,71 @@ class ChatStoreTests(unittest.TestCase):
             self.store.submit("different", "client-receipt")
         self.assertEqual("first\nsecond", self.store.recent()[0].text)
         self.assertEqual(1, self.store.status()["queued"])
+
+    def test_ordered_images_survive_reopen_and_retries(self):
+        red, blue = [parse_image(upload(png(pixels=p))) for p in (b"\0\xff\0\0", b"\0\0\0\xff")]
+        selected = [red, blue, red]
+        receipt = self.store.submit("Three screenshots", "upload", images=selected)
+        reopened = ChatStore(self.state)
+        for event in (reopened.events()[0], reopened.recent()[0], reopened.claim().messages[0]):
+            self.assertEqual([i.sha256 for i in selected], [i["sha256"] for i in event.images])
+            self.assertEqual(event.image, event.images[0])
+        self.assertEqual([i.data for i in selected], [reopened.image_data(receipt, n) for n in range(3)])
+        self.assertIsNone(reopened.image_data(receipt, 3))
+        self.assertEqual(blue.data, reopened.image_data_by_digest(receipt, blue.sha256))
+        other = reopened.submit("One", image=red)
+        self.assertIsNone(reopened.image_data_by_digest(other, blue.sha256))
+        self.assertEqual(receipt, reopened.submit("Three screenshots", "upload", images=selected))
+        for different in ([blue, red, red], [red, blue], [red, blue, blue], []):
+            with self.subTest(different=[i.sha256 for i in different]), self.assertRaises(ValueError):
+                reopened.submit("Three screenshots", "upload", images=different)
+
+    def test_existing_single_image_database_upgrades_in_place(self):
+        image = parse_image(upload(png()))
+        receipt = self.store.submit("", "legacy", image=image)
+        with self.store._connect(write=True) as db:
+            db.execute("DROP TABLE extra_message_images")  # Original single-image schema.
+        reopened = ChatStore(self.state)
+        self.assertEqual(receipt, reopened.submit("", "legacy", images=[image]))
+        old, = reopened.recent()
+        self.assertEqual((old.image,), old.images)
+        self.assertEqual(image.data, reopened.image_data(receipt))
+        self.assertEqual(image.data, reopened.image_data_by_digest(receipt, image.sha256))
+
+    def test_multi_image_admission_keeps_message_together_across_steer(self):
+        image = parse_image(upload(png()))
+        first = self.store.submit("two", images=[image, image])
+        batch = self.store.claim()
+        self.assertEqual([first], [m.id for m in batch.messages])
+        fits = self.store.submit("two more", images=[image, image])
+        self.assertEqual([fits], [m.id for m in self.store.claim_steer(batch.id)])
+        self.store.release_steer(batch.id, [fits])
+        self.assertEqual([fits], [m.id for m in self.store.claim_steer(batch.id)])
+        held = self.store.submit("", images=[image] * 3)
+        text = self.store.submit("Caption follow-up")
+        self.assertEqual((), self.store.claim_steer(batch.id))
+        self.store.complete(batch.id, "Saw the four images")
+        next_batch = self.store.claim()
+        self.assertEqual([held, text], [m.id for m in next_batch.messages])
+        later = self.store.submit("needs two slots", images=[image] * 2)
+        self.assertEqual((), self.store.claim_steer(next_batch.id))
+        self.store.complete(next_batch.id, "Saw the three images")
+        self.assertEqual([later], [m.id for m in self.store.claim().messages])
+
+    def test_rejected_multi_image_does_not_store_part_or_consume_receipt(self):
+        image = parse_image(upload(png()))
+        for invalid in ([image] * 5, [image, "invalid"]):
+            with self.assertRaises(ValueError):
+                self.store.submit("", "upload", images=invalid)
+        with self.store._connect(write=True) as db:
+            db.execute("""CREATE TRIGGER simulate_failure BEFORE INSERT ON extra_message_images
+                WHEN NEW.position=2 BEGIN SELECT RAISE(ABORT,'simulated failure'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.submit("", "upload", images=[image] * 3)
+        self.assertEqual([], self.store.events())
+        self.assertEqual(0, self.store.status()["queued"])
+        self.store.submit("", "upload", images=[image] * 2)
+        self.assertEqual(2, len(self.store.recent()[0].images))
 
     def test_turn_and_thread_survive_process_restart(self):
         first = self.store.submit("First")
