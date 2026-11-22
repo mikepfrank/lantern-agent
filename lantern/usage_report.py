@@ -118,13 +118,19 @@ def _route_summary(rows):
     decoding_ms = sum(r["response_end_ms"] - r["first_token_ms"] for r in decoding)
     priced = [r for r in rows if r.get("reported_cost_usd") is not None and r.get("input_tokens") is not None
               and r.get("output_tokens") is not None and r["input_tokens"] + r["output_tokens"] > 0]
-    priced_tokens = sum(r["input_tokens"] + r["output_tokens"] for r in priced)
+    priced_input = sum(r["input_tokens"] for r in priced)
+    priced_output = sum(r["output_tokens"] for r in priced)
+    priced_tokens = priced_input + priced_output
+    cache_reads = [r["cache_reads"] for r in priced if r.get("cache_reads") is not None]
     priced_cost = sum(Decimal(r["reported_cost_usd"]) for r in priced)
     return {"calls": len(rows), "completed_calls": len(completed), "reported_cost_calls": len(costs),
             "reported_cost_usd": str(sum(costs)) if costs else None, "completed_timings": timings,
             "decoding_samples": len(decoding),
             "decoding_output_tokens_per_second": round(decoded_tokens * 1000 / decoding_ms, 2) if decoding_ms else None,
             "priced_token_samples": len(priced), "priced_tokens": priced_tokens,
+            "priced_input_tokens": priced_input, "priced_output_tokens": priced_output,
+            "priced_cached_input_tokens": sum(cache_reads) if cache_reads else None,
+            "priced_cache_read_samples": len(cache_reads),
             "calls_without_paired_cost_and_tokens": len(rows) - len(priced),
             "usd_per_token": str(priced_cost / priced_tokens) if priced_tokens else None,
             "usd_per_million_tokens": str(priced_cost * 1_000_000 / priced_tokens) if priced_tokens else None,

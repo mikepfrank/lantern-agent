@@ -20,7 +20,7 @@ class BudgetTests(unittest.TestCase):
                         "first_token_ms": 100, "first_output_ms": 200, "response_end_ms": 1000,
                         "input_tokens": 80, "output_tokens": 20, "provider": "Host A"}
             billed = ledger.reserve({"provider": {"sort": "price"}})
-            ledger.finish(billed, Decimal("0.0010000004"), status="completed", evidence=evidence,
+            ledger.finish(billed, Decimal("0.0010000004"), status="completed", evidence={**evidence, "cache_reads": 60},
                           ms=2001, charge_source="openrouter")
             free = ledger.reserve({"provider": {"sort": "price"}})
             ledger.finish(free, Decimal("0"), status="completed",
@@ -60,6 +60,8 @@ class BudgetTests(unittest.TestCase):
             self.assertEqual((cheap["priced_token_samples"], cheap["priced_tokens"],
                               cheap["calls_without_paired_cost_and_tokens"]), (2, 200, 1))
             self.assertEqual(Decimal(cheap["usd_per_token"]), Decimal("0.0010000004") / 200)
+            self.assertEqual((cheap["priced_input_tokens"], cheap["priced_output_tokens"],
+                              cheap["priced_cached_input_tokens"], cheap["priced_cache_read_samples"]), (160, 40, 60, 1))
             self.assertEqual(Decimal(cheap["usd_per_million_tokens"]), Decimal("5.000002"))
             self.assertEqual((cheap["throughput_samples"], cheap["effective_output_tokens_per_second"]), (2, 10))
             fast = report["qwen_by_route"]["fastest"]
