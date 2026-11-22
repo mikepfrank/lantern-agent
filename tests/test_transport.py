@@ -17,6 +17,8 @@ from urllib.parse import urlsplit
 
 from lantern.transport import MODEL, OpenRouterGateway, _open_upstream
 from lantern.image_ref import image_reference
+from lantern.independent_tools import PROVIDER_STATS_TOOL
+from lantern.routing import ROUTE_TOOL
 
 
 CHESS = {"name": "chess", "description": "Inspect a position", "inputSchema": {"type": "object"}}
@@ -152,6 +154,41 @@ class TransportTests(unittest.TestCase):
         with self.gateway("fastest", tools=tools, resuming=True) as prototype:
             self.assertEqual(200, self.request(prototype, tools=offered[:1])[0])
         self.assertEqual([t["name"] for t in self.wire[-1][0]["tools"]], names[:1])
+
+    def test_current_room_tool_reminder_matches_the_wire_and_dispatch_evidence(self):
+        tools = [CHESS, ROUTE_TOOL, PROVIDER_STATS_TOOL]
+        names = [t["name"] for t in tools]
+        declared = [{"type": "function", "name": n} for n in [*names, "untrusted_client_tool"]]
+        history = [{"role": "user", "content": "Earlier capabilities?"},
+                   {"role": "assistant", "content": "The old list included obsolete_tool."}]
+        question = {"role": "user", "content": "Which tools can I use now?"}
+        with self.gateway("fastest", tools=tools, managed_registry=True, resuming=True) as gate:
+            self.assertEqual(200, self.request(gate, input=history + [question], tools=declared)[0])
+        sent = self.wire[0][0]
+        self.assertEqual(sent["input"][:len(history)], history)
+        self.assertEqual(sent["input"][-1], question)
+        near_question = sent["input"][len(history):-1]
+        reminders = [part["text"] for item in near_question if item.get("role") == "developer"
+                     for part in item["content"] if "Callable tools for this request" in part.get("text", "")]
+        self.assertEqual(len(reminders), 1)
+        offered = [tool["name"] for tool in sent["tools"]]
+        self.assertEqual(offered, names)
+        self.assertCountEqual(gate.evidence[0]["offered_tools"], offered)
+        for name in names:
+            self.assertIn(name, reminders[0])
+        for unoffered in ["obsolete_tool", "untrusted_client_tool"]:
+            self.assertNotIn(unoffered, reminders[0])
+        self.assertEqual(self.observe.call_args.args[0], sent)
+
+    def test_tool_free_compaction_and_unmanaged_call_do_not_get_a_room_tool_reminder(self):
+        for managed, native_tools in ((True, []), (False, [{"type": "function", "name": "chess"}])):
+            with self.subTest(managed=managed), self.gateway("fastest", managed_registry=managed) as gate:
+                self.assertEqual(200, self.request(gate, tools=native_tools)[0])
+                sent = self.wire[-1][0]
+                self.assertNotIn("Callable tools for this request", json.dumps(sent["input"]))
+                if managed:
+                    self.assertEqual([], sent["tools"])
+                    self.assertEqual([], gate.evidence[0]["offered_tools"])
 
     def test_fresh_clock_precedes_latest_input_without_rewriting_history(self):
         history = [{"role": "user", "content": "Previous turn, at noon UTC."},

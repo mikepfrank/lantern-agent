@@ -220,16 +220,23 @@ def _handoff_event(prepared, handoff_due):
     return None
 
 
-def _with_operator_clock(items):
+def _with_request_context(items, offered_tools):
     """Add current host metadata beside the latest input, leaving stored history and its cacheable prefix intact."""
     if isinstance(items, str):
         items = [{"role": "user", "content": items}]
     latest_user = next((i for i in range(len(items) - 1, -1, -1) if items[i].get("role") == "user"), 0)
-    clock = {"role": "developer", "content": [{"type": "input_text", "text":
+    text = (
         f"Current time for the operator (US Central): {central_time()}. "
         "Use this local date and time for greetings and calendar references. "
-        "Codex environment timestamps describe the server."}]}
-    return items[:latest_user] + [clock] + items[latest_user:]
+        "Codex environment timestamps describe the server.")
+    if offered_tools:
+        text += "\nCallable tools for this request: " + ", ".join(offered_tools) + "."
+        text += " This live list supersedes earlier descriptions of your capabilities."
+        if "provider_stats" in offered_tools:
+            text += (" When Mike asks about provider tool availability, verify it with one read-only "
+                     "provider_stats call and report its result. It leaves your route in place.")
+    context = {"role": "developer", "content": [{"type": "input_text", "text": text}]}
+    return items[:latest_user] + [context] + items[latest_user:]
 
 
 @contextmanager
@@ -571,7 +578,20 @@ class OpenRouterGateway:
                         event = _handoff_event(prepared, gateway.handoff_due)
                         if event:
                             evidence["handoff_event"] = event
-                    prepared["input"] = _with_operator_clock(prepared["input"])
+                    # Only names from the host-built wire schemas are logged or repeated to the model.
+                    # A tool-free compaction has its own empty registry.
+                    offered = [tool["name"] for tool in prepared["tools"]]
+                    choice = prepared["tool_choice"]
+                    if choice == "none":
+                        callable_now = []
+                    elif isinstance(choice, dict):
+                        callable_now = [choice["name"]]
+                    else:
+                        callable_now = offered
+                    prepared["input"] = _with_request_context(prepared["input"],
+                                                              callable_now if gateway.managed_registry else [])
+                    evidence["offered_tools"] = offered
+                    evidence["tool_choice"] = choice
                     body = json.dumps(prepared, allow_nan=False, separators=(",", ":")).encode()
                 except (KeyError, ValueError, TypeError, RecursionError, OSError) as exc:
                     evidence["error"] = str(exc) if isinstance(exc, ProtocolError) else "malformed request"
