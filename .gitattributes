@@ -4,6 +4,7 @@ lantern/personas/lantern-v2.md -text whitespace=cr-at-eol
 lantern/web_assets/markdown-it-15.0.3.min.js -text
 deploy/*.sh text eol=lf
 deploy/lantern text eol=lf
+deploy/lantern-update-worker text eol=lf
 deploy/*.service text eol=lf
 deploy/coding/*.service text eol=lf
 deploy/coding/*.socket text eol=lf

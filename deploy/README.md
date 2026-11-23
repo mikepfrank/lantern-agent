@@ -4,6 +4,10 @@ The systemd worker serves the private `lantern` account over its local SQLite ch
 
 ## Install a reviewed revision
 
+For routine worker updates on the existing Lightsail host, sign in as `ec2-user` and run `/usr/local/bin/lantern-update-worker`. From the laptop, use `ssh lightsail /usr/local/bin/lantern-update-worker`. The command fetches the public repository's `main`, runs the regression suite, and invokes the worker-only installer at an idle boundary. If the worker is busy, rerun the command after the current turn and usage settlement finish. If the running worker already matches `main`, the command exits immediately after the version check. Pass a full commit SHA to require that exact revision at the tip of `main`.
+
+The operator command is installed from `deploy/lantern-update-worker` with `sudo install -o root -g root -m 0755 deploy/lantern-update-worker /usr/local/bin/lantern-update-worker`. Use the component-specific instructions below for browser, proxy, or broker changes.
+
 Use an archive from the local repository. Record the full revision and the archive digest before uploading it to a private staging directory owned by the Lightsail administrator.
 
 On a fresh host restore the private `heritage/` directory separately under `/home/lantern/.local/state/lantern/`. Use owner `lantern`, directory mode `0700`, and file mode `0600`. The operator's original files are `Lantern.md`, `lmstudio-chat.md`, `lmstudio-chat.txt` and `lmstudio-chat.pdf`. The page text companion `lmstudio-chat.pdf-pages.json` is UTF-8 JSON with `sha256` for the original PDF bytes and `pages` containing one extracted string per page, in order. The service mounts this folder read-only. It belongs outside the release archive and Git bundles.
