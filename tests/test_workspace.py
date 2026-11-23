@@ -38,11 +38,21 @@ class WorkspaceTests(unittest.TestCase):
         for path in ("z", "a/k", "b"):
             self.call("write", path=path, text="")
         a = self.call("list", limit=2)
-        self.assertEqual(a["entries"], [{"name": "a", "directory": True}, {"name": "b", "directory": False}])
+        self.assertEqual(a["entries"], [{"name": "a", "directory": True, "size_bytes": None},
+                                        {"name": "b", "directory": False, "size_bytes": 0}])
         b = self.call("list", path=".", offset=a["next_offset"])
-        self.assertEqual(b["entries"], [{"name": "z", "directory": False}])
+        self.assertEqual(b["entries"], [{"name": "z", "directory": False, "size_bytes": 0}])
         self.assertIsNone(b["next_offset"])
-        self.assertEqual(self.call("list", path="a")["entries"], [{"name": "k", "directory": False}])
+        self.assertEqual(self.call("list", path="a")["entries"],
+                         [{"name": "k", "directory": False, "size_bytes": 0}])
+
+    def test_listing_reports_file_sizes(self):
+        self.call("write", path="notes/big.md", text="\U0001F56F" * 100)
+        self.call("write", path="notes/empty.md", text="")
+        sizes = {e["name"]: e["size_bytes"] for e in self.call("list", path="notes")["entries"]}
+        self.assertEqual(sizes, {"big.md": 400, "empty.md": 0})
+        top = self.call("list", path=".")["entries"]
+        self.assertEqual(top, [{"name": "notes", "directory": True, "size_bytes": None}])
 
     def test_reject_traversal_device_names_and_invalid_inputs(self):
         for path in ("../private.txt", "/a", "a/../x", r"..\x", "a:stream", "aux.txt", "foo/CON", "a//b",
@@ -69,6 +79,8 @@ class WorkspaceTests(unittest.TestCase):
         for operation, args in (("read", {}), ("write", {"text": "changed"})):
             with self.subTest(operation=operation), self.assertRaises(ValueError):
                 self.call(operation, path="link", **args)
+        listed = {e["name"]: e["size_bytes"] for e in self.call("list", path=".")["entries"]}
+        self.assertIsNone(listed["link"])
         self.assertEqual(self.private.read_text(), "private")
 
     def test_symlink_target_and_symlink_directory_are_rejected(self):
