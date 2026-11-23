@@ -173,11 +173,21 @@ def _review_excerpt(case):
     edit = case.get("host_facts", {}).get("workspace_edit", {})
     if edit.get("hunks"):
         changed = json.dumps(edit["hunks"], ensure_ascii=False)
-        excerpt += "\n\nChanged text (offsets in characters)\n" + (changed if len(changed) <= 700 else changed[:699] + "…")
+        excerpt += "\n\nChanged text (offsets in characters)"
+        if not edit["complete"]:
+            excerpt += "\nSome changes were omitted from this preview."
+        if len(changed) > 700:
+            excerpt += "\nThe displayed text is truncated."
+            changed = changed[:699] + "…"
+        excerpt += "\n" + changed
     elif edit.get("status") == "unchanged":
         excerpt += "\n\nThe proposed file is identical to the verified revision."
     elif case["tool"] == "workspace_write" and isinstance(case["arguments"].get("text"), str):
         draft = case["arguments"]["text"]
+        if edit.get("status") == "replace":
+            excerpt += "\n\nThe changes exceed the preview limit."
+        elif edit.get("status") != "create":
+            excerpt += "\n\nThe host could not verify the saved revision."
         excerpt += "\n\nProposed text" + (" (ending)\n…" + draft[-700:] if len(draft) > 700 else "\n" + draft)
     if case["tool"] == OPEN_DRAFT and (draft := case.get("host_facts", {}).get("public_draft")):
         text = f"{draft['repository']} → {draft['base_branch']}\n{draft['title']}\n" + "\n".join(draft["paths"])

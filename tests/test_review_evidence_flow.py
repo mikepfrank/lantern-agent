@@ -18,7 +18,7 @@ from lantern.workspace import workspace_tool
 
 class ReviewEvidenceFlow(unittest.TestCase):
     def setUp(self):
-        self.state = Path(self.enterContext(TemporaryDirectory()))
+        self.state = Path(self.enterContext(TemporaryDirectory())).resolve(strict=True)
         self.files = self.state / "files"
         self.files.mkdir()
         self.thread = "fixture-reading-room"

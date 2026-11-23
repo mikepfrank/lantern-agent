@@ -10,6 +10,7 @@ from lantern.chat_store import ChatStore
 from lantern.opus import OpusCaseTooLarge
 from lantern.operator_review import ReviewRoom
 from lantern.supervision import Supervisor, database
+from lantern.workspace import workspace_tool
 
 
 ASK = {"decision": "ask_operator", "reason": "Does your earlier approval cover this private file?"}
@@ -57,6 +58,36 @@ class OperatorSupervisionTests(unittest.TestCase):
         self.execute.assert_not_called()
         question, = self.room.pending()
         return question["id"]
+
+    def test_workspace_review_popup_identifies_partial_and_unavailable_edit_previews(self):
+        self.gate.workspace_root = self.state / "files"
+        self.gate.workspace_root.mkdir()
+        self.luna.screen.return_value = FLAG
+        self.review.return_value = ASK
+        large_old, large_new = "B" * 3200, "A" * 3200
+        # The first replacement is too large to show, while the last word fits.
+        cases = [
+            ("mixed", large_old + "\nstable line\nold", large_new + "\nstable line\nnew",
+             ["Some changes were omitted", '"added": "new"']),
+            ("omitted", large_old, large_new, ["changes exceed the preview limit", "Proposed text (ending)"]),
+            ("unverified", "private baseline", "short draft", ["could not verify the saved revision", "Proposed text\nshort draft"]),
+            ("clipped", "", "A" * 900, ["displayed text is truncated", "…"]),
+        ]
+        for path, original, draft, expected in cases:
+            with self.subTest(path=path):
+                saved = workspace_tool(self.gate.workspace_root, "workspace_write", {"path": path, "text": original})
+                digest = "0" * 64 if path == "unverified" else saved["sha256"]
+                result = self.gate.dispatch(path, "workspace_write", {
+                    "path": path, "text": draft, "expected_sha256": digest, "rationale": "Update the file."
+                }, self.execute)
+                question = next(row for row in self.room.pending() if row["id"] == result["review_id"])
+                for label in expected:
+                    self.assertIn(label, question["excerpt"])
+                self.assertLessEqual(len(question["excerpt"]), 2000)
+                self.assertNotIn("private baseline", question["excerpt"])
+                if path == "clipped":
+                    self.assertNotIn("Some changes were omitted", question["excerpt"])
+        self.execute.assert_not_called()
 
     def resume(self, review_id):
         self.room.answer(review_id, self.answer)
