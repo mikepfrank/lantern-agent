@@ -64,6 +64,7 @@ class ChatStore:
     def __init__(self, state: Path, *, clock=None):
         state.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.path = state / "chat.sqlite"
+        self._next_concern_snapshot = 0
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         with self._connect() as db:
             db.executescript("""

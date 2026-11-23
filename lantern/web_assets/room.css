@@ -120,13 +120,13 @@ h1 { margin: 0; font: normal clamp(1.6rem, 4vw, 2rem)/1.2 "Hedvig Letters Serif"
 #review-inbox { margin-left: auto; font-size: .84rem; }
 #review-notice { margin: 0; color: var(--muted); font-size: .85rem; }
 #review-notice:not(:empty) { margin-top: .5rem; }
-#review-dialog {
+#review-dialog, #concern-dialog {
   width: min(32rem, calc(100% - 2rem)); max-height: calc(100dvh - 2rem);
   padding: 1.25rem; border: 1px solid #756248; border-radius: .8rem;
   background: #242625; color: var(--ink); box-shadow: 0 .8rem 4rem #0007;
 }
-#review-dialog::backdrop { background: #080b0bc9; }
-#review-title { margin: 0; font: normal 1.6rem/1.2 "Hedvig Letters Serif", Georgia, serif; }
+#review-dialog::backdrop, #concern-dialog::backdrop { background: #080b0bc9; }
+#review-title, #concern-title { margin: 0; font: normal 1.6rem/1.2 "Hedvig Letters Serif", Georgia, serif; }
 #review-about { margin: .5rem 0 1rem; color: var(--muted); }
 .review-details { padding: .8rem; margin-bottom: 1rem; border-left: 2px solid var(--amber); background: #1d201f; overflow-wrap: anywhere; }
 .review-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .5rem; align-items: baseline; margin-bottom: .55rem; color: var(--muted); font-size: .78rem; }
@@ -216,8 +216,47 @@ textarea::placeholder { color: #a09e96; }
 #send:hover:enabled { background: #fbd293; }
 #send:disabled { background: #514b40; color: #b8b0a3; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+.room .masthead-inner, .room-layout { width: min(100% - 3rem, 76rem); margin-inline: auto; }
+.room-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(17rem, 21rem); grid-template-areas: "chat concerns"; gap: 2rem; flex: 1; min-height: 0; }
+.room-layout main { grid-area: chat; width: 100%; min-width: 0; }
+.concerns { grid-area: concerns; min-height: 0; margin: 1.5rem 0 max(1.15rem, env(safe-area-inset-bottom)); border-inline-start: 1px solid var(--edge); padding-inline-start: 1.25rem; overflow-y: auto; scrollbar-width: thin; }
+.concerns h2, .concerns h3, .concerns p { margin: 0; }
+#concern-toggle { display: flex; align-items: center; width: 100%; gap: .5rem; padding: .45rem .2rem; border: 0; background: transparent; color: var(--ink); font: normal 1.25rem/1.25 "Hedvig Letters Serif", Georgia, serif; text-align: start; }
+#concern-toggle::after { content: ""; width: .36rem; height: .36rem; margin-inline: auto .25rem; border: solid var(--muted); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+#concern-toggle[aria-expanded="true"]::after { transform: rotate(225deg); }
+#concern-count { font: .82rem/1.25 "Source Sans 3", "Segoe UI", sans-serif; color: var(--muted); }
+#concern-panel { padding: .45rem .2rem; font-size: .9rem; line-height: 1.45; overflow-wrap: anywhere; }
+#concern-state, #concern-updated, .concern-tools, .concern-detail strong { color: var(--muted); }
+#concern-state[data-error="true"], #concern-error { color: #fac3a3; }
+#concern-list { padding: 0; margin: 0; list-style: none; }
+#concern-list li { border-top: 1px solid var(--edge); padding: .8rem 0; }
+.concern-meta { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: .25rem .5rem; }
+.concern-meta h3 { font-size: .95rem; }
+.concern-status { color: var(--amber); font-size: .8rem; }
+.concern-source { display: block; margin-top: .45rem; font-size: .79rem; color: var(--muted); }
+.concerns .concern-tools, .concern-detail { margin-top: .45rem; }
+.concerns details { margin-block: .55rem; }
+.concerns summary { width: fit-content; cursor: pointer; color: var(--teal); }
+.concern-detail p { white-space: pre-wrap; }
+.concern-detail strong, #concern-updated { font-size: .79rem; }
+.concerns #concern-updated:not(:empty) { margin-top: .6rem; }
+.concern-release, #concern-cancel { padding: .32rem .6rem; background: transparent; color: var(--ink); border: 1px solid #66645f; border-radius: .4rem; }
+.concern-release:disabled { color: var(--muted); }
+#concern-dialog { overflow-wrap: anywhere; }
+#concern-dialog p { margin: .6rem 0; }
+#concern-confirm-tools, #concern-effect { color: var(--muted); }
+#concern-form label { display: block; font-size: .88rem; }
+#concern-reason { width: 100%; margin-top: .3rem; padding: .5rem; font: inherit; color: var(--ink); border: 1px solid var(--edge); border-radius: .4rem; background: #191c1b; }
+#concern-submit { color: #282018; background: var(--amber); border-color: transparent; }
+#concern-submit:disabled { color: var(--muted); background: #514b40; }
+@media (max-width: 54rem) {
+  .room .masthead-inner, .room-layout { width: min(100% - 3rem, 54rem); }
+  .room-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "concerns" "chat"; gap: 0; }
+  .concerns { margin: 0; padding: .3rem 0; border-inline: 0; border-bottom: 1px solid var(--edge); max-height: 35dvh; }
+  #concern-toggle { font-size: 1rem; }
+}
 @media (max-width: 600px) {
-  .masthead-inner, main { width: calc(100% - 1.7rem); }
+  .masthead-inner, main, .room .masthead-inner, .room-layout { width: calc(100% - 1.7rem); }
   .masthead-inner { min-height: 3.4rem; }
   .brand { font-size: 1.66rem; }
   .room-heading { padding: .95rem 0 .65rem; }

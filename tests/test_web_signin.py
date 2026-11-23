@@ -97,7 +97,8 @@ class WebSignInTests(unittest.TestCase):
             cookie = self.sign_in(server)
             for path, body in (("/api/sign-in", {"password": PASSWORD}), ("/api/sign-out", {}),
                                ("/api/messages", {"text": "fixture", "client_id": str(uuid4())}),
-                               ("/api/review-questions/1/answer", {"answer": "Fixture answer"})):
+                               ("/api/review-questions/1/answer", {"answer": "Fixture answer"}),
+                               ("/api/concerns/1/release", {"version": 1})):
                 for origin in (None, "null", "https://different.example.test"):
                     with self.subTest(path=path, origin=origin):
                         self.assertEqual(403, request(server, "POST", path, origin=origin, body=body, headers=cookie)[0])

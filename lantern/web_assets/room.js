@@ -16,6 +16,9 @@ const reviewDialog = byId("review-dialog");
 const reviewInbox = byId("review-inbox");
 const reviewAnswer = byId("review-answer");
 const reviewSubmit = byId("review-submit");
+const concernDialog = byId("concern-dialog");
+const concernToggle = byId("concern-toggle");
+const concernList = byId("concern-list");
 const idleHint = matchMedia("(pointer: fine)").matches ? "Enter to send · Shift + Enter for a new line" : "";
 const storageKey = (name) => "lantern.room." + name;
 const cookieRoom = location.protocol === "https:";
@@ -123,6 +126,13 @@ let reviewSending = false;
 let reviewFetching = false;
 let reviewRevision = 0;
 let nextReviewPoll = 0;
+let concernItems = [];
+let concernAsOf = null;
+let selectedConcern = null;
+let releasing = false;
+let fetchingConcerns = false;
+let nextConcernPoll = 0;
+let concernRevision = 0;
 const deferredReviews = new Set();
 const shortTime = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
@@ -148,6 +158,19 @@ function controls() {
 
 function locked() {
   authenticated = false;
+  concernRevision++;
+  concernItems = [];
+  concernAsOf = null;
+  selectedConcern = null;
+  if (concernDialog.open) concernDialog.close();
+  for (const id of ["concern-title", "concern-confirm-summary", "concern-confirm-tools", "concern-confirm-ruling", "concern-error"]) {
+    byId(id).textContent = "";
+  }
+  byId("concern-reason").value = "";
+  concernList.replaceChildren();
+  byId("concern-state").textContent = "Sign in to view standing concerns.";
+  byId("concern-updated").textContent = "";
+  byId("concern-count").textContent = "";
   if (cookieRoom) {
     // Conceal the previous session immediately while the server selects the
     // new landing page. Also remove private drafts, images and pending sends.
@@ -330,6 +353,160 @@ function updateWorker(status) {
   if (node.textContent !== label) node.textContent = label;
 }
 
+function expandConcerns(expanded) {
+  concernToggle.setAttribute("aria-expanded", String(expanded));
+  byId("concern-panel").hidden = !expanded;
+}
+const wideRoom = matchMedia("(min-width: 54.01rem)");
+expandConcerns(wideRoom.matches);
+wideRoom.addEventListener("change", event => expandConcerns(event.matches));
+concernToggle.addEventListener("click", () => {
+  const expanding = byId("concern-panel").hidden;
+  expandConcerns(expanding);
+  if (expanding) void pollConcerns(true);
+});
+
+function concernScope(item) {
+  if (item.status === "pending" || item.tools.includes("*")) return "Scope covers all tools.";
+  return item.tools.length ? "Tools in scope · " + item.tools.join(", ") : "No tools specified.";
+}
+
+function openConcern(id) {
+  const item = concernItems.find(item => item.id === id);
+  if (!item || item.release_pending) return;
+  selectedConcern = item;
+  byId("concern-title").textContent = "Overrule concern #" + item.id + "?";
+  byId("concern-confirm-summary").textContent = item.summary;
+  byId("concern-confirm-tools").textContent = concernScope(item);
+  const ruling = byId("concern-confirm-ruling");
+  ruling.hidden = !item.reason;
+  ruling.textContent = item.reason ? "Ruling v" + item.version + " · " + item.reason : "";
+  byId("concern-reason").value = "";
+  byId("concern-error").textContent = "";
+  byId("concern-submit").disabled = false;
+  concernDialog.showModal();
+}
+
+function setConcernNotice(text, error = false) {
+  const state = byId("concern-state");
+  state.dataset.error = String(error);
+  if (state.textContent !== text) state.textContent = text;
+}
+
+function renderConcerns(items, asOf) {
+  concernItems = items;
+  concernAsOf = asOf;
+  // Keep disclosure, focus and scroll state when ordinary room polling returns the same rulings.
+  const cards = new Map(Array.from(concernList.children, node => [Number(node.dataset.id), node]));
+  for (const item of items) {
+    let card = cards.get(item.id);
+    if (!card) {
+      card = byId("concern-card").content.firstElementChild.cloneNode(true);
+      card.dataset.id = item.id;
+      card.querySelector("button").addEventListener("click", () => openConcern(item.id));
+      concernList.append(card);
+    }
+    cards.delete(item.id);
+    const key = item.version + "/" + Boolean(item.release_pending);
+    if (card.dataset.state === key) continue;
+    card.dataset.state = key;
+    card.querySelector("h3").textContent = "Concern #" + item.id;
+    const status = {watch: "Watching", pending: "Awaiting review", question: "Awaiting clarification"};
+    card.querySelector(".concern-status").textContent = item.release_pending ? "Release requested" : status[item.status];
+    card.querySelector(".concern-summary").textContent = item.summary;
+    card.querySelector(".concern-tools").textContent = concernScope(item);
+    card.querySelector(".concern-reason").textContent = item.reason ? "v" + item.version + " · " + item.reason : "Awaiting the first ruling.";
+    const evidence = card.querySelector(".concern-evidence");
+    evidence.textContent = item.evidence || "";
+    evidence.parentElement.hidden = !item.evidence;
+    const button = card.querySelector("button");
+    button.setAttribute("aria-label", "Overrule concern #" + item.id);
+    if (item.release_pending && document.activeElement === button) concernToggle.focus({preventScroll: true});
+    button.disabled = Boolean(item.release_pending);
+  }
+  for (const card of cards.values()) {
+    if (card.contains(document.activeElement)) concernToggle.focus({preventScroll: true});
+    card.remove();
+  }
+  const snapshotTime = asOf && new Date(asOf);
+  const stale = snapshotTime && Date.now() - snapshotTime.getTime() > 90000;
+  byId("concern-count").textContent = snapshotTime ? "(" + items.length + (stale ? " last seen)" : ")") : "";
+  byId("concern-updated").textContent = snapshotTime ? "Worker snapshot · " + shortTime.format(snapshotTime) : "";
+  if (!snapshotTime) setConcernNotice("Waiting for the first worker snapshot…");
+  else if (stale) setConcernNotice(items.length ? "Showing the last known concerns. Waiting for a current worker snapshot."
+    : "The last snapshot showed no standing concerns. Waiting for a current worker snapshot.", true);
+  else setConcernNotice(items.length ? "" : "No standing concerns.");
+  if (selectedConcern && !releasing) {
+    const current = items.find(item => item.id === selectedConcern.id);
+    if (!current || current.version !== selectedConcern.version || current.release_pending) {
+      byId("concern-submit").disabled = true;
+      byId("concern-error").textContent = "The concern has changed. Close this dialog to see its current status.";
+    }
+  }
+}
+
+async function pollConcerns(force = false) {
+  if (!authenticated || document.hidden || fetchingConcerns || releasing || (!force && Date.now() < nextConcernPoll)) return;
+  const revision = concernRevision;
+  fetchingConcerns = true;
+  nextConcernPoll = Date.now() + 8000;
+  try {
+    const page = await request("/api/concerns");
+    if (authenticated && revision === concernRevision) renderConcerns(page.concerns, page.as_of);
+  } catch {
+    if (authenticated && revision === concernRevision) {
+      if (concernAsOf) byId("concern-count").textContent = "(" + concernItems.length + " last seen)";
+      setConcernNotice("Couldn’t refresh concerns. Retrying…", true);
+    }
+  } finally {
+    fetchingConcerns = false;
+  }
+}
+
+function closeConcern() {
+  selectedConcern = null;
+  concernDialog.close();
+  if (authenticated && document.activeElement === document.body) concernToggle.focus({preventScroll: true});
+}
+byId("concern-cancel").addEventListener("click", closeConcern);
+concernDialog.addEventListener("cancel", event => {
+  event.preventDefault();
+  if (!releasing) closeConcern();
+});
+byId("concern-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const item = selectedConcern;
+  if (!item || releasing || byId("concern-submit").disabled) return;
+  releasing = true;
+  concernRevision++;
+  const reason = byId("concern-reason");
+  reason.readOnly = true;
+  byId("concern-submit").disabled = true;
+  byId("concern-cancel").disabled = true;
+  byId("concern-error").textContent = "";
+  try {
+    await request("/api/concerns/" + item.id + "/release", {version: item.version, reason: reason.value.trim()});
+    closeConcern();
+    renderConcerns(concernItems.map(current => current.id === item.id ? {...current, release_pending: true} : current), concernAsOf);
+    byId("announcer").textContent = "Release requested for concern #" + item.id + ".";
+  } catch (error) {
+    if (!authenticated) return;
+    const stale = error.status === 404 || error.status === 409;
+    byId("concern-error").textContent = stale ? "The concern has changed. Close this dialog to see its current status."
+      : error.status === 400 ? error.message : "Release unconfirmed. Check the concern’s status before retrying.";
+    byId("concern-submit").disabled = stale;
+  } finally {
+    releasing = false;
+    reason.readOnly = false;
+    byId("concern-cancel").disabled = false;
+    nextConcernPoll = 0;
+    if (authenticated) {
+      void pollConcerns(true);
+      void poll();
+    }
+  }
+});
+
 function closeReview() {
   reviewId = null;
   if (reviewDialog.open) reviewDialog.close();
@@ -376,7 +553,7 @@ function updateReviewQueue(items) {
   byId("review-next").hidden = items.length < 2;
   reviewInbox.hidden = !items.length;
   reviewInbox.textContent = items.length > 1 ? "Answer Opus (" + items.length + ")" : "Answer Opus";
-  if (!items.length || reviewDialog.open || document.hidden) return;
+  if (!items.length || reviewDialog.open || concernDialog.open || document.hidden) return;
   const next = items.find((item) => !deferredReviews.has(item.id) && !stored("review-later." + item.id));
   if (next && !(document.activeElement === draft && draft.value)) openReview(next);
 }
@@ -611,6 +788,7 @@ async function poll() {
   clearTimeout(timer);
   polling = true;
   let delay = 1500;
+  void pollConcerns();
   try {
     let page;
     if (!initialized) {

@@ -11,7 +11,7 @@
   <script src="/message-format.js" defer></script>
   <script src="/room.js" defer></script>
 </head>
-<body>
+<body class="room">
   <header class="masthead">
     <div class="masthead-inner">
       <div class="brand"><span class="lamp" aria-hidden="true"></span>Lantern</div>
@@ -21,6 +21,47 @@
       </div>
     </div>
   </header>
+  <div class="room-layout">
+  <aside class="concerns" aria-label="Standing concerns">
+    <h2><button id="concern-toggle" aria-controls="concern-panel" aria-expanded="false" type="button">
+      Standing concerns <span id="concern-count"></span>
+    </button></h2>
+    <div id="concern-panel" hidden>
+      <p id="concern-state" role="status">Loading concerns…</p>
+      <ul id="concern-list"></ul>
+      <p id="concern-updated"></p>
+    </div>
+  </aside>
+  <template id="concern-card">
+    <li>
+      <div class="concern-meta"><h3></h3><span class="concern-status"></span></div>
+      <strong class="concern-source">Screening reviewer’s concern</strong>
+      <p class="concern-summary"></p>
+      <p class="concern-tools"></p>
+      <details>
+        <summary>Review details</summary>
+        <div class="concern-detail"><strong>Latest ruling</strong><p class="concern-reason"></p></div>
+        <div class="concern-detail"><strong>Original evidence</strong><p class="concern-evidence"></p></div>
+      </details>
+      <button class="concern-release" type="button" aria-haspopup="dialog">Overrule…</button>
+    </li>
+  </template>
+  <dialog id="concern-dialog" aria-labelledby="concern-title" aria-describedby="concern-effect">
+    <form id="concern-form">
+      <h2 id="concern-title"></h2>
+      <p id="concern-confirm-summary"></p>
+      <p id="concern-confirm-tools"></p>
+      <p id="concern-confirm-ruling" hidden></p>
+      <p id="concern-effect">This retires the standing concern. Individual tool denials still require a fresh review.</p>
+      <label for="concern-reason">Reason (optional)</label>
+      <input id="concern-reason" type="text" maxlength="600">
+      <p id="concern-error" role="alert"></p>
+      <div class="review-buttons">
+        <button id="concern-cancel" type="button" autofocus>Cancel</button>
+        <button id="concern-submit" type="submit">Overrule concern</button>
+      </div>
+    </form>
+  </dialog>
   <main>
     <div class="room-heading">
       <h1>Conversation</h1>
@@ -84,5 +125,6 @@
     <p class="sr-only" role="status" id="announcer"></p>
     <noscript>Enable JavaScript to open the operator conversation.</noscript>
   </main>
+  </div>
 </body>
 </html>

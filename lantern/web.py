@@ -15,6 +15,7 @@ from time import monotonic
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
+from . import operator_release
 from .attachments import MAX_IMAGE_BASE64, MAX_TURN_IMAGES, parse_image
 from .chat_store import ChatStore
 from .chat_worker import worker_online
@@ -211,6 +212,13 @@ class RoomHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     self._json(503, {"error": "The review store is temporarily unavailable."})
             return
+        if self.path == "/api/concerns":
+            if self._authorized():
+                try:
+                    self._json(200, operator_release.sidebar(self.server.store))
+                except sqlite3.Error:
+                    self._json(503, {"error": "The concern list is temporarily unavailable."})
+            return
         if self.path.partition("?")[0] != "/api/room":
             self._json(404, {"error": "Unknown route."})
             return
@@ -308,7 +316,8 @@ class RoomHandler(BaseHTTPRequestHandler):
             self._change_session(content, length)
             return
         answer_route = re.fullmatch(r"/api/review-questions/([1-9][0-9]{0,18})/answer", self.path)
-        if self.path != "/api/messages" and not answer_route:
+        release_route = re.fullmatch(r"/api/concerns/([1-9][0-9]{0,18})/release", self.path)
+        if self.path != "/api/messages" and not answer_route and not release_route:
             self._json(404, {"error": "Unknown route."})
             return
         if not self._authorized():
@@ -320,6 +329,23 @@ class RoomHandler(BaseHTTPRequestHandler):
             if len(content) != length:
                 raise ValueError
             body = json.loads(content.decode("utf-8"))
+            if release_route:
+                number = int(release_route[1])
+                if (number >= 2**63 or not isinstance(body, dict)
+                        or set(body) not in ({"version"}, {"version", "reason"})):
+                    raise ValueError
+                try:
+                    event_id = operator_release.queue_release(
+                        self.server.store, number, body["version"], body.get("reason", ""))
+                except KeyError:
+                    self._json(404, {"error": "This concern is no longer in the standing concerns list."})
+                except operator_release.ReleaseConflict as exc:
+                    self._json(409, {"error": str(exc)})
+                except sqlite3.Error:
+                    self._json(503, {"error": "The release could not be queued."})
+                else:
+                    self._json(202, {"id": event_id})
+                return
             if answer_route:
                 review_id = int(answer_route[1])
                 if (review_id > 2**63 - 1 or not isinstance(body, dict) or set(body) != {"answer"}
@@ -352,7 +378,8 @@ class RoomHandler(BaseHTTPRequestHandler):
             if not isinstance(client_id, str) or str(UUID(client_id)) != client_id:
                 raise ValueError
         except (ValueError, OSError, RecursionError):
-            error = (f"Send one answer of 1 to {MAX_ANSWER} characters." if answer_route else
+            error = ("Supply the displayed concern version and an optional single-line reason up to 600 characters." if release_route else
+                     f"Send one answer of 1 to {MAX_ANSWER} characters." if answer_route else
                      f"Send text up to {MAX_MESSAGE} characters and a valid message ID.")
             self._json(400, {"error": error})
             return

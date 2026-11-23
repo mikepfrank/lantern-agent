@@ -5,12 +5,14 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 from tempfile import TemporaryDirectory
 import threading
 import unittest
 import uuid
 
+from lantern import concerns
 from lantern.chat_store import ChatStore
 from lantern.operator_review import ReviewRoom
 from lantern.web import PAGE_SIZE, RoomServer
@@ -81,6 +83,101 @@ class WebRoomTests(unittest.TestCase):
         return self.room.reviews.open(
             "review-thread", "workspace_write:notes/example.md", "workspace_write", "original-call",
             "Save notes/example.md", "A short excerpt.", "May Lantern save this note?", source="prior_denial")
+
+    def seed_concerns(self):
+        review_id = self.open_review()
+        ledger = self.enterContext(closing(sqlite3.connect(self.state / "supervision.sqlite")))
+        with ledger:
+            concerns.initialize(ledger)
+            watch = concerns.create(ledger, "review-thread", 1, "Original evidence", "Summary")
+            concerns.record(ledger, "review-thread", watch, 0, "watch", "Watch reason", ["workspace_write"])
+            pending = concerns.create(ledger, "review-thread", 2, "Awaiting ruling", "Pending", watch)
+            hidden = concerns.create(ledger, "review-thread", 3, "Ended", "Retired")
+            concerns.record(ledger, "review-thread", hidden, 0, "retire", "Cleared", [])
+            concerns.create(ledger, "another-thread", 1, "Other room", "Private")
+        self.assertIsNone(self.store.claim(include_scheduled=False))
+        return ledger, watch, pending, review_id
+
+    def test_standing_concerns_are_room_scoped_and_the_web_only_needs_the_chat_database(self):
+        endpoint = "/api/concerns"
+        self.assertEqual(401, self.request("GET", endpoint, auth=False)[0])
+        self.assertEqual({"as_of": None, "concerns": []}, self.request("GET", endpoint)[2])
+        ledger, watch, pending, _ = self.seed_concerns()
+        ledger.close()
+        (self.state / "supervision.sqlite").rename(self.state / "inaccessible-to-web")
+        status, headers, snapshot = self.request("GET", endpoint)
+        self.assertEqual((200, "no-store"), (status, headers["Cache-Control"]))
+        self.assertTrue(snapshot["as_of"])
+        first, second = snapshot["concerns"]
+        self.assertEqual((watch, 1, "watch", ["workspace_write"], "Watch reason", "Original evidence"),
+                         (first["id"], first["version"], first["status"], first["tools"], first["reason"], first["evidence"]))
+        self.assertEqual((pending, 0, "pending", watch, False), (second["id"], second["version"], second["status"],
+                                                                second["related_id"], second["release_pending"]))
+
+    def test_sidebar_release_is_authenticated_and_committed_once_by_the_worker(self):
+        ledger, number, pending, review_id = self.seed_concerns()
+        path = f"/api/concerns/{number}/release"
+        reason = "--cite is literal text here ".ljust(600, "x")
+        body = {"version": 1, "reason": reason}
+        for bad in ({}, [], {"version": True}, {"version": -1}, {"version": 1, "reason": "x" * 601},
+                    {"version": 1, "reason": "line\nbreak"}, {"version": 1, "reason": "\ud800"},
+                    {"version": 1, "thread": "another-thread"}):
+            self.assertEqual(400, self.request("POST", path, body=bad)[0])
+        self.assertEqual(401, self.request("POST", path, auth=False, body=body)[0])
+        self.assertEqual(403, self.request("POST", path, headers={"Origin": "https://outside.example"}, body=body)[0])
+        self.assertEqual(404, self.request("POST", "/api/concerns/4/release", body=body)[0])
+        self.assertEqual(409, self.request("POST", path, body={"version": 0})[0])
+        code, _, queued = self.request("POST", path, body=body)
+        self.assertEqual(202, code)
+        self.assertEqual(queued, self.request("POST", path, body=body)[2])
+        self.assertEqual(409, self.request("POST", path, body={"version": 1, "reason": "different"})[0])
+        self.assertTrue(self.request("GET", "/api/concerns")[2]["concerns"][0]["release_pending"])
+        self.assertEqual("watch", concerns.get(ledger, "review-thread", number)["status"])
+        receipt, = self.store.claim().messages
+        self.assertEqual("system", receipt.role)
+        self.assertIn(reason, receipt.text)
+        self.assertEqual([pending], [i["id"] for i in self.request("GET", "/api/concerns")[2]["concerns"]])
+        self.assertEqual("retired", concerns.get(ledger, "review-thread", number)["status"])
+        self.assertEqual([review_id], [q["id"] for q in self.room.reviews.pending()])
+        self.assertEqual(queued, self.request("POST", path, body=body)[2])
+        self.assertEqual(0, self.store.status()["queued"])
+        record, = self.room.reviews.concern_releases("review-thread", "workspace_write")
+        self.assertEqual((queued["id"], receipt.id), (record["command_event_id"], record["receipt_event_id"]))
+
+    def test_ruling_changes_between_click_and_worker_admission_require_a_fresh_decision(self):
+        ledger, number, _, _ = self.seed_concerns()
+        path = f"/api/concerns/{number}/release"
+        self.assertEqual(202, self.request("POST", path, body={"version": 1})[0])
+        with ledger:
+            concerns.record(ledger, "review-thread", number, 1, "watch", "Changed scope", ["coding_run"])
+        self.assertIsNone(self.store.claim(include_scheduled=False))
+        self.assertIn("changed after version 1", self.store.recent(1)[0].text)
+        row = self.request("GET", "/api/concerns")[2]["concerns"][0]
+        self.assertEqual((2, False, ["coding_run"]), (row["version"], row["release_pending"], row["tools"]))
+        self.assertEqual([], self.room.reviews.concern_releases("review-thread", "coding_run"))
+        self.assertEqual(202, self.request("POST", path, body={"version": 2})[0])
+        self.store.claim()
+        self.assertEqual("retired", concerns.get(ledger, "review-thread", number)["status"])
+
+    def test_declined_sidebar_release_can_be_resubmitted_after_ledger_recovers(self):
+        ledger, number, _, _ = self.seed_concerns()
+        ledger.close()
+        path = f"/api/concerns/{number}/release"
+        original = self.state / "supervision.sqlite"
+        moved = original.rename(self.state / "temporarily-unavailable")
+        code, _, first = self.request("POST", path, body={"version": 1})
+        self.assertEqual(202, code)
+        self.assertIsNone(self.store.claim(include_scheduled=False))
+        self.assertIn("was declined", self.store.recent(1)[0].text)
+        self.assertIsNone(self.request("GET", "/api/concerns")[2]["as_of"])
+        moved.rename(original)
+        restarted = ChatStore(self.state)
+        self.assertIsNone(restarted.claim(include_scheduled=False))
+        code, _, retried = self.request("POST", path, body={"version": 1})
+        self.assertEqual(202, code)
+        self.assertNotEqual(first, retried)
+        receipt, = restarted.claim().messages
+        self.assertIn(f"retired context concern #{number}", receipt.text)
 
     def test_review_questions_require_operator_auth_and_valid_origin(self):
         review_id = self.open_review()
