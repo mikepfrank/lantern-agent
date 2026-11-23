@@ -17,6 +17,11 @@ def initialize(db):
         status TEXT NOT NULL CHECK(status IN ('watch', 'question', 'retired')),
         reason TEXT NOT NULL, tools TEXT NOT NULL, at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
         PRIMARY KEY(concern_id, version))""")
+    db.execute("""CREATE TABLE IF NOT EXISTS concern_ruling_actions (
+        concern_id INTEGER NOT NULL, version INTEGER NOT NULL, tool TEXT NOT NULL,
+        call_id TEXT NOT NULL, decision TEXT NOT NULL CHECK(decision IN ('allow','deny','ask_operator')),
+        reason TEXT NOT NULL, turn INTEGER, PRIMARY KEY(concern_id,version),
+        FOREIGN KEY(concern_id,version) REFERENCES concern_rulings(concern_id,version))""")
     db.execute("""CREATE TABLE IF NOT EXISTS concern_repeats (
         thread TEXT NOT NULL, sequence INTEGER NOT NULL, concern_id INTEGER NOT NULL REFERENCES context_concerns(id),
         seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')), PRIMARY KEY(thread,sequence))""")
@@ -55,6 +60,10 @@ _LATEST = """FROM context_concerns AS c LEFT JOIN concern_rulings AS r
         SELECT MAX(version) FROM concern_rulings WHERE concern_id=c.id)"""
 _COLUMNS = """c.id, c.sequence, c.evidence, c.summary, c.related_id, COALESCE(r.version,0) AS version,
     COALESCE(r.status,'pending') AS status, COALESCE(r.reason,'') AS reason, COALESCE(r.tools,'[]') AS tools"""
+_ACTION_JOIN = "LEFT JOIN concern_ruling_actions AS a ON a.concern_id=c.id AND a.version=r.version"
+_ACTION_COLUMN = """CASE WHEN a.tool IS NOT NULL THEN json_object(
+    'tool',a.tool,'call_id',a.call_id,'decision',a.decision,'reason',a.reason,'turn',a.turn) END AS paired_action"""
+_SELECT_ACTIONS = f"SELECT {_COLUMNS}, {_ACTION_COLUMN} {_LATEST} {_ACTION_JOIN}"
 
 
 def _rows(cursor):
@@ -62,12 +71,20 @@ def _rows(cursor):
     for row in cursor:
         receipt = dict(zip(columns, row))
         receipt["tools"] = json.loads(receipt["tools"])
+        paired = receipt.pop("paired_action", None)
+        if paired:
+            action = json.loads(paired)
+            action["call_id"] = _excerpt(action["call_id"], 128)
+            action["reason"] = _excerpt(action["reason"], 300)
+            receipt["action"] = action
         yield receipt
 
 
-def get(db, thread, id):
+def get(db, thread, id, *, include_action=False):
     """Full latest receipt for a concern in this thread, including retired findings."""
-    cursor = db.execute(f"SELECT {_COLUMNS} {_LATEST} WHERE c.thread=? AND c.id=?", (thread, id))
+    # Operator commands can read a pre-migration ledger before the worker starts.
+    select = _SELECT_ACTIONS if include_action else f"SELECT {_COLUMNS} {_LATEST}"
+    cursor = db.execute(select + " WHERE c.thread=? AND c.id=?", (thread, id))
     return next(_rows(cursor), None)
 
 
@@ -95,11 +112,55 @@ def list_open(db, thread, tool=None):
             if tool is None or row["status"] == "pending" or "*" in row["tools"] or tool in row["tools"]]
 
 
+def link_action(db, concern_id, version, *, tool, call_id, decision, reason, turn):
+    """Save the other half of a combined ruling in the same transaction as its disposition."""
+    cursor = db.execute("""INSERT INTO concern_ruling_actions
+        (concern_id,version,tool,call_id,decision,reason,turn)
+        SELECT concern_id,version,?,?,?,?,? FROM concern_rulings WHERE concern_id=? AND version=?""",
+        (tool, call_id, decision, reason, turn, concern_id, version))
+    if not cursor.rowcount:
+        raise ValueError("The associated concern ruling does not exist")
+
+
+def _excerpt(value, limit):
+    if len(value) <= limit:
+        return value
+    tail = limit // 3
+    return value[:limit - tail - 5] + " […] " + value[-tail:]
+
+
+def review_receipts(db, thread, referenced_ids, *, include_recent=False):
+    """Latest rulings for named concerns, optionally supplemented with up to two recent rulings."""
+    ids = []
+    for number in referenced_ids:
+        if type(number) is int and 0 < number < 2**63 and number not in ids:
+            ids.append(number)
+            if len(ids) == 4:
+                break
+    if not ids and not include_recent:
+        return []
+    marks = ",".join("?" for _ in ids) or "NULL"
+    sql = f"""SELECT c.id,r.version,r.status,r.tools,r.reason, {_ACTION_COLUMN} {_LATEST} {_ACTION_JOIN}
+              WHERE c.thread=? AND r.version IS NOT NULL AND (c.id IN ({marks}) OR ?)
+              ORDER BY CASE WHEN c.id IN ({marks}) THEN 0 ELSE 1 END, r.at DESC,r.rowid DESC LIMIT 4"""
+    rows = list(_rows(db.execute(sql, (thread, *ids, include_recent, *ids))))
+    named = {row["id"]: row for row in rows if row["id"] in ids}
+    recent = [row for row in rows if row["id"] not in named]
+    receipts = [named[number] for number in ids if number in named] + recent[:2]
+    for receipt in receipts:
+        receipt["reason"] = _excerpt(receipt["reason"], 400)
+        scope = receipt["tools"]
+        if len(scope) > 8:
+            receipt["tools"] = scope[:8]
+            receipt["tools_omitted"] = len(scope) - 8
+    return receipts
+
+
 def history(db, thread, limit=16):
     """Bound the context scan's receipts; list_open separately gates every live scope."""
     if type(limit) is not int or not 1 <= limit <= 32:
         raise ValueError("Use a concern history limit between 1 and 32")
-    cursor = db.execute(f"""SELECT {_COLUMNS} {_LATEST}
+    cursor = db.execute(f"""{_SELECT_ACTIONS}
         LEFT JOIN concern_repeats p ON p.concern_id=c.id AND p.sequence=(
             SELECT MAX(sequence) FROM concern_repeats WHERE concern_id=c.id)
         WHERE c.thread=?

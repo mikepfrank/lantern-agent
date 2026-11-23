@@ -12,7 +12,7 @@ from typing import NamedTuple
 from . import concerns
 from .github_tools import OPEN_DRAFT
 from .opus import OPERATOR_QUESTION_LIMIT, OpusCaseTooLarge, OpusResponseError
-from .review_policy import action_facts, concern_refs
+from .review_policy import action_facts, concern_refs, ruling_query
 from .review_vendors import HTTPRejection, OpusTransportError, ReviewBudgetUnavailable
 
 
@@ -231,6 +231,8 @@ class Supervisor:
                 CREATE TABLE IF NOT EXISTS events(
                     at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, thread TEXT NOT NULL,
                     event TEXT NOT NULL, tool TEXT, call_id TEXT);
+                CREATE INDEX IF NOT EXISTS action_decision_events ON events(thread)
+                    WHERE event IN ('opus_allowed','opus_denied','opus_asked_operator');
                 CREATE TABLE IF NOT EXISTS luna_flags(
                     id INTEGER PRIMARY KEY,
                     at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -455,12 +457,29 @@ class Supervisor:
                        (json.dumps(result, allow_nan=False), self.thread, call_id))
         return result
 
+    def _ruling_facts(self, db, query):
+        ids, recent = query
+        if not ids and not recent:
+            return {}
+        facts = {"related_rulings": concerns.review_receipts(db, self.thread, ids, include_recent=recent)}
+        if recent:
+            decisions = {"opus_allowed": "allow", "opus_denied": "deny", "opus_asked_operator": "ask_operator"}
+            rows = db.execute("""SELECT event,tool,call_id,at FROM events WHERE thread=?
+                AND event IN ('opus_allowed','opus_denied','opus_asked_operator')
+                ORDER BY rowid DESC LIMIT 3""", (self.thread,))
+            facts["recent_action_decisions"] = [
+                {"tool": tool, "call_id": call_id, "decision": decisions[event], "at_utc": at}
+                for event, tool, call_id, at in rows if call_id and len(call_id) <= 160]
+        return facts
+
     def _review_action(self, context, call_id, name, args, execute, feedback):
         rationale = args.pop("rationale", None)
+        query = ruling_query(name, args, rationale)
         with database(self.path) as db:
             matching = concerns.list_open(db, self.thread, name)
             prior = db.execute("SELECT reason FROM action_refusals WHERE thread=? AND proposal=?",
                                (self.thread, _fingerprint([name, args]))).fetchone()
+            ruling_facts = self._ruling_facts(db, query)
         room = self.operator_room
         facts = action_facts(name, args,
                              operator_statements=room.statements(self.thread, self.batch_id) if room else [],
@@ -468,6 +487,7 @@ class Supervisor:
                              open_concerns=matching, prior_denial=prior[0] if prior else None,
                              archive_receipt=room.archive_receipt(self.thread)
                              if room and name in ("read_heritage", "view_pdf_page") else None)
+        facts.update(ruling_facts)
         if name == OPEN_DRAFT:
             # Resolve the ID outside the agent's arguments. Both reviewers see this exact
             # immutable document, and the broker verifies its digest again at publication.
@@ -501,7 +521,7 @@ class Supervisor:
             return {"error": f"Provide a nonempty public rationale of at most {RATIONALE_LIMIT} characters for this action."}
         case = {"host_facts": facts, "tool": name, "arguments": args, "rationale": rationale,
                 "evidence": scan["evidence"], "summary": scan["summary"]}
-        held = self._adjudicate(call_id, case, scan["escalate"], skipped, feedback)
+        held = self._adjudicate(call_id, case, scan["escalate"], skipped, feedback, query)
         if held is not None:
             return held
         if name == CONSULT:
@@ -562,13 +582,15 @@ class Supervisor:
     def _related_receipt(self, item):
         if item["related_id"] is not None:
             with database(self.path) as db:
-                prior = concerns.get(db, self.thread, item["related_id"])
+                prior = concerns.get(db, self.thread, item["related_id"], include_action=True)
             if prior:
                 receipt = {
                     key: prior[key] for key in ("id", "sequence", "version", "status", "tools")}
                 for key in ("evidence", "reason"):
                     value = prior[key]
                     receipt[key] = value if len(value) <= 600 else value[:599] + "…"
+                if "action" in prior:
+                    receipt["action"] = prior["action"]
                 return receipt
 
     def _record_ruling(self, item, ruling):
@@ -667,7 +689,7 @@ class Supervisor:
                           "tools": json.loads(row["final_tools"])}
             self._record_ruling(item, ruling)
 
-    def _adjudicate(self, call_id, case, flagged, skipped, feedback):
+    def _adjudicate(self, call_id, case, flagged, skipped, feedback, ruling_lookup):
         """Return a tool error for a held action, or None to proceed with its dispatch."""
         name, args = case["tool"], case["arguments"]
         room = self.operator_room
@@ -701,13 +723,14 @@ class Supervisor:
             incomplete = db.execute("SELECT call_id,code,concern_id FROM incomplete_action_reviews "
                                     "WHERE thread=? AND proposal=?", (self.thread, proposal_key)).fetchone()
             matching = concerns.list_open(db, self.thread, name)
+            ruling_facts = self._ruling_facts(db, ruling_lookup)
             findings = [f for f in matching
                         if (f["id"], f["version"]) not in skipped
                         or (incomplete and f["id"] == incomplete[2] and f["status"] == "question")]
         # A concurrent ruling can change the ledger during Luna's call. Keep Opus's
         # factual record current and recheck the versions when committing its verdict.
         case["host_facts"] = {**case["host_facts"], "prior_exact_denial": refusal[0] if refusal else None,
-                              "open_concerns_for_tool": concern_refs(matching)}
+                              "open_concerns_for_tool": concern_refs(matching), **ruling_facts}
         if refusal:
             case["prior_action_denial"] = refusal[0]
         if incomplete:
@@ -818,6 +841,8 @@ class Supervisor:
                 if not concerns.record(db, self.thread, item["id"], item["version"], ruling["decision"],
                                        ruling["reason"], ruling["tools"]):
                     raise ReviewUnavailable("A context concern changed during review. The proposal needs a fresh assessment")
+                concerns.link_action(db, item["id"], item["version"] + 1, tool=name, call_id=call_id,
+                                     decision=verdict["decision"], reason=verdict["reason"], turn=self.batch_id)
             if verdict["decision"] == "deny":
                 db.execute("INSERT OR REPLACE INTO action_refusals VALUES(?,?,?)",
                            (self.thread, proposal, verdict["reason"]))

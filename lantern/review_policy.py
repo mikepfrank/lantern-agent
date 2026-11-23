@@ -66,6 +66,32 @@ def concern_refs(open_concerns):
     return [{k: item[k] for k in ("id", "version", "status")} for item in open_concerns]
 
 
+_NAMED_CONCERN = re.compile(
+    r"\b(?:concerns?|watch(?:es)?)(?:[ _-]+ids?)?\s*[#:=]?\s*"
+    r"([1-9][0-9]{0,18}\b(?:(?:\s*,\s*(?:and\s+)?|\s+and\s+)#?[1-9][0-9]{0,18}\b){0,3})",
+    re.IGNORECASE)
+_REVIEW_TOPIC = re.compile(
+    r"\b(?:opus|luna|supervis\w*|rulings?|review\w*|concerns?|watch(?:es)?|"
+    r"denied|denials?|refus\w*|approv(?:ed|al|als|e)|allow(?:ed)?|retired|held|holds?)\b", re.IGNORECASE)
+
+
+def ruling_query(tool, arguments, rationale):
+    """Proposal text can select ledger entries by number, never supply their contents."""
+    texts = [s for s in (rationale, *arguments.values()) if isinstance(s, str)]
+    recent = tool == "consult_opus" or (
+        tool == "message_operator" and any(_REVIEW_TOPIC.search(s) for s in texts))
+    ids = []
+    for text in texts:
+        for match in _NAMED_CONCERN.finditer(text):
+            for digits in re.findall(r"[0-9]+", match[1]):
+                number = int(digits)
+                if number < 2**63 and number not in ids:
+                    ids.append(number)
+                if len(ids) == 4:
+                    return ids, recent
+    return ids, recent
+
+
 def action_facts(tool, arguments, *, operator_statements, open_concerns, prior_denial, archive_receipt=None,
                  concern_releases=()):
     """Facts from the host at review time. These describe scope and never dispatch a tool."""
@@ -93,6 +119,14 @@ whose previous tool scopes match. Consultations can see recent releases across
 tools to discuss them privately. Use their IDs and reasons within that scope,
 even after the original messages leave recent history. A release closes that
 watch. Any exact action denial still needs its own fresh independent ruling.
+related_rulings contains current, numbered dispositions from this thread's ledger.
+Use the status, version and recorded reason to check claims in a follow-up report.
+When an entry includes action, the host recorded that particular tool-call decision
+in the same transaction. An allowance alone does not establish successful execution.
+recent_action_decisions, when present, independently identifies recent binding
+judgments by tool and call ID. Do not infer a link to a concern from proximity.
+A report can accurately describe a past allowance and closure. Neither authorizes
+a different action. These lists are selective; absence alone proves nothing.
 The host's open_concerns_for_tool lists current concerns whose tool scopes
 match, before checking their individual triggers. An empty list means there is
 no open concern for this tool. A prior_exact_denial records an earlier judgment

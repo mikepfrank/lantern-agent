@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 from lantern import opus
 from lantern.luna import Luna
+from lantern.review_policy import ruling_query
 from lantern.supervision import Supervisor, database
 
 
@@ -22,9 +23,10 @@ class ConcernReplayTests(unittest.TestCase):
         self.opus_xml = ""
         self.gate = self.worker()
 
-    def worker(self):
+    def worker(self, batch_id=None):
         gate = Supervisor(self.state, Luna(self.vendor), partial(opus.review, self.vendor), Mock(),
-                          sample_every=1, tool_names=["workspace_write", "chess_analyze"])
+                          sample_every=1, batch_id=batch_id,
+                          tool_names=["workspace_write", "chess_analyze", "coding_run", "message_operator"])
         gate.bind("synthetic-room")
         return gate
 
@@ -44,15 +46,16 @@ class ConcernReplayTests(unittest.TestCase):
                  "content": [{"type": "output_text", "text": json.dumps(report)}]}]}
         self.assertEqual(vendor, "opus")
         packet = json.loads(payload["messages"][0]["content"])
+        self.last_opus_packet = packet
         self.rulings.append((purpose, packet["case"]))
         number = packet["case"].get("concern_review", {}).get("id")
         return {"model": opus.OPUS_MODEL, "stop_reason": "end_turn",
                 "content": [{"type": "text", "text": self.opus_xml.format(id=number)}]}
 
-    def initial_ruling(self, disposition):
+    def initial_ruling(self, disposition, tool="workspace_write"):
         self.luna_reply = {"escalate": True, "evidence": "An earlier review note was disputed.",
                            "summary": "Determine whether that incident needs follow-up."}
-        scope = ' tools="workspace_write"' if disposition == "keep_open" else ""
+        scope = f' tools="{tool}"' if disposition == "keep_open" else ""
         self.opus_xml = ('<concern id="{id}" decision="' + disposition + '"' + scope + '>'
                          'The question concerns writing about the review.</concern>')
         self.gate.observe({"input": "My proposed note about the review was held."})
@@ -177,3 +180,68 @@ class ConcernReplayTests(unittest.TestCase):
         self.assertEqual(self.write("later-id", disputed), {"done": True})
         self.assertEqual(len(self.rulings), 3)
         self.assertEqual(self.execute.call_count, 3)
+
+    def test_followup_report_carries_binding_commit_ruling_after_restart(self):
+        self.gate = self.worker(batch_id=17)
+        number = self.initial_ruling("keep_open", tool="coding_run")
+        proposal = {"command": "git commit -m 'Document the test result'", "rationale": "Commit my local edit."}
+        self.luna_reply = {"applicable_ids": [number]}
+        self.opus_xml = ('<ruling><review decision="deny">Hold this local commit.</review>'
+                         '<concern id="{id}" decision="keep_open" tools="coding_run">Review the retry.</concern></ruling>')
+        denied = self.gate.dispatch("first-commit", "coding_run", proposal, self.execute)
+        self.assertIn("denied", denied["error"])
+        self.execute.assert_not_called()
+
+        self.opus_xml = ('<ruling><review decision="allow">This local commit may proceed.</review>'
+                         '<concern id="{id}" decision="close_resolved">The disputed edit is resolved.</concern></ruling>')
+        retried = self.gate.dispatch("commit-retry", "coding_run", proposal, self.execute)
+        self.assertTrue(retried["done"])
+
+        self.gate = self.worker(batch_id=18)
+        self.luna_reply = {}
+        self.gate.observe({"input": "Compacted conversation. Mike is waiting for a progress report."})
+        sampled_receipt, = self.screenings[-1]["concern_history"]
+        self.assertEqual(sampled_receipt["action"]["call_id"], "commit-retry")
+        self.luna_reply = {"escalate": True, "summary": "Check the status report.",
+                           "evidence": "The proposed message discusses supervisory state."}
+        self.opus_xml = '<review decision="allow">This accurately reports the recorded decision.</review>'
+        reported = self.gate.dispatch("report", "message_operator", {
+            "text": f"The commit retry ran, and concern #{number} was closed.",
+            "rationale": "Tell Mike the outcome."}, self.execute)
+        self.assertTrue(reported["done"])
+
+        luna_receipts = self.screenings[-1]["host_facts"]["related_rulings"]
+        opus_packet = self.last_opus_packet
+        self.assertEqual(opus_packet["case"]["summary"], "Check the status report.")
+        self.assertEqual(opus_packet["host_facts"]["related_rulings"], luna_receipts)
+        receipt, = luna_receipts
+        self.assertEqual((receipt["id"], receipt["version"], receipt["status"], receipt["reason"]),
+                         (number, 3, "retired", "The disputed edit is resolved."))
+        action = receipt["action"]
+        self.assertEqual((action["tool"], action["call_id"], action["turn"], action["decision"], action["reason"]),
+                         ("coding_run", "commit-retry", 17, "allow", "This local commit may proceed."))
+        self.gate.consult.assert_not_called()
+        self.assertEqual(self.execute.call_count, 2)
+
+    def test_legacy_action_and_concern_remain_independent_evidence(self):
+        number = self.initial_ruling("close_resolved")
+        self.gate._event("opus_allowed", "coding_run", "old-call")
+        with database(self.gate.path) as db:
+            db.execute("INSERT INTO events(thread,event,tool,call_id) VALUES(?,?,?,?)",
+                       ("another-room", "opus_denied", "coding_run", "other-call"))
+        self.luna_reply = {}
+        self.gate.dispatch("report", "message_operator", {
+            "text": f"Update on concern #{number}.", "rationale": "Report the review status."
+        }, self.execute)
+        facts = self.screenings[-1]["host_facts"]
+        receipt, = facts["related_rulings"]
+        self.assertEqual((receipt["id"], receipt["status"]), (number, "retired"))
+        self.assertNotIn("action", receipt)
+        previous, = facts["recent_action_decisions"]
+        self.assertEqual((previous["call_id"], previous["tool"], previous["decision"]),
+                         ("old-call", "coding_run", "allow"))
+
+    def test_lookup_distinguishes_concern_references_from_pull_requests(self):
+        self.assertEqual(ruling_query("workspace_write", {"text": "PR #7; concerns #8, #9 and #10."}, ""),
+                         ([8, 9, 10], False))
+        self.assertEqual(ruling_query("message_operator", {"text": "Chess PR #9 is open."}, ""), ([], False))

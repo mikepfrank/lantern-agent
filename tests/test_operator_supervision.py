@@ -123,11 +123,13 @@ class OperatorSupervisionTests(unittest.TestCase):
         self.luna.screen.return_value = FLAG
         held = self.gate.dispatch("first-consult", "consult_opus", args, self.execute)
         self.gate.consult.assert_not_called()
-        self.assertEqual(self.gate.dispatch("repeat-consult", "consult_opus", args, self.execute)["review_id"],
-                         held["review_id"])
         facts = self.luna.screen.call_args.args[0]["host_facts"]
         self.assertEqual(facts["operator_statements"][-1]["text"], self.real)
         self.assertEqual(facts, packets[0][1]["host_facts"])
+        self.assertEqual(self.gate.dispatch("repeat-consult", "consult_opus", args, self.execute)["review_id"],
+                         held["review_id"])
+        asked, = self.luna.screen.call_args.args[0]["host_facts"]["recent_action_decisions"]
+        self.assertEqual((asked["call_id"], asked["decision"]), ("first-consult", "ask_operator"))
         self.resume(held["review_id"])
         self.gate.consult.side_effect = lambda case: opus.consult(vendor, case)
         result = self.gate.dispatch("answered-consult", "consult_opus", args, self.execute)

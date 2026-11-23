@@ -113,6 +113,62 @@ class ConcernStoreTests(unittest.TestCase):
         self.assertEqual(concerns.list_open(self.db, "room")[0]["version"], 1)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM concern_rulings").fetchone()[0], 1)
 
+    def test_review_receipts_prioritize_named_older_rulings_and_isolate_threads(self):
+        with self.db:
+            ruled = []
+            for sequence in range(1, 7):
+                number = self.create(sequence=sequence)
+                concerns.record(self.db, "room", number, 0, "retire", f"Closed incident {sequence}.", [])
+                ruled.append(number)
+            foreign = concerns.create(self.db, "other", 1, "Other conversation", "Private")
+            concerns.record(self.db, "other", foreign, 0, "retire", "A different incident.", [])
+            pending = self.create(sequence=7)
+        def ids(numbers, recent=False):
+            return [r["id"] for r in concerns.review_receipts(self.db, "room", numbers, include_recent=recent)]
+        self.assertEqual(ids([foreign, pending]), [])
+        self.assertEqual(ids([2**70, False, ruled[1], ruled[1], ruled[0]], recent=True),
+                         [ruled[1], ruled[0], ruled[-1], ruled[-2]])
+        self.assertEqual(ids([ruled[-1]], recent=True), [ruled[-1], ruled[-2], ruled[-3]])
+        self.assertEqual(ids([], recent=True), [ruled[-1], ruled[-2]])
+        self.assertEqual(ids(ruled, recent=True), ruled[:4])
+
+    def test_review_receipts_pair_only_explicitly_linked_ruling_versions(self):
+        with self.db:
+            number = self.create()
+            scope = [f"tool_{i}" for i in range(12)]
+            reason = "Inspect the destination. " + "evidence " * 200 + "for this case only."
+            concerns.record(self.db, "room", number, 0, "watch", reason, scope)
+            old, = concerns.review_receipts(self.db, "room", [number])
+            self.assertNotIn("action", old)
+            self.assertEqual(old["tools"] + scope[-old["tools_omitted"]:], scope)
+            self.assertLessEqual(len(old["reason"]), 400)
+            self.assertIn(" […] ", old["reason"])
+            self.assertTrue(old["reason"].endswith("for this case only."))
+            concerns.link_action(self.db, number, 1, tool="coding_run", call_id="call-7",
+                                 decision="allow", reason="Private change.", turn=15)
+            paired, = concerns.review_receipts(self.db, "room", [number])
+            self.assertEqual(paired["action"], {"tool": "coding_run", "call_id": "call-7", "decision": "allow",
+                                                "reason": "Private change.", "turn": 15})
+            self.assertEqual(concerns.history(self.db, "room")[0]["action"], paired["action"])
+            self.assertEqual(concerns.get(self.db, "room", number, include_action=True)["action"], paired["action"])
+            concerns.record(self.db, "room", number, 1, "retire", "A later independent disposition.", [])
+        current, = concerns.review_receipts(self.db, "room", [], include_recent=True)
+        self.assertEqual(current, {"id": number, "version": 2, "status": "retired", "tools": [],
+                                   "reason": "A later independent disposition."})
+        self.assertNotIn("action", concerns.history(self.db, "room")[0])
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            concerns.link_action(self.db, number, 3, tool="coding_run", call_id="call-8",
+                                 decision="allow", reason="Unknown ruling version.", turn=16)
+
+    def test_operator_lookup_reads_ledger_before_action_table_exists(self):
+        with self.db:
+            number = self.create()
+            concerns.record(self.db, "room", number, 0, "retire", "Prior decision.", [])
+            self.db.execute("DROP TABLE concern_ruling_actions")
+        self.assertEqual(concerns.get(self.db, "room", number)["reason"], "Prior decision.")
+        concerns.initialize(self.db)
+        self.assertNotIn("action", concerns.get(self.db, "room", number, include_action=True))
+
     def test_invalid_ruling_cannot_widen_or_drop_scope(self):
         with self.db:
             cid = self.create()
