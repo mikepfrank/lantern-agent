@@ -25,7 +25,7 @@ def _tool(name, description, properties, required):
 
 
 WORKSPACE_TOOLS = (
-    _tool("workspace_list", "List one directory of your persistent workspace in name order.",
+    _tool("workspace_list", "List one directory of your persistent workspace in name order. Regular files report their size in bytes; directories and links report null.",
           {"path": PATH, "offset": OFFSET, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, []),
     _tool("workspace_read", "Read a page of a UTF-8 workspace file. The SHA-256 covers the whole file.",
           {"path": PATH, "offset": OFFSET, "length": {"type": "integer", "minimum": 1, "maximum": 8000}}, ["path"]),
@@ -220,10 +220,18 @@ def workspace_tool(directory: Path, name: str, arguments: dict) -> dict:
         with _parent(directory, parts if listing else parts[:-1], create=create_parents) as parent:
             if listing:
                 with os.scandir(parent) as entries:
-                    items = sorted((e.name, e.is_dir(follow_symlinks=False)) for e in entries
-                                   if not e.name.casefold().startswith(TMP_PREFIX))
-                page = [{"name": n, "directory": d} for n, d in items[offset:offset + limit]]
-                return {"path": path, "entries": page, "next_offset": offset + limit if offset + limit < len(items) else None}
+                    kept = [e for e in entries if not e.name.casefold().startswith(TMP_PREFIX)]
+                    kept.sort(key=lambda e: e.name)
+                page = []
+                for entry in kept[offset:offset + limit]:
+                    item = {"name": entry.name, "directory": entry.is_dir(follow_symlinks=False)}
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        info = None
+                    item["size_bytes"] = info.st_size if info is not None and _plain_file(info) else None
+                    page.append(item)
+                return {"path": path, "entries": page, "next_offset": offset + limit if offset + limit < len(kept) else None}
             if name == "workspace_write":
                 return {"path": path, **_write(parent, parts[-1], data, expected)}
             raw = _read(parent, parts[-1])
