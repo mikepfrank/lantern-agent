@@ -24,7 +24,7 @@ DIAGNOSTICS_TOOL = {
 FILES = {"chat": "chat.sqlite", "usage": "usage.sqlite", "review": "review-costs.sqlite",
          "supervision": "supervision.sqlite"}
 TOOLS = set("""chess_analyze message_operator read_heritage consult_opus workspace_list workspace_read
-workspace_write heartbeat set_alarm cancel_alarm schedule_status set_provider_route provider_stats web_search budget_status coding_run
+workspace_write heartbeat set_alarm cancel_alarm schedule_status set_provider_route provider_stats web_search read_web_page budget_status coding_run
 github_sync github_preview github_open_draft
 harness_logs view_pdf_page unregistered""".split())
 STATUSES = set("""complete failed interrupted deferred pending completed incomplete upstream_http_error

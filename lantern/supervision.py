@@ -116,10 +116,14 @@ def recent_messages(context: dict) -> str:
     items = context.get("input", [])
     if isinstance(items, str):
         return items[-2400:]
+    web_reads = {item["call_id"] for item in items if item.get("type") == "function_call"
+                 and item.get("name") == "read_web_page" and isinstance(item.get("call_id"), str)}
     excerpts = []
     for item in reversed(items):
         if item.get("type") == "function_call_output":
             role, content = "tool result", item.get("output", "")
+            if item.get("call_id") in web_reads:
+                role = "untrusted external webpage tool result"
         elif item.get("role") in ("assistant", "user"):
             role, content = item["role"], item.get("content", "")
         else:

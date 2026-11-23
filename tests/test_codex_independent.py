@@ -224,7 +224,7 @@ class NativeIndependentWorker(unittest.TestCase):
         for request in requests[1:]:
             tools = {tool["name"] for tool in request["tools"]}
             self.assertEqual(tools, previous | {"workspace_write", "workspace_list", "workspace_read", "heartbeat",
-                                                "set_alarm", "cancel_alarm", "schedule_status", "web_search", "budget_status",
+                                                "set_alarm", "cancel_alarm", "schedule_status", "web_search", "read_web_page", "budget_status",
                                                 "harness_logs", "set_provider_route", "provider_stats"})
             self.assertNotIn("You cannot write a notes file", instructions(request))
             self.assertIn(scheduled_marker, request["instructions"])

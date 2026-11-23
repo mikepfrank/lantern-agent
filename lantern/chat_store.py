@@ -73,6 +73,11 @@ class ChatStore:
                 INSERT OR IGNORE INTO room(id) VALUES (1);
                 CREATE TABLE IF NOT EXISTS provider_route_changes (
                     id INTEGER PRIMARY KEY, call_id TEXT NOT NULL UNIQUE, route TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS web_sources (
+                    id INTEGER PRIMARY KEY, thread TEXT NOT NULL, url TEXT NOT NULL, UNIQUE(thread,url));
+                CREATE TABLE IF NOT EXISTS web_pages (
+                    id INTEGER PRIMARY KEY, thread TEXT NOT NULL, url TEXT NOT NULL, final_url TEXT NOT NULL,
+                    body TEXT NOT NULL, warnings TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY, role TEXT NOT NULL, text TEXT NOT NULL,
                     at TEXT NOT NULL, client_id TEXT UNIQUE);
