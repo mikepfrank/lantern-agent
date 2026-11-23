@@ -14,6 +14,7 @@ from .github_tools import OPEN_DRAFT
 from .opus import OPERATOR_QUESTION_LIMIT, OpusCaseTooLarge, OpusResponseError
 from .review_policy import action_facts, concern_refs, ruling_query
 from .review_vendors import HTTPRejection, OpusTransportError, ReviewBudgetUnavailable
+from .workspace import workspace_edit_evidence
 
 
 CONSULT = "consult_opus"
@@ -169,7 +170,13 @@ def _review_excerpt(case):
         evidence.append(f"#{item['id']}: {item['evidence']}")
     concern = "\n".join(filter(None, evidence)) or case["summary"]
     excerpt = "Review concern\n" + (concern if len(concern) <= 950 else concern[:949] + "…")
-    if case["tool"] == "workspace_write" and isinstance(case["arguments"].get("text"), str):
+    edit = case.get("host_facts", {}).get("workspace_edit", {})
+    if edit.get("hunks"):
+        changed = json.dumps(edit["hunks"], ensure_ascii=False)
+        excerpt += "\n\nChanged text (offsets in characters)\n" + (changed if len(changed) <= 700 else changed[:699] + "…")
+    elif edit.get("status") == "unchanged":
+        excerpt += "\n\nThe proposed file is identical to the verified revision."
+    elif case["tool"] == "workspace_write" and isinstance(case["arguments"].get("text"), str):
         draft = case["arguments"]["text"]
         excerpt += "\n\nProposed text" + (" (ending)\n…" + draft[-700:] if len(draft) > 700 else "\n" + draft)
     if case["tool"] == OPEN_DRAFT and (draft := case.get("host_facts", {}).get("public_draft")):
@@ -189,7 +196,7 @@ def recovered_excerpt(error, evidence_excerpt):
 
 class Supervisor:
     def __init__(self, state: Path, luna, review, consult, *, sample_every: int = 12, tool_names=None,
-                 batch_id: int | None = None, operator_room=None, draft_evidence=None):
+                 batch_id: int | None = None, operator_room=None, draft_evidence=None, workspace_root=None):
         if type(sample_every) is not int or sample_every < 1:
             raise ValueError("Sample interval must be a positive integer")
         self.path = state / DATABASE
@@ -199,6 +206,7 @@ class Supervisor:
         self.batch_id = batch_id
         self.operator_room = operator_room
         self.draft_evidence = draft_evidence
+        self.workspace_root = workspace_root
         self.thread = None
         self._observations = Condition()
         self._received = self._processed = 0
@@ -327,6 +335,9 @@ class Supervisor:
             packet = {"kind": "context", "context": context}
             if history:
                 packet["concern_history"] = history
+            facts = self._context_ruling_facts(history, recent)
+            if facts:
+                packet["host_facts"] = facts
             if new_events:
                 packet["new_tool_events"] = [
                     {"id": event_id, "tool": tool, "call_id": call_id}
@@ -457,11 +468,32 @@ class Supervisor:
                        (json.dumps(result, allow_nan=False), self.thread, call_id))
         return result
 
-    def _ruling_facts(self, db, query):
-        ids, recent = query
-        if not ids and not recent:
+    def _citation_facts(self, db, texts):
+        references = concerns.cited_references(*texts)
+        if not references:
             return {}
-        facts = {"related_rulings": concerns.review_receipts(db, self.thread, ids, include_recent=recent)}
+        return {"concern_citations": concerns.citation_receipts(db, self.thread, references, self.operator_room)}
+
+    def _context_ruling_facts(self, items, recent=""):
+        with database(self.path) as db:
+            facts = self._citation_facts(db, [recent, *(item[key] for item in items
+                                                      for key in ("reason", "evidence", "summary"))])
+        if self.operator_room and items:
+            ids = {item["id"] for item in items}
+            releases = [row for row in self.operator_room.concern_releases(self.thread, CONSULT)
+                        if row["concern_id"] in ids]
+            if releases:
+                facts["concern_releases"] = releases
+        return facts
+
+    def _ruling_facts(self, db, name, args, rationale, matching, prior, *review_texts):
+        # Prioritize citations used to justify this review over numbers mentioned in a draft.
+        texts = [*review_texts, prior, rationale, *(item[key] for item in matching
+                                                   for key in ("reason", "evidence", "summary")), *args.values()]
+        facts = self._citation_facts(db, texts)
+        ids, recent = ruling_query(name, args, rationale)
+        if ids or recent:
+            facts["related_rulings"] = concerns.review_receipts(db, self.thread, ids, include_recent=recent)
         if recent:
             decisions = {"opus_allowed": "allow", "opus_denied": "deny", "opus_asked_operator": "ask_operator"}
             rows = db.execute("""SELECT event,tool,call_id,at FROM events WHERE thread=?
@@ -474,12 +506,11 @@ class Supervisor:
 
     def _review_action(self, context, call_id, name, args, execute, feedback):
         rationale = args.pop("rationale", None)
-        query = ruling_query(name, args, rationale)
         with database(self.path) as db:
             matching = concerns.list_open(db, self.thread, name)
             prior = db.execute("SELECT reason FROM action_refusals WHERE thread=? AND proposal=?",
                                (self.thread, _fingerprint([name, args]))).fetchone()
-            ruling_facts = self._ruling_facts(db, query)
+            ruling_facts = self._ruling_facts(db, name, args, rationale, matching, prior[0] if prior else None)
         room = self.operator_room
         facts = action_facts(name, args,
                              operator_statements=room.statements(self.thread, self.batch_id) if room else [],
@@ -488,6 +519,8 @@ class Supervisor:
                              archive_receipt=room.archive_receipt(self.thread)
                              if room and name in ("read_heritage", "view_pdf_page") else None)
         facts.update(ruling_facts)
+        if name == "workspace_write" and self.workspace_root is not None:
+            facts["workspace_edit"] = workspace_edit_evidence(self.workspace_root, args)
         if name == OPEN_DRAFT:
             # Resolve the ID outside the agent's arguments. Both reviewers see this exact
             # immutable document, and the broker verifies its digest again at publication.
@@ -521,7 +554,7 @@ class Supervisor:
             return {"error": f"Provide a nonempty public rationale of at most {RATIONALE_LIMIT} characters for this action."}
         case = {"host_facts": facts, "tool": name, "arguments": args, "rationale": rationale,
                 "evidence": scan["evidence"], "summary": scan["summary"]}
-        held = self._adjudicate(call_id, case, scan["escalate"], skipped, feedback, query)
+        held = self._adjudicate(call_id, case, scan["escalate"], skipped, feedback)
         if held is not None:
             return held
         if name == CONSULT:
@@ -550,6 +583,10 @@ class Supervisor:
     def _case_with_concerns(self, items, action=None):
         case = dict(action or {})
         room = self.operator_room
+        if "tool" not in case:
+            facts = self._context_ruling_facts(items, case.get("recent_context", ""))
+            if facts:
+                case["host_facts"] = facts
         if room and "operator_statements" not in case:
             case["operator_statements"] = room.statements(self.thread, self.batch_id)
         records = []
@@ -689,7 +726,7 @@ class Supervisor:
                           "tools": json.loads(row["final_tools"])}
             self._record_ruling(item, ruling)
 
-    def _adjudicate(self, call_id, case, flagged, skipped, feedback, ruling_lookup):
+    def _adjudicate(self, call_id, case, flagged, skipped, feedback):
         """Return a tool error for a held action, or None to proceed with its dispatch."""
         name, args = case["tool"], case["arguments"]
         room = self.operator_room
@@ -723,13 +760,16 @@ class Supervisor:
             incomplete = db.execute("SELECT call_id,code,concern_id FROM incomplete_action_reviews "
                                     "WHERE thread=? AND proposal=?", (self.thread, proposal_key)).fetchone()
             matching = concerns.list_open(db, self.thread, name)
-            ruling_facts = self._ruling_facts(db, ruling_lookup)
+            ruling_facts = self._ruling_facts(db, name, args, case["rationale"], matching,
+                                              refusal[0] if refusal else None, case["evidence"], case["summary"],
+                                              prior["final_reason"] if prior else None)
             findings = [f for f in matching
                         if (f["id"], f["version"]) not in skipped
                         or (incomplete and f["id"] == incomplete[2] and f["status"] == "question")]
         # A concurrent ruling can change the ledger during Luna's call. Keep Opus's
         # factual record current and recheck the versions when committing its verdict.
-        case["host_facts"] = {**case["host_facts"], "prior_exact_denial": refusal[0] if refusal else None,
+        previous = {key: value for key, value in case["host_facts"].items() if key != "concern_citations"}
+        case["host_facts"] = {**previous, "prior_exact_denial": refusal[0] if refusal else None,
                               "open_concerns_for_tool": concern_refs(matching), **ruling_facts}
         if refusal:
             case["prior_action_denial"] = refusal[0]

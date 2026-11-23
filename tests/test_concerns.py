@@ -132,6 +132,53 @@ class ConcernStoreTests(unittest.TestCase):
         self.assertEqual(ids([], recent=True), [ruled[-1], ruled[-2]])
         self.assertEqual(ids(ruled, recent=True), ruled[:4])
 
+    def test_citations_select_exact_versions_and_ignore_other_numbered_objects(self):
+        self.assertEqual(concerns.cited_references(
+            "PR #1 v2; operator review #4; page #5; concerns #9 (version 8), concern #13.",
+            "Watch ID: 9 v7. #9 v8. Concerns #2, #3 and #7. #9 v6."),
+            [(9, 8), (9, 7), (13, None), (2, None), (3, None)])
+        self.assertEqual(concerns.cited_references("Concern #1, #1 and #1. Concerns #2, #3, and #4.",
+                                                   "Concern 18446744073709551615."),
+                         [(1, None), (2, None), (3, None), (4, None)])
+        self.assertEqual(concerns.cited_references("A price of $8, PR #4, event #12 and review #13 v4."), [])
+        self.assertEqual(concerns.cited_references("Concerns #9 (v8), #10."), [(9, 8), (10, None)])
+
+    def test_citation_shows_original_topic_previous_tool_scope_and_exact_historical_version(self):
+        number = concerns.create(self.db, "room", 1, "Shell invocation", "Coding sandbox and PR publication.")
+        concerns.record(self.db, "room", number, 0, "watch", "Examine requests for network from the shell.", ["coding_run"])
+        concerns.record(self.db, "room", number, 1, "retire", "Mike authorized this, says the reviewer.", [])
+        for earlier, expected in ((1, "watch"), (0, "pending"), (2, "retired")):
+            item, = concerns.citation_receipts(self.db, "room", [(number, earlier)])
+            self.assertEqual(item["screening_summary"], "Coding sandbox and PR publication.")
+            self.assertEqual(item["current"]["status"], "retired")
+            self.assertEqual(item["current"]["source"], "review_record")
+            self.assertEqual(item["current"]["last_active_tools"], ["coding_run"])
+            self.assertEqual(item["cited_ruling"]["status"], expected)
+            self.assertNotIn("operator_release", item)
+        item, = concerns.citation_receipts(self.db, "room", [(number, 800)])
+        self.assertEqual((item["resolution"], item["current"]["version"]), ("unknown_version", 2))
+        self.assertNotIn("cited_ruling", item)
+
+    def test_citation_unknown_foreign_and_pending_have_distinct_safe_results(self):
+        pending = self.create()
+        foreign = concerns.create(self.db, "another", 1, "Private evidence", "Private topic")
+        one, other, absent = concerns.citation_receipts(self.db, "room", [(pending, None), (foreign, 1), (91, 1)])
+        self.assertEqual((one["resolution"], one["current"]["source"]), ("pending", "screening_record"))
+        for undisclosed, number in ((other, foreign), (absent, 91)):
+            self.assertEqual(undisclosed, {"id": number, "cited_version": 1, "resolution": "unknown_concern"})
+
+    def test_host_recovered_question_has_distinct_origin_and_bounded_scope(self):
+        number = self.create()
+        tools = [f"tool_{i}" for i in range(10)]
+        concerns.record(self.db, "room", number, 0, "ask_operator", "Apply existing scope " * 60, tools)
+        self.db.execute("CREATE TABLE recovered_concern_questions (concern_id INTEGER, version INTEGER)")
+        self.db.execute("INSERT INTO recovered_concern_questions VALUES (?,1)", (number,))
+        item, = concerns.citation_receipts(self.db, "room", [(number, None)])
+        ruling = item["current"]
+        self.assertEqual((ruling["source"], ruling["tools"], ruling["tools_omitted"]),
+                         ("host_recovery", tools[:8], 2))
+        self.assertLessEqual(len(ruling["reason"]), 400)
+
     def test_review_receipts_pair_only_explicitly_linked_ruling_versions(self):
         with self.db:
             number = self.create()

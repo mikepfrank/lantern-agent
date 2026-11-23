@@ -420,7 +420,8 @@ async def main(args):
                                 partial(opus.consult, vendor_call, operator_context=context),
                                 sample_every=int(os.environ.get("LANTERN_SPOT_EVERY", "12")),
                                 tool_names=[tool["name"] for tool in tools], batch_id=batch_id, operator_room=operator_room,
-                                draft_evidence=partial(draft_evidence, github_socket) if github_socket else None)
+                                draft_evidence=partial(draft_evidence, github_socket) if github_socket else None,
+                                workspace_root=files if independent else None)
 
         def execute(call_id, name, arguments):
             if name == MESSAGE_TOOL["name"] and notify is not None:

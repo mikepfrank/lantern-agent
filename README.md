@@ -94,6 +94,10 @@ Each new concern from a context scan gets a permanent ID and goes to Opus immedi
 
 When a tool proposal names a concern, the host supplies its latest ruling to Luna and to Opus on referral. Private review updates and consultations can also include recent decisions from the same conversation. If Opus judged a tool call and a concern together, new records identify both decisions and the exact call. Older records can show the two facts separately. A past allowance applies only to the call it covered.
 
+For a workspace write, reviewers see the complete proposed text. When the supplied SHA-256 matches the saved file, the host also shows what the edit adds and removes. A new file is marked as entirely new. If the revision cannot be verified or some changes exceed the excerpt limit, the packet says so. The write checks the revision again before saving.
+
+When a proposal or review cites a numbered concern, the host looks up the incident in the same conversation. Reviewers can compare its original screening summary, the cited ruling and its tool scope, and its current status. Unknown numbers and versions are marked explicitly. An authenticated operator release is labeled separately, including when the operator confirmed an earlier reviewer decision.
+
 A watch can apply to a particular use of a tool. For example, a watch on publishing private notes can coexist with an ordinary chess journal entry. When the watch applies to a proposal, one Opus response decides both whether that action may proceed and whether to keep the watch. Each new proposal still goes through Luna. An exact repeat of an action Opus denied under this protocol requires a fresh Opus allowance before execution.
 
 When several watches apply to a proposal, Opus receives one case with all of them. It returns one action decision and one disposition per watch. An incomplete or stale set of dispositions holds the proposal. Across review types, Opus asks Mike only when a consequential decision turns on a specific fact only he can supply. Existing unanswered questions and individual denials keep their scope.

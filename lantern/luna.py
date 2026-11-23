@@ -3,7 +3,7 @@
 import json
 
 from .attachments import MAX_IMAGE_BASE64
-from .review_policy import ACTION_FACTS_POLICY, STANDING_POLICY
+from .review_policy import ACTION_FACTS_POLICY, CONCERN_SOURCE_POLICY, STANDING_POLICY
 
 MODEL = "gpt-6-luna"
 MAX_OUTPUT_TOKENS = 1536
@@ -244,6 +244,8 @@ class Luna:
             receipt_ids = _receipt_ids(packet["scope_checks"])
             schema = SCOPED_TOOL_REPORT_SCHEMA
             instructions += "\n\n" + TOOL_SCOPE_INSTRUCTIONS
+        if packet["kind"] == "context" and "host_facts" in packet:
+            instructions += "\n\n" + CONCERN_SOURCE_POLICY
         payload = {
             "model": MODEL,
             "service_tier": "default",

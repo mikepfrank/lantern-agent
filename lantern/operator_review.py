@@ -87,15 +87,65 @@ class ReviewRoom:
         return db.execute("""SELECT 1 FROM operator_concern_releases
             WHERE thread=? AND 'context-concern:' || concern_id=?""", (thread, scope)).fetchone() is not None
 
+    def _release_receipts(self, thread, selector, parameters):
+        """Only this room's committed operator command and host receipt attest a release."""
+        with self.store._connect() as db:
+            rows = db.execute(f"""SELECT x.concern_id,x.reason,x.released_at,x.command_event_id,x.source_event_id,
+                x.receipt_event_id,x.prior_tools,command.text AS operator_command,receipt.text AS receipt_text,
+                source.text AS cited_statement
+                FROM operator_concern_releases x JOIN room r ON r.thread_id=x.thread
+                JOIN events command ON command.id=x.command_event_id AND command.role='operator'
+                JOIN events receipt ON receipt.id=x.receipt_event_id AND receipt.role='system'
+                LEFT JOIN events source ON source.id=x.source_event_id AND source.role='operator'
+                WHERE x.thread=? AND ({selector}) ORDER BY x.receipt_event_id DESC LIMIT 16""", (thread, *parameters))
+            results = []
+            for row in rows:
+                item = dict(row)
+                # The worker emitted one of two fixed receipt headlines before appending
+                # the free-form reason. This also distinguishes pre-migration releases.
+                headline = item.pop("receipt_text").partition(".")[0]
+                number = item["concern_id"]
+                item["source"] = "authenticated_operator"
+                item["operator_action"] = {
+                    f"Mike retired context concern #{number}": "retired",
+                    f"Mike confirmed the retirement of context concern #{number}": "confirmed_retirement",
+                }.get(headline, "release_on_record")
+                command = item.pop("operator_command").strip()
+                reason = item["reason"]
+                if (reason and len(command) > len(reason) and command.endswith(reason)
+                        and command[-len(reason)-1].isspace()):
+                    item["reason_source"] = "operator_text"
+                else:
+                    # A default reason, a citation and a confirmation can all carry
+                    # host-written explanations. Keep the actual command distinct.
+                    item["reason_source"] = "host_receipt"
+                    item["operator_command"] = command[:MAX_STATEMENT]
+                    if len(command) > MAX_STATEMENT:
+                        item["operator_command_truncated"] = True
+                tools = json.loads(item["prior_tools"])
+                item["prior_tools"] = tools[:8]
+                if len(tools) > 8:
+                    item["prior_tools_omitted"] = len(tools) - 8
+                statement = item.pop("cited_statement")
+                if statement is not None:
+                    item["cited_operator_statement"] = statement[:MAX_STATEMENT]
+                    if len(statement) > MAX_STATEMENT:
+                        item["cited_operator_statement_truncated"] = True
+                results.append(item)
+            return results
+
     def concern_releases(self, thread, tool):
         """Durable operator evidence for the former scope, independent of recent chat."""
-        with self.store._connect() as db:
-            rows = db.execute("""SELECT concern_id,reason,released_at,command_event_id,source_event_id,receipt_event_id
-                FROM operator_concern_releases AS x JOIN room r ON r.thread_id=x.thread
-                WHERE x.thread=? AND (?='consult_opus'
-                    OR EXISTS (SELECT 1 FROM json_each(x.prior_tools) WHERE value IN ('*',?)))
-                ORDER BY x.receipt_event_id DESC LIMIT 16""", (thread, tool, tool))
-            return [dict(row) for row in rows]
+        return self._release_receipts(thread, """?='consult_opus' OR EXISTS
+            (SELECT 1 FROM json_each(x.prior_tools) WHERE value IN ('*',?))""", (tool, tool))
+
+    def releases_by_concern(self, thread, numbers):
+        """Resolve named concerns even when their old scope differs from the proposed tool."""
+        numbers = list(dict.fromkeys(numbers))[:4]
+        if not numbers:
+            return {}
+        marks = ",".join("?" for _ in numbers)
+        return {r["concern_id"]: r for r in self._release_receipts(thread, f"x.concern_id IN ({marks})", numbers)}
 
     def archive_receipt(self, thread):
         """The signed-in operator's original archive answer, when present in this room."""

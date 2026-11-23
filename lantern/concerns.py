@@ -129,6 +129,124 @@ def _excerpt(value, limit):
     return value[:limit - tail - 5] + " […] " + value[-tail:]
 
 
+_NUMBER = r"[1-9][0-9]{0,18}\b"
+_VERSION = r"\s*(?:[,/:@(-]\s*)?(?:(?:at|ruling)\s+)?v(?:ersion)?\.?\s*(?:#\s*)?(0\b|[1-9][0-9]{0,18}\b)"
+_CITATION_START = re.compile(
+    rf"\b(?:concerns?|watch(?:es)?)(?:[ _-]+ids?)?\s*(?:[#:=]\s*)?(?={_NUMBER})"
+    rf"|(?<!\w)#(?={_NUMBER}{_VERSION})", re.I)
+_CITATION_NUMBER = re.compile(rf"({_NUMBER})(?:{_VERSION})?", re.I)
+_NEXT_NUMBER = re.compile(rf"(?:\s*,\s*(?:and\s+)?|\s+and\s+)#?(?={_NUMBER})", re.I)
+
+
+def _bounded_references(references):
+    """Up to four incidents and two distinct explicit versions per incident."""
+    selected = {}
+    for number, version in references:
+        if type(number) is not int or not 0 < number < 2**63 or (version is not None
+                and (type(version) is not int or not 0 <= version < 2**63)):
+            continue
+        if number not in selected and len(selected) == 4:
+            continue
+        versions = selected.setdefault(number, [])
+        if version is not None and version not in versions and len(versions) < 2:
+            versions.append(version)
+    return [(number, version) for number, versions in selected.items() for version in (versions or [None])]
+
+
+def cited_references(*texts):
+    """Text supplies lookup keys only. An ordinary PR, page or operator-question number is not a concern ID."""
+    def references():
+        for text in texts:
+            if not isinstance(text, str):
+                continue
+            consumed = 0
+            for start in _CITATION_START.finditer(text):
+                if start.start() < consumed:
+                    continue
+                # An explicit version permits the shorthand '#9 v8'; preserve
+                # the namespace when another object is explicitly named instead.
+                if text[start.start()] == "#" and re.search(
+                        r"\b(?:PR|pull request|issue|page|question|review|event)\s*$",
+                        text[max(0, start.start() - 32):start.start()], re.I):
+                    continue
+                position = start.end()
+                while match := _CITATION_NUMBER.match(text, position):
+                    yield int(match[1]), int(match[2]) if match[2] else None
+                    consumed = match.end()
+                    if match[2] and text.startswith(")", consumed):
+                        consumed += 1
+                    separator = _NEXT_NUMBER.match(text, consumed)
+                    if not separator:
+                        break
+                    position = separator.end()
+    return _bounded_references(references())
+
+
+def citation_receipts(db, thread, references, room=None):
+    """Resolve exact versions and the latest disposition in the bound ledger, with any operator evidence."""
+    keys = _bounded_references(references)
+    if not keys:
+        return []
+    numbers = list(dict.fromkeys(number for number, _ in keys))
+    releases = room.releases_by_concern(thread, numbers) if room is not None else {}
+    recovered = db.execute("SELECT 1 FROM sqlite_schema WHERE name='recovered_concern_questions'").fetchone()
+    recovery = ("EXISTS(SELECT 1 FROM recovered_concern_questions q WHERE q.concern_id=c.id AND q.version=r.version)"
+                if recovered else "0")
+    receipts = []
+    for number in numbers:
+        versions = [version for cid, version in keys if cid == number]
+        marks = ",".join("?" for _ in versions)
+        rows = db.execute(f"""SELECT c.summary,COALESCE(r.version,0),COALESCE(r.status,'pending'),
+            COALESCE(r.reason,''),COALESCE(r.tools,'[]'),{recovery},
+            CASE WHEN r.status='retired' THEN (SELECT previous.tools FROM concern_rulings previous
+                WHERE previous.concern_id=c.id AND previous.version<r.version AND previous.status IN ('watch','question')
+                ORDER BY previous.version DESC LIMIT 1) END
+            FROM context_concerns c LEFT JOIN concern_rulings r ON r.concern_id=c.id
+            WHERE c.thread=? AND c.id=? AND (r.version IS NULL OR r.version IN ({marks}) OR r.version=(
+                SELECT MAX(version) FROM concern_rulings WHERE concern_id=c.id))
+            ORDER BY r.version DESC""", (thread, number, *versions)).fetchall()
+        release = releases.get(number)
+        rulings = {}
+        for summary, version, status, reason, tools, is_recovery, last_tools in rows:
+            source = "review_record" if version else "screening_record"
+            if is_recovery:
+                source = "host_recovery"
+            if status == "retired" and release and release["operator_action"] == "retired":
+                # A concern cannot acquire another version after retirement.
+                # A later operator confirmation leaves the reviewer as its author.
+                source = "authenticated_operator"
+            ruling = {"version": version, "status": status, "source": source, "reason": _excerpt(reason, 400)}
+            for key, raw in (("tools", tools), ("last_active_tools", last_tools)):
+                if raw is not None:
+                    scope = json.loads(raw)
+                    ruling[key] = scope[:8]
+                    if len(scope) > 8:
+                        ruling[key + "_omitted"] = len(scope) - 8
+            rulings[version] = ruling
+        for version in versions:
+            entry = {"id": number}
+            if version is not None:
+                entry["cited_version"] = version
+            if not rows:
+                entry["resolution"] = "unknown_concern"
+            else:
+                current = rulings[rows[0][1]]
+                entry.update(screening_summary=_excerpt(rows[0][0], 320), current=current)
+                entry["resolution"] = "pending" if current["status"] == "pending" else "resolved"
+                if version is not None:
+                    if version == 0:
+                        entry["cited_ruling"] = {"version": 0, "status": "pending", "source": "screening_record",
+                                                 "reason": "", "tools": []}
+                    elif version in rulings:
+                        entry["cited_ruling"] = rulings[version]
+                    else:
+                        entry["resolution"] = "unknown_version"
+                if release:
+                    entry["operator_release"] = release
+            receipts.append(entry)
+    return receipts
+
+
 def review_receipts(db, thread, referenced_ids, *, include_recent=False):
     """Latest rulings for named concerns, optionally supplemented with up to two recent rulings."""
     ids = []

@@ -8,6 +8,8 @@ import re
 import secrets
 import stat
 
+from .workspace_diff import edit_summary
+
 
 MAX_TEXT = 32_768
 MAX_BYTES = 4 * MAX_TEXT
@@ -97,7 +99,7 @@ def _at(parent, name):
 
 
 @contextmanager
-def _parent(root, components, create=False):
+def _parent(root, components, create=False, *, preview=False):
     # The configured root's ancestors belong to the operator. Pin that root and
     # every child used in this request. All tool operations serialize at the root.
     root = Path(root).absolute()
@@ -109,9 +111,12 @@ def _parent(root, components, create=False):
             parent = stack.enter_context(_windows_directory(root))
             # Keep the reserved lock file next to the tool root in operator-only
             # workspace metadata. Its byte-range lock dies with the process.
-            lock = stack.enter_context((root.parent / ("." + root.name + ".lock")).open("a+b"))
-            lock.seek(0)
-            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+            # Preview pins the directory and verifies the digest of the bytes
+            # it reads. Leave the lock file untouched, even on a fresh root.
+            if not preview:
+                lock = stack.enter_context((root.parent / ("." + root.name + ".lock")).open("a+b"))
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
         else:
             import fcntl
             flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -128,11 +133,17 @@ def _parent(root, components, create=False):
                 else:
                     if isinstance(parent, int):
                         os.fsync(parent)
-            if os.name == "nt":
-                parent = stack.enter_context(_windows_directory(path))
-            else:
-                parent = os.open(path, flags, **kwargs)
-                stack.callback(os.close, parent)
+            try:
+                if os.name == "nt":
+                    parent = stack.enter_context(_windows_directory(path))
+                else:
+                    parent = os.open(path, flags, **kwargs)
+                    stack.callback(os.close, parent)
+            except FileNotFoundError:
+                if not preview:
+                    raise
+                yield None  # Missing ordinary parent. Preview never creates it.
+                return
         yield parent
 
 
@@ -154,15 +165,22 @@ def _read(parent, name):
     return data
 
 
-def _write(parent, name, data, expected):
+def _write_base(parent, name, expected):
     try:
-        original = _read(parent, name)
+        original = _read(parent, name) if parent is not None else None
     except FileNotFoundError:
         original = None
     if original is not None and expected is None:
-        return {"error": "File exists. Use workspace_read and supply its sha256 to replace it."}
+        return None, "File exists. Use workspace_read and supply its sha256 to replace it."
     if expected is not None and (original is None or hashlib.sha256(original).hexdigest() != expected):
-        return {"error": "The file changed or is missing. Read it again before saving."}
+        return None, "The file changed or is missing. Read it again before saving."
+    return original, None
+
+
+def _write(parent, name, data, expected):
+    original, error = _write_base(parent, name, expected)
+    if error:
+        return {"error": error}
     temp, kwargs = _at(parent, TMP_PREFIX + secrets.token_hex(16))
     target, _ = _at(parent, name)
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
@@ -195,23 +213,50 @@ def _write(parent, name, data, expected):
     return {"sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)}
 
 
-def workspace_tool(directory: Path, name: str, arguments: dict) -> dict:
-    """Operate exclusively in an operator-provisioned, persistent files/ directory."""
+def _checked_parts(name, arguments):
     spec = next((t["inputSchema"] for t in WORKSPACE_TOOLS if t["name"] == name), None)
     if (spec is None or not isinstance(arguments, dict) or set(arguments) - spec["properties"].keys()
             or not set(spec["required"]) <= arguments.keys()):
         raise ValueError("Invalid workspace tool or arguments.")
+    return _parts(arguments.get("path", "."), allow_root=name == "workspace_list")
+
+
+def _write_values(arguments):
+    text = arguments["text"]
+    expected = arguments.get("expected_sha256")
+    if not isinstance(text, str) or len(text) > MAX_TEXT:
+        raise ValueError("The text exceeds the workspace write limit.")
+    if "expected_sha256" in arguments and (not isinstance(expected, str) or not re.fullmatch("[0-9a-f]{64}", expected)):
+        raise ValueError("Supply a valid SHA-256 digest.")
+    return text.encode("utf-8"), expected
+
+
+def workspace_edit_evidence(directory: Path, arguments: dict) -> dict:
+    """Preview only. Execution independently rechecks the same hash or create-only condition."""
+    try:
+        parts = _checked_parts("workspace_write", arguments)
+        data, expected = _write_values(arguments)
+        with _parent(directory, parts[:-1], preview=True) as parent:
+            original, error = _write_base(parent, parts[-1], expected)
+        if error:
+            return {"status": "unavailable", "complete": False, "reason": error}
+        old = original.decode("utf-8") if original is not None else None
+    except (OSError, ValueError, RuntimeError):
+        return {"status": "unavailable", "complete": False,
+                "reason": "Could not verify a safe UTF-8 workspace revision for this proposal."}
+    summary = edit_summary(old, arguments["text"])
+    summary["base_sha256"] = expected
+    summary["proposed_sha256"] = hashlib.sha256(data).hexdigest()
+    return summary
+
+
+def workspace_tool(directory: Path, name: str, arguments: dict) -> dict:
+    """Operate exclusively in an operator-provisioned, persistent files/ directory."""
+    parts = _checked_parts(name, arguments)
     listing = name == "workspace_list"
-    parts = _parts(arguments.get("path", "."), allow_root=listing)
     path = "/".join(parts) or "."
     if name == "workspace_write":
-        text = arguments["text"]
-        expected = arguments.get("expected_sha256")
-        if not isinstance(text, str) or len(text) > MAX_TEXT:
-            raise ValueError("The text exceeds the workspace write limit.")
-        if "expected_sha256" in arguments and (not isinstance(expected, str) or not re.fullmatch("[0-9a-f]{64}", expected)):
-            raise ValueError("Supply a valid SHA-256 digest.")
-        data = text.encode("utf-8")
+        data, expected = _write_values(arguments)
     else:
         offset = _integer(arguments, "offset", 0, 0)
         limit = _integer(arguments, "limit", 30, 1, 100) if listing else _integer(arguments, "length", 2400, 1, 8000)
