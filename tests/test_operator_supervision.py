@@ -60,7 +60,7 @@ class OperatorSupervisionTests(unittest.TestCase):
         return question["id"]
 
     def test_workspace_review_popup_identifies_partial_and_unavailable_edit_previews(self):
-        self.gate.workspace_root = self.state / "files"
+        self.gate.workspace_root = self.state.resolve(strict=True) / "files"
         self.gate.workspace_root.mkdir()
         self.luna.screen.return_value = FLAG
         self.review.return_value = ASK
