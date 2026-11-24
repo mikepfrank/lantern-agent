@@ -48,7 +48,13 @@ The Lightsail worker accepts timed wakeups in the same private room. Run `lanter
 
 Lantern can call `set_provider_route` to select **default** (OpenRouter balances price and performance), **fastest** (higher token throughput), or **cheapest** (lower price) for its next OpenRouter request, including the next request in the same turn. The preference carries over to operator messages, alarms and heartbeats, and survives a worker restart. OpenRouter chooses among eligible endpoints, so different preferences can lead to the same provider. All three use the same model, price ceilings and $10 UTC daily allowance. Lantern can read the current preference in `budget_status` and check the route recorded on a model request with `harness_logs`. The operator can see it in `lantern usage --calls`.
 
-Lantern can list, read and write UTF-8 notes and source files relative to `~/.local/state/lantern/workspace/files/`. Updating an existing file requires the digest returned by the read tool. The worker separately provides read-only access to the private heritage archive.
+Lantern can list and edit UTF-8 notes and source files under `~/.local/state/lantern/workspace/files/`. The worker separately provides read-only access to the private heritage archive.
+
+- Use `workspace_append` to add the supplied text to the end of an existing file. Include any desired newline in `text`. The optional `expected_suffix` checks that the file still ends with the supplied text.
+- Use `workspace_replace` for a correction. Supply the exact text in `find` and the new text in `replace`. An empty replacement deletes the match. If the text is missing or occurs more than once, the file stays intact. A longer anchor can distinguish two similar entries.
+- Use `workspace_write` to create a file or replace it in full. A full replacement requires `expected_sha256`. Append and exact replacement also accept this optional guard when an edit depends on a specific revision.
+
+An edit can grow a text file to 128 KiB. Each text argument may contain up to 32,768 characters.
 
 On Lightsail, `coding_run` starts a fresh offline container for each reviewed shell command. Python, Git, and Lantern's full editable project checkout are available in `/work/lantern`. Files and local commits under `/work` persist. Dedicated tools can sync upstream, preview a committed patch privately, and submit the reviewed patch as a public draft pull request. GitHub credentials stay with the host publisher. Mike and the maintainer review changes before merge and deployment. See the [GitHub setup and test procedure](deploy/README.md#github-sync-and-draft-pull-requests).
 
@@ -98,7 +104,7 @@ Each new concern from a context scan gets a permanent ID and goes to Opus immedi
 
 When a tool proposal names a concern, the host supplies its latest ruling to Luna and to Opus on referral. Private review updates and consultations can also include recent decisions from the same conversation. If Opus judged a tool call and a concern together, new records identify both decisions and the exact call. Older records can show the two facts separately. A past allowance applies only to the call it covered.
 
-For a workspace replacement, Lantern can copy the 12-character `sha256_prefix` from `workspace_read` into `expected_sha256`. Longer prefixes and full SHA-256 digests also work. The host resolves the prefix against the current file at that path. Reviewers see the full digest, the proposed text, and what the edit adds and removes. The write checks the full digest again before saving. New files are marked as entirely new, and the packet identifies any edits that exceed its excerpt limit.
+Lantern can copy the 12-character `sha256_prefix` from `workspace_read` into `expected_sha256`. Longer prefixes and full SHA-256 digests also work. For edits to existing files, the host identifies the file revision and shows reviewers the requested operation and what it adds and removes. The write checks the full digest again before saving. New files are marked as entirely new, and the packet identifies any edits that exceed its excerpt limit.
 
 When a proposal or review cites a numbered concern, the host looks up the incident in the same conversation. Reviewers can compare its original screening summary, the cited ruling and its tool scope, and its current status. Unknown numbers and versions are marked explicitly. An authenticated operator release is labeled separately, including when the operator confirmed an earlier reviewer decision.
 

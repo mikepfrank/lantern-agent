@@ -60,6 +60,10 @@ class NativeIndependentWorker(unittest.TestCase):
         ]
         requests, reviews, threads = [], [], []
         proposal = sample_proposal()
+        journal_edits = [
+            ("workspace_append", {"path": filename, "text": "\nQueued.", "expected_suffix": "endgame is next."}),
+            ("workspace_replace", {"path": filename, "find": "rook endgame", "replace": "pawn endgame"}),
+        ]
 
         @contextmanager
         def provider(body, headers):
@@ -84,6 +88,11 @@ class NativeIndependentWorker(unittest.TestCase):
                 item = {"type": "function_call", "id": f"fc_{serial}", "call_id": f"call_{serial}",
                         "status": "completed", "name": name,
                         "arguments": json.dumps({**args, "rationale": "Propose the fixture change for review."})}
+            elif serial in (10, 11):
+                name, args = journal_edits[serial - 10]
+                item = {"type": "function_call", "id": f"fc_{serial}", "call_id": f"call_{serial}",
+                        "status": "completed", "name": name,
+                        "arguments": json.dumps({**args, "rationale": "Edit the private fixture journal."})}
             else:
                 answer = old_answer if serial == 1 else new_answer
                 item = {"type": "message", "role": "assistant", "id": f"msg_{serial}", "status": "completed",
@@ -193,9 +202,16 @@ class NativeIndependentWorker(unittest.TestCase):
                     runner.assert_called_once()
                 self.assertEqual(gh_calls, ["preview", "evidence", "open_draft"])
                 self.assertEqual(store.status()["thread_id"], tid)
-                self.assertEqual(len(requests), 10)
+                self.assertEqual(len(requests), 12)
+                self.assertEqual((state / "workspace" / "files" / filename).read_text(encoding="utf-8"),
+                                 "Fixture journal: the pawn endgame is next.\nQueued.")
                 self.assertTrue({"coding_run", "github_sync", "github_preview", "github_open_draft"} <=
                                 {tool["name"] for tool in requests[5]["tools"]})
+                schemas = {tool["name"]: tool["parameters"] for tool in requests[5]["tools"]}
+                self.assertEqual(set(schemas["workspace_append"]["required"]), {"path", "text", "rationale"})
+                self.assertEqual(set(schemas["workspace_replace"]["required"]), {"path", "find", "replace", "rationale"})
+                for name, _ in journal_edits:
+                    self.assertIn("expected_sha256", schemas[name]["properties"])
                 self.assertIn("administrator sign-in or his SSH operator link", requests[5]["instructions"])
                 self.assertIn("Python offline-coding-fixture", json.dumps(requests[-1]["input"]))
                 self.assertIn("private journal is saved", json.dumps(requests[-1]["input"]))
@@ -210,7 +226,8 @@ class NativeIndependentWorker(unittest.TestCase):
                 self.assertEqual({t["name"] for t in requests[-1]["tools"]},
                                  {"chess_analyze", "read_heritage", "message_operator", "consult_opus"})
                 prior = {i["name"] for i in requests[-1]["input"] if i.get("type") == "function_call"}
-                self.assertTrue({"workspace_read", "coding_run", "harness_logs", "github_open_draft"}.issubset(prior))
+                self.assertTrue({"workspace_read", "workspace_append", "workspace_replace", "coding_run",
+                                 "harness_logs", "github_open_draft"}.issubset(prior))
 
         requests = requests[:5]
         self.assertEqual(["notes/handoff.md" in request["instructions"] for request in requests],
@@ -226,7 +243,8 @@ class NativeIndependentWorker(unittest.TestCase):
         self.assertNotIn(scheduled_marker, requests[0]["instructions"])
         for request in requests[1:]:
             tools = {tool["name"] for tool in request["tools"]}
-            self.assertEqual(tools, previous | {"workspace_write", "workspace_list", "workspace_read", "heartbeat",
+            self.assertEqual(tools, previous | {"workspace_write", "workspace_append", "workspace_replace",
+                                                "workspace_list", "workspace_read", "heartbeat",
                                                 "set_alarm", "cancel_alarm", "schedule_status", "web_search", "read_web_page", "budget_status",
                                                 "harness_logs", "set_provider_route", "provider_stats"})
             self.assertNotIn("You cannot write a notes file", instructions(request))
@@ -242,5 +260,6 @@ class NativeIndependentWorker(unittest.TestCase):
         self.assertIn("seconds_until_reset", outputs["call_4"])
         self.assertIn("reserved_usd", outputs["call_4"])
         self.assertEqual([tool for tool, _ in reviews], [name for name, _ in actions]
-                         + ["coding_run", "harness_logs", "github_preview", "github_open_draft"])
+                         + ["coding_run", "harness_logs", "github_preview", "github_open_draft"]
+                         + [name for name, _ in journal_edits])
         self.assertTrue(all(scheduled_marker in instructions for _, instructions in reviews[:len(actions)]))

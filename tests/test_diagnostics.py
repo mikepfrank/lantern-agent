@@ -86,15 +86,16 @@ class DiagnosticsTests(TestCase):
                 record, = read_diagnostics(self.state, {})["records"]
                 self.assertEqual((record["event_id"], record["at_utc"]), (7, "2026-01-01T23:59:00.000Z"))
 
-    def test_pdf_review_identifies_tool_without_showing_reviewed_arguments(self):
+    def test_reviews_identify_tools_without_showing_reviewed_arguments(self):
         Supervisor(self.state, None, None, None)
-        self.sql("supervision.sqlite", "INSERT INTO events(thread,event,tool,call_id) VALUES(?,?,?,?)",
-                 ("t", "tool_clear", "view_pdf_page", "call-1"))
-        self.sql("supervision.sqlite", "INSERT INTO actions VALUES(?,?,?,?)",
-                 ("t", "call-1", "digest", json.dumps({"path": "/work/private-filename.pdf", "page": 1})))
+        for tool in ("view_pdf_page", "workspace_append", "workspace_replace"):
+            self.sql("supervision.sqlite", "INSERT INTO events(thread,event,tool,call_id) VALUES(?,?,?,?)",
+                     ("t", "tool_clear", tool, tool))
+            self.sql("supervision.sqlite", "INSERT INTO actions VALUES(?,?,?,?)",
+                     ("t", tool, "digest", json.dumps({"path": "/work/private-filename.pdf"})))
         report = read_diagnostics(self.state, {})
-        record, = report["records"]
-        self.assertEqual((record["status"], record["tool"]), ("tool_clear", "view_pdf_page"))
+        self.assertCountEqual([(r["status"], r["tool"]) for r in report["records"]],
+                              [("tool_clear", tool) for tool in ("view_pdf_page", "workspace_append", "workspace_replace")])
         self.assertNotIn("private-filename", json.dumps(report))
 
     def test_real_ledgers_show_only_allowlisted_results_and_receipts(self):

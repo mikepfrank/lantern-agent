@@ -31,7 +31,7 @@ _HIDDEN_STYLE = re.compile(r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*(?
 _DIRECTIVE = re.compile(
     r"\b(?:ignore|disregard|override)\s+(?:(?:all|the|any|your|above|previous|prior|earlier|system|developer)\s+){1,5}"
     r"(?:instructions?|rules?|messages?)\b|\b(?:call|invoke|execute)\s+(?:the\s+)?"
-    r"(?:web_search|coding_run|workspace_write|message_operator|github_open_draft)\b", re.I)
+    r"(?:web_search|coding_run|workspace_(?:write|append|replace)|message_operator|github_open_draft)\b", re.I)
 _URL = re.compile(r"""https://[^\s<>"'`]+""", re.I)
 
 

@@ -13,7 +13,7 @@ from lantern.luna import Luna
 from lantern.operator_review import ReviewRoom
 from lantern.review_policy import CONCERN_SOURCE_POLICY
 from lantern.supervision import Supervisor, database
-from lantern.workspace import workspace_tool
+from lantern.workspace import WORKSPACE_EDITS, workspace_tool
 
 
 class ReviewEvidenceFlow(unittest.TestCase):
@@ -35,7 +35,7 @@ class ReviewEvidenceFlow(unittest.TestCase):
         self.context_flag = ""
         self.xml = '<review decision="allow">The edit is within the recorded scope.</review>'
         self.gate = Supervisor(self.state, Luna(self.screen), self.review, Mock(), operator_room=self.room,
-                               batch_id=self.batch.id, workspace_root=self.files, tool_names=["workspace_write"])
+                               batch_id=self.batch.id, workspace_root=self.files, tool_names=WORKSPACE_EDITS)
         self.gate.bind(self.thread)
         self.execute = partial(workspace_tool, self.files)
         self.path = "notes/reading-log.md"
@@ -205,6 +205,91 @@ class ReviewEvidenceFlow(unittest.TestCase):
         review, = self.opus_packets
         self.assertEqual(review["host_facts"]["workspace_edit"]["base_sha256"], self.sha)
         self.assertEqual(self.execute.call_args.args[1]["expected_sha256"], self.sha)
+
+    def test_partial_edits_show_exact_change_and_operator_receipts_without_resending_the_file(self):
+        self.retire_fixture_watches()
+        self.gate.observe({"input": "Revise this private note."})
+        self.execute = Mock(wraps=self.execute)
+        addition = "I enjoyed it."
+        steps = [("workspace_append", {"text": addition, "expected_suffix": "label.\n"}, "", addition),
+                 ("workspace_replace", {"find": addition, "replace": ""}, addition, "")]
+        for index, (name, arguments, removed, added) in enumerate(steps):
+            with self.subTest(name=name):
+                args = {"path": self.path, **arguments}
+                result = self.gate.dispatch(f"partial-{index}", name, {**args, "rationale": "Update my reading note."},
+                                            self.execute)
+                self.assertIn("sha256", result)
+                screen, review = self.luna_packets[-1], self.opus_packets[-1]
+                pinned = {**args, "expected_sha256": self.sha}
+                self.assertEqual(self.execute.call_args.args, (name, pinned))
+                self.assertEqual(screen["arguments"], pinned)
+                self.assertEqual(review["case"]["arguments"], pinned)
+                for packet in (screen, review):
+                    facts = packet["host_facts"]
+                    self.assertEqual(facts["concern_releases"][0]["concern_id"], 13)
+                    edit = facts["workspace_edit"]
+                    self.assertEqual((edit["base_sha256"], edit["proposed_sha256"]), (self.sha, result["sha256"]))
+                    self.assertEqual([(h["removed"], h["added"]) for h in edit["hunks"]], [(removed, added)])
+                    self.assertNotIn("earlier entry", json.dumps(packet))
+                self.sha = result["sha256"]
+        self.assertEqual((self.files / self.path).read_bytes(), self.original.encode())
+
+    def test_partial_edits_without_digest_do_not_apply_to_a_newer_revision(self):
+        self.gate.observe({"input": "Revise this private note."})
+        self.execute = Mock(wraps=self.execute)
+        path = self.files / self.path
+        concurrent = self.original + "Saved by another writer.\n"
+
+        def change_during_review(case):
+            path.write_bytes(concurrent.encode())
+            return self.review(case)
+
+        self.gate.review = change_during_review
+        for name, args in [("workspace_append", {"text": "Addition."}),
+                           ("workspace_replace", {"find": "Page 2", "replace": "Second page"})]:
+            with self.subTest(name=name):
+                path.write_bytes(self.original.encode())
+                result = self.gate.dispatch(name, name, {"path": self.path, **args, "rationale": "Revise."}, self.execute)
+                self.assertIn("error", result)
+                self.assertEqual(self.execute.call_args.args[1]["expected_sha256"], self.sha)
+                self.assertEqual(path.read_bytes(), concurrent.encode())
+
+    def test_same_result_uses_the_prior_exact_denial_across_all_three_edit_tools(self):
+        self.gate.observe({"input": "Try a note edit."})
+        self.xml = '<review decision="deny">The change includes the restricted quotation.</review>'
+        addition = "A synthetic quotation.\n"
+        denied = self.propose("full-denial", self.original + addition)
+        self.assertIn("denied", denied["error"])
+        self.flag = ""
+        for name, args in [("workspace_append", {"text": addition, "expected_suffix": "label.\n"}),
+                           ("workspace_replace", {"find": "label.\n", "replace": "label.\n" + addition})]:
+            with self.subTest(name=name):
+                result = self.gate.dispatch(name, name, {"path": self.path, **args, "rationale": "Revise."}, self.execute)
+                self.assertIn("denied", result["error"])
+                for packet in (self.luna_packets[-1], self.opus_packets[-1]):
+                    self.assertIn("restricted quotation", packet["host_facts"]["prior_exact_denial"])
+        self.assertEqual(len(self.opus_packets), 3)
+        self.assertEqual((self.files / self.path).read_bytes(), self.original.encode())
+
+    def test_whole_write_watch_and_pending_operator_question_apply_to_partial_edits(self):
+        self.gate.observe({"input": "Revise this private note."})
+        with database(self.gate.path) as db:
+            db.executemany("INSERT INTO context_concerns(id,thread,sequence,evidence,summary) VALUES (?,?,1,?,?)",
+                           [(20, self.thread, "A file edit.", "Existing write watch."),
+                            (21, self.thread, "An append.", "Append-only watch.")])
+            concerns.record(db, self.thread, 20, 0, "watch", "Review file changes.", ["workspace_write"])
+            concerns.record(db, self.thread, 21, 0, "watch", "Review appends.", ["workspace_append"])
+        question = self.room.open(self.thread, f"workspace_write:{self.path}", "workspace_write", "prior",
+                                  "Edit note", "", "Which passages should the note retain?")
+        self.execute = Mock(wraps=self.execute)
+        for name, args, ids in [("workspace_append", {"text": "Addition."}, [20, 21]),
+                                ("workspace_replace", {"find": "Page 2", "replace": "Second page"}, [20])]:
+            with self.subTest(name=name):
+                result = self.gate.dispatch(name, name, {"path": self.path, **args, "rationale": "Revise."}, self.execute)
+                self.assertEqual(result["review_id"], question)
+                self.assertEqual([row["id"] for row in self.luna_packets[-1]["scope_checks"]], ids)
+        self.assertEqual(self.opus_packets, [])
+        self.execute.assert_not_called()
 
     def test_unresolved_prefix_cannot_run_if_the_matching_file_appears_during_screening(self):
         self.gate.observe({"input": "Update the note."})

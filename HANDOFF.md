@@ -2,6 +2,8 @@
 
 ## Current state
 
+**Incremental workspace editing, November 24 (Central).** The next worker adds `workspace_append` for growing logs and `workspace_replace` for exact, unique text edits. Both operate on existing UTF-8 files. The host pins the revision before review and checks it at save time. A live acceptance check is to append one move to a test log and correct a single status line, then read back both changes.
+
 **Short SHA-256 inputs, November 24 (Central).** Workspace reads and writes return a 12-character `sha256_prefix`, and GitHub previews return a `proposal_id_prefix`. The host resolves these before review and uses the full digest for the action. For this release, install the matching GitHub broker before rotating the idle worker so the broker can resolve frozen proposal prefixes. The release includes the queued Darkbloom routing update.
 
 **GitHub proposal tools, November 22 (Central).** `github_sync` fetches the designated public main branch for Lantern's offline checkout; a dirty or diverged worktree keeps its changes. `github_preview` freezes a small committed patch privately. `github_open_draft` uses its content-addressed ID and supplies the entire frozen public proposal to supervision. The host submits a single proposal commit on a dedicated branch and returns the draft PR URL. Public API publication needs Mike's repository-only credential, installed with `sudo /usr/local/sbin/lantern-github-auth`. The operator's first real draft is the remaining acceptance check. See the [setup and test procedure](deploy/README.md#github-sync-and-draft-pull-requests).

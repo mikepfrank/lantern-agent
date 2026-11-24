@@ -3,6 +3,7 @@
 import json
 import re
 
+from .workspace import WORKSPACE_EDITS
 
 def initialize(db):
     """Import legacy findings idempotently. The caller owns the transaction."""
@@ -104,12 +105,24 @@ def repeat_seen(db, thread, sequence, id):
     return False
 
 
+def applicable_scopes(tool):
+    # A standing workspace_write scope predates the partial-edit tools and
+    # covers writes to the same files. An append-only scope stays narrower.
+    if tool in WORKSPACE_EDITS and tool != "workspace_write":
+        return (tool, "workspace_write", "*")
+    return (tool, "*")
+
+
+def scope_matches(tool, scopes):
+    return any(candidate in scopes for candidate in applicable_scopes(tool))
+
+
 def list_open(db, thread, tool=None):
     """Return all matching current concerns, with full text for adjudication."""
     cursor = db.execute(f"""SELECT {_COLUMNS} {_LATEST}
         WHERE c.thread=? AND COALESCE(r.status,'pending') != 'retired' ORDER BY c.id""", (thread,))
     return [row for row in _rows(cursor)
-            if tool is None or row["status"] == "pending" or "*" in row["tools"] or tool in row["tools"]]
+            if tool is None or row["status"] == "pending" or scope_matches(tool, row["tools"])]
 
 
 def link_action(db, concern_id, version, *, tool, call_id, decision, reason, turn):

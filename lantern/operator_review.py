@@ -3,7 +3,7 @@
 import json
 
 from .chat_store import ChatStore
-from .concerns import validate_scope
+from .concerns import applicable_scopes, validate_scope
 from .review_policy import ARCHIVE_REVIEW_ID
 
 
@@ -136,8 +136,10 @@ class ReviewRoom:
 
     def concern_releases(self, thread, tool):
         """Durable operator evidence for the former scope, independent of recent chat."""
-        return self._release_receipts(thread, """?='consult_opus' OR EXISTS
-            (SELECT 1 FROM json_each(x.prior_tools) WHERE value IN ('*',?))""", (tool, tool))
+        scopes = applicable_scopes(tool)
+        marks = ",".join("?" for _ in scopes)
+        return self._release_receipts(thread, f"""?='consult_opus' OR EXISTS
+            (SELECT 1 FROM json_each(x.prior_tools) WHERE value IN ({marks}))""", (tool, *scopes))
 
     def releases_by_concern(self, thread, numbers):
         """Resolve named concerns even when their old scope differs from the proposed tool."""

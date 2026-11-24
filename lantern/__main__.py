@@ -336,7 +336,9 @@ async def main(args):
         if independent:
             context += (
                 "\n\nYou have a persistent private workspace for notes and source files. Use your registered "
-                "workspace tools for those files. "
+                "workspace tools for those files. Use workspace_append to add text at the end and "
+                "workspace_replace to change one exact passage. Supply only the affected text. "
+                "Use workspace_write to create a file or replace its full contents. "
                 "On a heartbeat you may choose your own interests, take a small useful action, or simply "
                 "finish. Check budget_status when planning your pace and use heartbeat or set_alarm as needed. "
                 "Use set_provider_route to let OpenRouter balance price and performance (default), "

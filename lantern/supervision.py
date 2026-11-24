@@ -14,7 +14,7 @@ from .github_tools import OPEN_DRAFT, ProposalLookupError
 from .opus import OPERATOR_QUESTION_LIMIT, OpusCaseTooLarge, OpusResponseError
 from .review_policy import action_facts, concern_refs, ruling_query
 from .review_vendors import HTTPRejection, OpusTransportError, ReviewBudgetUnavailable
-from .workspace import workspace_edit_evidence
+from .workspace import WORKSPACE_EDITS, workspace_edit_evidence
 
 
 CONSULT = "consult_opus"
@@ -147,16 +147,23 @@ def question_scope(name, args):
     # Reading another page or revising a draft can raise the same question about
     # intent. The actual tool arguments are always reviewed before dispatch.
     path = args.get("path")
-    if name in ("workspace_read", "workspace_write") and isinstance(path, str) and 0 < len(path) <= 512:
-        return f"{name}:{path}"
+    if isinstance(path, str) and 0 < len(path) <= 512:
+        if name in WORKSPACE_EDITS:
+            return f"workspace_write:{path}"
+        if name == "workspace_read":
+            return f"{name}:{path}"
     return f"{name}:{_fingerprint(args)}"
 
 
 def describe_action(name, args):
-    if name in ("workspace_read", "workspace_write") and isinstance(args.get("path"), str):
+    if isinstance(args.get("path"), str):
         path = args["path"][:512]
         if name == "workspace_write" and isinstance(args.get("text"), str):
             return f"Write {len(args['text']):,} characters to {path}"
+        if name == "workspace_append" and isinstance(args.get("text"), str):
+            return f"Append {len(args['text']):,} characters to {path}"
+        if name == "workspace_replace" and isinstance(args.get("find"), str) and isinstance(args.get("replace"), str):
+            return f"Replace {len(args['find']):,} characters with {len(args['replace']):,} characters in {path}"
         if name == "workspace_read":
             return f"Read {path} from offset {args.get('offset', 0)}"
     text = json.dumps(args, ensure_ascii=False, sort_keys=True)
@@ -193,6 +200,10 @@ def _review_excerpt(case):
         elif edit.get("status") != "create":
             excerpt += "\n\nThe host could not verify the saved revision."
         excerpt += "\n\nProposed text" + (" (ending)\n…" + draft[-700:] if len(draft) > 700 else "\n" + draft)
+    elif case["tool"] in WORKSPACE_EDITS:
+        arguments = {k: v for k, v in case["arguments"].items() if k in ("text", "find", "replace")}
+        requested = json.dumps(arguments, ensure_ascii=False)
+        excerpt += "\n\nRequested edit\n" + (requested if len(requested) <= 700 else requested[:699] + "…")
     if case["tool"] == OPEN_DRAFT and (draft := case.get("host_facts", {}).get("public_draft")):
         text = f"{draft['repository']} → {draft['base_branch']}\n{draft['title']}\n" + "\n".join(draft["paths"])
         excerpt += "\n\nPublic draft pull request\n" + text[:900]
@@ -524,14 +535,23 @@ class Supervisor:
         # and execution must all refer to exactly the same revision.
         resource_facts = {}
         resolution_error = None
-        if name == "workspace_write" and self.workspace_root is not None:
-            edit = workspace_edit_evidence(self.workspace_root, args)
+        equivalent_write = None
+
+        def remember_write(write_args):
+            # Only used to match durable rulings about the same file change.
+            # Reviewers and the executor receive the actual partial request.
+            nonlocal equivalent_write
+            equivalent_write = write_args
+
+        if name in WORKSPACE_EDITS and self.workspace_root is not None:
+            edit = workspace_edit_evidence(self.workspace_root, args, name=name, proposal_key=remember_write)
             resource_facts["workspace_edit"] = edit
-            if "expected_sha256" in args:
-                if edit.get("base_sha256"):
-                    args = {**args, "expected_sha256": edit["base_sha256"]}
-                else:
-                    resolution_error = edit["reason"]
+            if edit.get("base_sha256"):
+                args = {**args, "expected_sha256": edit["base_sha256"]}
+            elif edit["status"] == "unavailable":
+                resolution_error = edit["reason"]
+        elif name in ("workspace_append", "workspace_replace"):
+            resolution_error = "The host could not verify the workspace revision for this edit."
         if name == OPEN_DRAFT:
             document = None
             try:
@@ -544,10 +564,11 @@ class Supervisor:
             resource_facts["public_draft"] = document
             if document is not None:
                 args = {**args, "proposal_id": document["proposal_id"]}
+        proposal = ["workspace_write", equivalent_write] if equivalent_write is not None else [name, args]
         with database(self.path) as db:
             matching = concerns.list_open(db, self.thread, name)
             prior = db.execute("SELECT reason FROM action_refusals WHERE thread=? AND proposal=?",
-                               (self.thread, _fingerprint([name, args]))).fetchone()
+                               (self.thread, _fingerprint(proposal))).fetchone()
             ruling_facts = self._ruling_facts(db, name, args, rationale, matching, prior[0] if prior else None)
         room = self.operator_room
         facts = action_facts(name, args,
@@ -586,7 +607,7 @@ class Supervisor:
             return {"error": f"Provide a nonempty public rationale of at most {RATIONALE_LIMIT} characters for this action."}
         case = {"host_facts": facts, "tool": name, "arguments": args, "rationale": rationale,
                 "evidence": scan["evidence"], "summary": scan["summary"]}
-        held = self._adjudicate(call_id, case, scan["escalate"], skipped, feedback)
+        held = self._adjudicate(call_id, case, proposal, scan["escalate"], skipped, feedback)
         if held is not None:
             return held
         if name == CONSULT:
@@ -758,7 +779,7 @@ class Supervisor:
                           "tools": json.loads(row["final_tools"])}
             self._record_ruling(item, ruling)
 
-    def _adjudicate(self, call_id, case, flagged, skipped, feedback):
+    def _adjudicate(self, call_id, case, proposal, flagged, skipped, feedback):
         """Return a tool error for a held action, or None to proceed with its dispatch."""
         name, args = case["tool"], case["arguments"]
         room = self.operator_room
@@ -776,7 +797,7 @@ class Supervisor:
         if prior:
             # New operator statements can change the evidence after a refusal.
             # Merely rephrasing the public rationale leaves this fingerprint unchanged.
-            fingerprint_parts = [name, args, [s["event_id"] for s in case["operator_statements"]]]
+            fingerprint_parts = [*proposal, [s["event_id"] for s in case["operator_statements"]]]
             releases = case["host_facts"]["concern_releases"]
             if releases:
                 fingerprint_parts.append([r["receipt_event_id"] for r in releases])
@@ -786,7 +807,7 @@ class Supervisor:
                         "judgment": prior["final_reason"]}
             case["operator_attestation" if needs_final else "prior_operator_attestation"] = _attestation(prior)
         with database(self.path) as db:
-            proposal_key = _fingerprint([name, args])
+            proposal_key = _fingerprint(proposal)
             refusal = db.execute("SELECT reason FROM action_refusals WHERE thread=? AND proposal=?",
                                  (self.thread, proposal_key)).fetchone()
             incomplete = db.execute("SELECT call_id,code,concern_id FROM incomplete_action_reviews "
@@ -857,7 +878,7 @@ class Supervisor:
         for item, ruling in zip(findings, rulings, strict=True):
             if ruling["decision"] == "ask_operator":
                 question = self._concern_question(item, ruling["reason"])
-                if name in ruling["tools"] or "*" in ruling["tools"]:
+                if concerns.scope_matches(name, ruling["tools"]):
                     concern_hold = self._concern_hold(question)
         if verdict["decision"] == "deny":
             self._event("opus_denied", name, call_id)
@@ -925,7 +946,7 @@ class Supervisor:
                            (self.thread, proposal, call_id, "pending_operator_question"))
                 return
             for ruling in rulings:
-                if ruling["decision"] == "ask_operator" and ("*" in ruling["tools"] or name in ruling["tools"]):
+                if ruling["decision"] == "ask_operator" and concerns.scope_matches(name, ruling["tools"]):
                     db.execute("INSERT OR REPLACE INTO incomplete_action_reviews VALUES(?,?,?,?,?)",
                                (self.thread, proposal, call_id, "pending_concern_question", ruling["id"]))
                     return

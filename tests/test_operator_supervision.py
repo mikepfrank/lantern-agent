@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -70,13 +71,17 @@ class OperatorSupervisionTests(unittest.TestCase):
             ("mixed", large_old + "\nstable line\nold", large_new + "\nstable line\nnew",
              ["Some changes were omitted", '"added": "new"']),
             ("omitted", large_old, large_new, ["changes exceed the preview limit", "Proposed text (ending)"]),
-            ("unverified", "private baseline", "short draft", ["could not verify the saved revision", "Proposed text\nshort draft"]),
+            ("unverified", b"private baseline\xff", "short draft", ["could not verify the saved revision", "Proposed text\nshort draft"]),
             ("clipped", "", "A" * 900, ["displayed text is truncated", "…"]),
         ]
         for path, original, draft, expected in cases:
             with self.subTest(path=path):
-                saved = workspace_tool(self.gate.workspace_root, "workspace_write", {"path": path, "text": original})
-                digest = "0" * 64 if path == "unverified" else saved["sha256"]
+                if isinstance(original, bytes):
+                    (self.gate.workspace_root / path).write_bytes(original)
+                    digest = hashlib.sha256(original).hexdigest()
+                else:
+                    saved = workspace_tool(self.gate.workspace_root, "workspace_write", {"path": path, "text": original})
+                    digest = saved["sha256"]
                 result = self.gate.dispatch(path, "workspace_write", {
                     "path": path, "text": draft, "expected_sha256": digest, "rationale": "Update the file."
                 }, self.execute)

@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from lantern.workspace import MAX_TEXT, workspace_tool
+from lantern.workspace import MAX_BYTES, MAX_TEXT, workspace_tool
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -72,6 +72,47 @@ class WorkspaceTests(unittest.TestCase):
         top = self.call("list", path=".")["entries"]
         self.assertEqual(top, [{"name": "notes", "directory": True, "size_bytes": None}])
 
+    def test_targeted_edits_preserve_utf8_line_endings_and_can_delete(self):
+        original = "\ufeffStart\r\nrepeat\nrepeat\r\nlast 🕯"
+        version = self.call("write", path="note", text=original)
+        saved = self.call("append", path="note", text=" next\n", expected_suffix="last 🕯",
+                          expected_sha256=version["sha256_prefix"])
+        self.assertEqual((self.root / "note").read_bytes(), (original + " next\n").encode())
+        self.assertIn("error", self.call("append", path="note", text="again", expected_suffix="last 🕯"))
+        self.assertIn("error", self.call("append", path="note", text="again", expected_sha256=version["sha256"]))
+        self.call("replace", path="note", find="\nrepeat\r\n", replace="\nnew\r\n", expected_sha256=saved["sha256"])
+        self.call("replace", path="note", find=" 🕯", replace="")
+        self.assertEqual((self.root / "note").read_bytes(), "\ufeffStart\r\nrepeat\nnew\r\nlast next\n".encode())
+
+    def test_reject_missing_ambiguous_overlapping_or_empty_match(self):
+        self.call("write", path="note", text="aaaa")
+        for find in ("z", "aa", "aaa"):
+            with self.subTest(find=find):
+                self.assertIn("error", self.call("replace", path="note", find=find, replace="new"))
+        with self.assertRaises(ValueError):
+            self.call("replace", path="note", find="", replace="new")
+        with self.assertRaises(ValueError):
+            self.call("append", path="note", expected_suffix="", text="new")
+        self.assertEqual((self.root / "note").read_bytes(), b"aaaa")
+        for path in ("absent", "missing/note"):
+            for tool, change in (("append", {"text": "x"}), ("replace", {"find": "x", "replace": ""})):
+                self.assertIn("error", self.call(tool, path=path, **change))
+        self.assertEqual([p.name for p in self.root.iterdir()], ["note"])
+
+    def test_edits_bound_total_bytes_and_require_valid_utf8(self):
+        file = self.root / "log"
+        file.write_bytes(b"Z" + b"A" * (MAX_BYTES - 5))
+        self.call("append", path="log", text="🕯")
+        full = file.read_bytes()
+        self.assertEqual(len(full), MAX_BYTES)
+        self.assertIn("error", self.call("append", path="log", text="X"))
+        self.assertIn("error", self.call("replace", path="log", find="Z", replace="ZZ"))
+        self.assertEqual(file.read_bytes(), full)
+        file.write_bytes(b"Z\xff")
+        self.assertIn("error", self.call("append", path="log", text="X"))
+        self.assertIn("error", self.call("replace", path="log", find="Z", replace="X"))
+        self.assertEqual(file.read_bytes(), b"Z\xff")
+
     def test_reject_traversal_device_names_and_invalid_inputs(self):
         for path in ("../private.txt", "/a", "a/../x", r"..\x", "a:stream", "aux.txt", "foo/CON", "a//b",
                      "NUL", "./x", "dir./x", ".lantern-tmp-0", "x\0"):
@@ -94,7 +135,8 @@ class WorkspaceTests(unittest.TestCase):
             if os.name == "nt":
                 self.skipTest("The Windows sandbox disallows creating hard links.")
             raise
-        for operation, args in (("read", {}), ("write", {"text": "changed"})):
+        for operation, args in (("read", {}), ("write", {"text": "changed"}), ("append", {"text": "extra"}),
+                                ("replace", {"find": "private", "replace": "new"})):
             with self.subTest(operation=operation), self.assertRaises(ValueError):
                 self.call(operation, path="link", **args)
         listed = {e["name"]: e["size_bytes"] for e in self.call("list", path=".")["entries"]}

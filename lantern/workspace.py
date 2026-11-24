@@ -18,6 +18,9 @@ PATH = {"type": "string", "maxLength": 512, "description": "Relative path, using
 OFFSET = {"type": "integer", "minimum": 0, "default": 0}
 SHA = {"type": "string", "pattern": DIGEST_PREFIX_PATTERN,
        "description": f"SHA-256 of the current file, or its first {MIN_DIGEST_PREFIX} or more hex characters."}
+TEXT = {"type": "string", "maxLength": MAX_TEXT}
+NONEMPTY_TEXT = {**TEXT, "minLength": 1}
+WORKSPACE_EDITS = frozenset(("workspace_write", "workspace_append", "workspace_replace"))
 
 
 def _tool(name, description, properties, required):
@@ -35,8 +38,16 @@ WORKSPACE_TOOLS = (
     _tool("workspace_write", "Save a complete UTF-8 note or source file. Parent directories are created "
           "as needed. To replace a file, copy its sha256_prefix from workspace_read into expected_sha256. "
           "Without expected_sha256 this call only creates a new file.",
-          {"path": PATH, "text": {"type": "string", "maxLength": MAX_TEXT}, "expected_sha256": SHA},
+          {"path": PATH, "text": TEXT, "expected_sha256": SHA},
           ["path", "text"]),
+    _tool("workspace_append", "Append text verbatim to an existing UTF-8 workspace file. Include any desired "
+          "newlines. Optionally supply the exact current ending as expected_suffix or its sha256_prefix as "
+          "expected_sha256 to check the revision.",
+          {"path": PATH, "text": TEXT, "expected_suffix": NONEMPTY_TEXT, "expected_sha256": SHA}, ["path", "text"]),
+    _tool("workspace_replace", "Replace one exact occurrence of find in an existing UTF-8 workspace file. "
+          "Supply enough surrounding text to make the match unique. An empty replace value deletes the match. "
+          "Optionally supply the file's sha256_prefix as expected_sha256.",
+          {"path": PATH, "find": NONEMPTY_TEXT, "replace": TEXT, "expected_sha256": SHA}, ["path", "find", "replace"]),
 )
 
 
@@ -166,17 +177,45 @@ def _read(parent, name):
     return data
 
 
-def _write_base(parent, name, expected):
+class _EditConflict(ValueError):
+    """A host-generated precondition error that can be returned to Lantern."""
+
+
+def _prepare_edit(parent, filename, tool, arguments, expected):
     try:
-        original = _read(parent, name) if parent is not None else None
+        original = _read(parent, filename) if parent is not None else None
     except FileNotFoundError:
         original = None
-    if original is not None and expected is None:
-        return None, None, "File exists. Use workspace_read and supply its sha256_prefix to replace it."
     digest = hashlib.sha256(original).hexdigest() if original is not None else None
     if expected is not None and (digest is None or not digest.startswith(expected)):
-        return None, None, "The SHA-256 does not match the current file or the file is missing. Read it again before saving."
-    return original, digest, None
+        raise _EditConflict("The SHA-256 does not match the current file or the file is missing. Read it again before saving.")
+    if tool == "workspace_write":
+        if original is not None and expected is None:
+            raise _EditConflict("File exists. Use workspace_read and supply its sha256_prefix to replace it.")
+        return original, digest, arguments["text"].encode("utf-8")
+
+    if original is None:
+        raise _EditConflict("This edit requires an existing workspace file.")
+    try:
+        old = original.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _EditConflict("This edit requires a valid UTF-8 workspace file.") from None
+    if tool == "workspace_append":
+        if "expected_suffix" in arguments and not old.endswith(arguments["expected_suffix"]):
+            raise _EditConflict("The file does not end with expected_suffix. Read the current ending and retry.")
+        new = old + arguments["text"]
+    else:
+        find = arguments["find"]
+        index = old.find(find)
+        if index == -1:
+            raise _EditConflict("The find text does not occur in this file. Read the current text and retry.")
+        if old.find(find, index + 1) != -1:
+            raise _EditConflict("The find text occurs more than once. Include enough surrounding text for a unique match.")
+        new = old[:index] + arguments["replace"] + old[index + len(find):]
+    data = new.encode("utf-8")
+    if len(data) > MAX_BYTES:
+        raise _EditConflict(f"The edit would exceed the workspace file limit of {MAX_BYTES} bytes.")
+    return original, digest, data
 
 
 def _file_revision(data):
@@ -184,10 +223,7 @@ def _file_revision(data):
     return {"sha256": digest, "sha256_prefix": digest[:MIN_DIGEST_PREFIX], "size_bytes": len(data)}
 
 
-def _write(parent, name, data, expected):
-    original, _, error = _write_base(parent, name, expected)
-    if error:
-        return {"error": error}
+def _write(parent, name, data, *, replacing):
     temp, kwargs = _at(parent, TMP_PREFIX + secrets.token_hex(16))
     target, _ = _at(parent, name)
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
@@ -198,7 +234,7 @@ def _write(parent, name, data, expected):
             output.write(data)
             output.flush()
             os.fsync(output.fileno())
-        if original is not None:
+        if replacing:
             os.replace(temp, target, **directories)
         elif os.name == "nt":
             os.rename(temp, target)  # Windows fails if destination already exists.
@@ -228,27 +264,36 @@ def _checked_parts(name, arguments):
     return _parts(arguments.get("path", "."), allow_root=name == "workspace_list")
 
 
-def _write_values(arguments):
-    text = arguments["text"]
-    if not isinstance(text, str) or len(text) > MAX_TEXT:
-        raise ValueError("The text exceeds the workspace write limit.")
-    expected = normalize_digest_prefix(arguments["expected_sha256"]) if "expected_sha256" in arguments else None
-    return text.encode("utf-8"), expected
+def _check_edit_values(arguments):
+    for field in ("text", "expected_suffix", "find", "replace"):
+        if field not in arguments:
+            continue
+        value = arguments[field]
+        if not isinstance(value, str) or len(value) > MAX_TEXT:
+            raise ValueError(f"Supply {field} as a string of up to {MAX_TEXT} characters.")
+        if field in ("expected_suffix", "find") and not value:
+            raise ValueError(f"Supply nonempty {field} text.")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError(f"Supply valid UTF-8 text for {field}.") from None
+    return normalize_digest_prefix(arguments["expected_sha256"]) if "expected_sha256" in arguments else None
 
 
-def workspace_edit_evidence(directory: Path, arguments: dict) -> dict:
+def workspace_edit_evidence(directory: Path, arguments: dict, name: str = "workspace_write", *, proposal_key=None) -> dict:
     """Identify the full base digest for review and for the executor's revision check."""
     try:
-        parts = _checked_parts("workspace_write", arguments)
+        if name not in WORKSPACE_EDITS:
+            raise ValueError("Unknown workspace edit.")
+        parts = _checked_parts(name, arguments)
         try:
-            data, expected = _write_values(arguments)
+            expected = _check_edit_values(arguments)
         except ValueError as exc:
-            reason = "Supply valid UTF-8 text." if isinstance(exc, UnicodeError) else str(exc)
-            return {"status": "unavailable", "complete": False, "reason": reason}
+            return {"status": "unavailable", "complete": False, "reason": str(exc)}
         with _parent(directory, parts[:-1], preview=True) as parent:
-            original, base_digest, error = _write_base(parent, parts[-1], expected)
-        if error:
-            return {"status": "unavailable", "complete": False, "reason": error}
+            original, base_digest, data = _prepare_edit(parent, parts[-1], name, arguments, expected)
+    except _EditConflict as exc:
+        return {"status": "unavailable", "complete": False, "reason": str(exc)}
     except (OSError, ValueError, RuntimeError):
         return {"status": "unavailable", "complete": False,
                 "reason": "Could not verify a safe UTF-8 workspace revision for this proposal."}
@@ -257,7 +302,14 @@ def workspace_edit_evidence(directory: Path, arguments: dict) -> dict:
     except UnicodeDecodeError:
         return {"status": "unavailable", "complete": False, "base_sha256": base_digest,
                 "reason": "The verified base revision is not UTF-8. No text comparison is available."}
-    summary = edit_summary(old, arguments["text"])
+    new = data.decode("utf-8")
+    if proposal_key is not None and name != "workspace_write":
+        # Old denials may identify the equivalent whole-file proposal. The
+        # supervisor can fingerprint it locally without sending the old file.
+        proposal_key({"path": arguments["path"], "text": new, "expected_sha256": base_digest})
+    summary = edit_summary(old, new)
+    if not summary["complete"] and name != "workspace_write":
+        summary["reason"] = "Edit exceeds the review excerpt limit. The tool arguments contain the requested edit."
     summary["base_sha256"] = base_digest
     summary["proposed_sha256"] = hashlib.sha256(data).hexdigest()
     return summary
@@ -268,8 +320,8 @@ def workspace_tool(directory: Path, name: str, arguments: dict) -> dict:
     parts = _checked_parts(name, arguments)
     listing = name == "workspace_list"
     path = "/".join(parts) or "."
-    if name == "workspace_write":
-        data, expected = _write_values(arguments)
+    if name in WORKSPACE_EDITS:
+        expected = _check_edit_values(arguments)
     else:
         offset = _integer(arguments, "offset", 0, 0)
         limit = _integer(arguments, "limit", 30, 1, 100) if listing else _integer(arguments, "length", 2400, 1, 8000)
@@ -291,14 +343,17 @@ def workspace_tool(directory: Path, name: str, arguments: dict) -> dict:
                     item["size_bytes"] = info.st_size if info is not None and _plain_file(info) else None
                     page.append(item)
                 return {"path": path, "entries": page, "next_offset": offset + limit if offset + limit < len(kept) else None}
-            if name == "workspace_write":
-                return {"path": path, **_write(parent, parts[-1], data, expected)}
+            if name in WORKSPACE_EDITS:
+                original, _, data = _prepare_edit(parent, parts[-1], name, arguments, expected)
+                return {"path": path, **_write(parent, parts[-1], data, replacing=original is not None)}
             raw = _read(parent, parts[-1])
             content = raw.decode("utf-8")
             if offset > len(content):
                 raise ValueError("Offset is past the end of the workspace file.")
             return {"path": path, "text": content[offset:offset + limit], **_file_revision(raw),
                     "next_offset": offset + limit if offset + limit < len(content) else None}
+    except _EditConflict as exc:
+        return {"path": path, "error": str(exc)}
     except FileNotFoundError:
         return {"path": path, "error": "Workspace file or directory does not exist."}
     except (OSError, UnicodeError) as exc:

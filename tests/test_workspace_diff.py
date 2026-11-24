@@ -136,3 +136,33 @@ class WorkspaceDiffTests(unittest.TestCase):
                                 "expected_sha256": evidence["base_sha256"]})
         self.assertIn("error", result)
         self.assertEqual((self.root / "note").read_bytes(), b"newer")
+
+    def test_targeted_edit_preview_is_bound_to_materialized_content(self):
+        base = "old private ledger\r\nchess 15"
+        file = self.root / "note"
+        file.write_bytes(base.encode())
+        digest = hashlib.sha256(base.encode()).hexdigest()
+        for tool, args, edited in (("workspace_append", {"text": "\r\nend"}, base + "\r\nend"),
+                                   ("workspace_replace", {"find": "15", "replace": "16"}, base[:-2] + "16")):
+            with self.subTest(tool=tool):
+                equivalent = []
+                evidence = workspace_edit_evidence(self.root, {"path": "note", **args}, tool,
+                                                   proposal_key=equivalent.append)
+                self.assertEqual(evidence["base_sha256"], digest)
+                self.assertEqual(evidence["proposed_sha256"], hashlib.sha256(edited.encode()).hexdigest())
+                self.assertEqual(equivalent, [{"path": "note", "text": edited, "expected_sha256": digest}])
+                self.assertNotIn("private ledger", json.dumps(evidence))
+                self.assertEqual(file.read_bytes(), base.encode())
+                file.write_bytes((base + " concurrent edit").encode())
+                rejected = workspace_tool(self.root, tool, {"path": "note", **args, "expected_sha256": digest})
+                self.assertIn("error", rejected)
+                file.write_bytes(base.encode())
+
+        invalid = workspace_edit_evidence(self.root, {"path": "note", "find": "absent", "replace": "no"},
+                                          "workspace_replace", proposal_key=lambda _: self.fail("invalid preview"))
+        self.assertEqual(invalid["status"], "unavailable")
+        self.assertNotIn("base_sha256", invalid)
+        large = workspace_edit_evidence(self.root, {"path": "note", "find": "chess", "replace": "z" * 8000},
+                                        "workspace_replace")
+        self.assertFalse(large["complete"])
+        self.assertNotIn("arguments.text", large["reason"])

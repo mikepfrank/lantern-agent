@@ -239,10 +239,11 @@ class TransportTests(unittest.TestCase):
                 self.assertEqual("unsupported provider message content", gate.evidence[-1]["error"])
 
     def test_handoff_reminder_is_a_reviewed_instruction_on_write_capable_requests(self):
-        write_tool = {**CHESS, "name": "workspace_write"}
-        declared = [{"type": "function", "name": tool["name"]} for tool in [CHESS, write_tool]]
+        edit_tools = [{**CHESS, "name": name} for name in ("workspace_write", "workspace_append", "workspace_replace")]
+        tools = [CHESS, *edit_tools]
+        declared = [{"type": "function", "name": tool["name"]} for tool in tools]
         due = Mock(return_value=True)
-        with self.gateway("fastest", tools=[CHESS, write_tool], handoff_due=due, finish=Mock(),
+        with self.gateway("fastest", tools=tools, handoff_due=due, finish=Mock(),
                           operator_context="Authenticated private operator.") as gate:
             def send(tools, choice="auto"):
                 self.assertEqual(self.request(gate, tools=tools, tool_choice=choice,
@@ -260,6 +261,8 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(gate.evidence[-1]["handoff_event"], "tool_free")
             self.assertNotIn("notes/handoff.md", send(declared, "none"))
             self.assertNotIn("notes/handoff.md", send(declared, {"type": "function", "name": "chess"}))
+            for tool in edit_tools:
+                self.assertIn("notes/handoff.md", send(declared, {"type": "function", "name": tool["name"]}))
             due.return_value = False
             self.assertNotIn("notes/handoff.md", send(declared))
 
