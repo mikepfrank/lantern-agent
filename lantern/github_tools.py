@@ -6,6 +6,8 @@ import re
 import socket
 import time
 
+from .digest_prefix import DIGEST_PREFIX_PATTERN, MIN_DIGEST_PREFIX, normalize_digest_prefix
+
 
 REPOSITORY = "mikepfrank/lantern-agent"
 OPEN_DRAFT = "github_open_draft"
@@ -13,6 +15,10 @@ PATCH_LIMIT = 12 * 1024
 FRAME_LIMIT = 128 * 1024
 COMMIT_PATTERN = "[0-9a-f]{40}"
 PROPOSAL_PATTERN = "[0-9a-f]{64}"
+
+
+class ProposalLookupError(ValueError):
+    """The agent can correct its frozen-proposal selector and try again."""
 
 
 def _tool(name, description, properties):
@@ -33,9 +39,10 @@ GITHUB_TOOLS = (
           {"commit": {"type": "string", "pattern": "^" + COMMIT_PATTERN + "$"}}),
     _tool(OPEN_DRAFT,
           "Publish the exact frozen preview as a public draft pull request for Mike's review in "
-          + REPOSITORY + ". Supply its proposal_id. The tool can create a proposal branch and draft PR. "
+          + REPOSITORY + f". Supply proposal_id_prefix from github_preview, or any unique "
+          f"{MIN_DIGEST_PREFIX}–64 hex digits starting the proposal ID. The tool can create a proposal branch and draft PR. "
           "Mike controls merge and deployment. Keep private material out of the entire public patch.",
-          {"proposal_id": {"type": "string", "pattern": "^" + PROPOSAL_PATTERN + "$"}}),
+          {"proposal_id": {"type": "string", "pattern": DIGEST_PREFIX_PATTERN}}),
 )
 
 
@@ -80,13 +87,13 @@ def _call(socket_path, op, args):
     return {"error": "The GitHub broker is unavailable or returned an unreadable reply."}
 
 
-def _frozen(result, *, proposal_id=None, commit=None):
+def _frozen(result, *, prefix=None, commit=None):
     """Accept only a complete public preview with the content-addressed ID reported to Lantern."""
     document = dict(result)
     returned_id = document.pop("proposal_id", None)
     if (set(document) != {"repository", "base_branch", "base", "source_commit", "title", "body", "paths", "patch"}
             or not _hex(returned_id, PROPOSAL_PATTERN)
-            or (proposal_id is not None and returned_id != proposal_id)
+            or (prefix is not None and not returned_id.startswith(prefix))
             or (commit is not None and document["source_commit"] != commit)
             or document["repository"] != REPOSITORY or document["base_branch"] != "main"
             or not _hex(document["source_commit"], COMMIT_PATTERN) or not _hex(document["base"], COMMIT_PATTERN)
@@ -103,9 +110,18 @@ def _frozen(result, *, proposal_id=None, commit=None):
 
 
 def draft_evidence(socket_path, args):
-    if set(args) != {"proposal_id"} or not _hex(args["proposal_id"], PROPOSAL_PATTERN):
-        raise ValueError("Supply the full proposal ID from github_preview.")
-    return _frozen(_call(socket_path, "evidence", args), proposal_id=args["proposal_id"])
+    if set(args) != {"proposal_id"}:
+        raise ProposalLookupError("Supply the proposal ID from github_preview.")
+    try:
+        prefix = normalize_digest_prefix(args["proposal_id"])
+    except ValueError as exc:
+        raise ProposalLookupError(str(exc)) from exc
+    result = _call(socket_path, "evidence", {"proposal_id": prefix})
+    if result.get("lookup_error") == "ambiguous":
+        raise ProposalLookupError("That prefix matches multiple frozen proposals. Supply more digits from github_preview.")
+    if result.get("lookup_error") == "missing":
+        raise ProposalLookupError("No frozen proposal matches that ID. Use the proposal_id_prefix from github_preview.")
+    return _frozen(result, prefix=prefix)
 
 
 def github_tool(socket_path, name, args):
@@ -116,7 +132,8 @@ def github_tool(socket_path, name, args):
         if set(result) == {"error"}:
             return result
         try:
-            return _frozen(result, commit=args["commit"])
+            preview = _frozen(result, commit=args["commit"])
+            return {**preview, "proposal_id_prefix": preview["proposal_id"][:MIN_DIGEST_PREFIX]}
         except ValueError:
             return {"error": "The broker did not return a complete, verified preview. Prepare a fresh preview."}
     if name == OPEN_DRAFT and set(args) == {"proposal_id"} and _hex(args["proposal_id"], PROPOSAL_PATTERN):

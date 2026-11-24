@@ -134,7 +134,9 @@ def run_flow(request):
     field = operations[op]
     if set(request) != ({"op", field} if field else {"op"}):
         raise ValueError("Unexpected GitHub tool arguments.")
-    if field and (not isinstance(request[field], str) or not re.fullmatch(
+    # The read-only evidence operation resolves prefixes. Publication always
+    # receives the full SHA-256 from that immutable, verified evidence.
+    if field and op != "evidence" and (not isinstance(request[field], str) or not re.fullmatch(
             r"[0-9a-f]{40}" if field == "commit" else r"[0-9a-f]{64}", request[field])):
         raise ValueError("Invalid GitHub tool identifier.")
     token = None

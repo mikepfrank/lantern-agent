@@ -98,7 +98,7 @@ Each new concern from a context scan gets a permanent ID and goes to Opus immedi
 
 When a tool proposal names a concern, the host supplies its latest ruling to Luna and to Opus on referral. Private review updates and consultations can also include recent decisions from the same conversation. If Opus judged a tool call and a concern together, new records identify both decisions and the exact call. Older records can show the two facts separately. A past allowance applies only to the call it covered.
 
-For a workspace write, reviewers see the complete proposed text. When the supplied SHA-256 matches the saved file, the host also shows what the edit adds and removes. A new file is marked as entirely new. If the revision cannot be verified or some changes exceed the excerpt limit, the packet says so. The write checks the revision again before saving.
+For a workspace replacement, Lantern can copy the 12-character `sha256_prefix` from `workspace_read` into `expected_sha256`. Longer prefixes and full SHA-256 digests also work. The host resolves the prefix against the current file at that path. Reviewers see the full digest, the proposed text, and what the edit adds and removes. The write checks the full digest again before saving. New files are marked as entirely new, and the packet identifies any edits that exceed its excerpt limit.
 
 When a proposal or review cites a numbered concern, the host looks up the incident in the same conversation. Reviewers can compare its original screening summary, the cited ruling and its tool scope, and its current status. Unknown numbers and versions are marked explicitly. An authenticated operator release is labeled separately, including when the operator confirmed an earlier reviewer decision.
 

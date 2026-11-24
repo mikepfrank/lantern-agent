@@ -13,6 +13,8 @@ import subprocess
 from tempfile import TemporaryDirectory
 from urllib.parse import urlencode
 
+from .digest_prefix import normalize_digest_prefix
+
 
 REPO = "mikepfrank/lantern-agent"
 GIT_URL = f"https://github.com/{REPO}.git"
@@ -234,6 +236,19 @@ class GitHubFlow:
         return {"proposal_id": identity, **data}, created.astimezone(timezone.utc).isoformat()
 
     def evidence(self, identity):
+        prefix = normalize_digest_prefix(identity)
+        if len(prefix) == 64:
+            if not (self.state / f"{prefix}.json").is_file():
+                return {"lookup_error": "missing"}
+            return self._record(prefix)[0]
+        # Only broker-owned frozen previews participate in name resolution.
+        matches = (p.stem for p in self.state.glob(f"{prefix}*.json")
+                   if PROPOSAL_ID.fullmatch(p.stem) and p.is_file())
+        identity = next(matches, None)
+        if identity is None:
+            return {"lookup_error": "missing"}
+        if next(matches, None) is not None:
+            return {"lookup_error": "ambiguous"}
         return self._record(identity)[0]
 
     def _request(self, method, path, payload=None):

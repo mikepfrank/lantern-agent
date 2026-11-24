@@ -46,6 +46,24 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(self.call("list", path="a")["entries"],
                          [{"name": "k", "directory": False, "size_bytes": 0}])
 
+    def test_copy_read_prefix_to_replace_and_reject_inexact_or_stale_prefixes(self):
+        path = "note"
+        saved = self.call("write", path=path, text="multiple pages")
+        read = self.call("read", path=path, offset=3, length=2)
+        self.assertEqual(read["sha256_prefix"], saved["sha256"][:12])
+        self.assertEqual(saved["sha256_prefix"], read["sha256_prefix"])
+        for invalid in (read["sha256"][:11], "g" * 12, " " + read["sha256_prefix"], read["sha256"] + "0"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.call("write", path=path, text="invalid", expected_sha256=invalid)
+        wrong_suffix = read["sha256_prefix"] + ("0" if read["sha256"][12] != "0" else "1")
+        self.assertIn("error", self.call("write", path=path, text="invalid", expected_sha256=wrong_suffix))
+        updated = self.call("write", path=path, text="new", expected_sha256=read["sha256_prefix"].upper())
+        self.assertEqual(updated["sha256_prefix"], updated["sha256"][:12])
+        self.assertIn("error", self.call("write", path=path, text="stale", expected_sha256=read["sha256_prefix"]))
+        self.assertIn("error", self.call("write", path="absent", text="stale", expected_sha256=read["sha256_prefix"]))
+        self.assertFalse((self.root / "absent").exists())
+        self.assertEqual(self.call("read", path=path)["text"], "new")
+
     def test_listing_reports_file_sizes(self):
         self.call("write", path="notes/big.md", text="\U0001F56F" * 100)
         self.call("write", path="notes/empty.md", text="")
@@ -109,7 +127,7 @@ class WorkspaceTests(unittest.TestCase):
     def test_concurrent_edits_can_commit_only_one_revision(self):
         initial = self.call("write", path="note", text="original")
         with ThreadPoolExecutor(max_workers=2) as pool:
-            changes = [pool.submit(self.call, "write", path="note", text=value, expected_sha256=initial["sha256"])
+            changes = [pool.submit(self.call, "write", path="note", text=value, expected_sha256=initial["sha256_prefix"])
                        for value in ("first", "second")]
             results = [call.result() for call in changes]
         self.assertEqual(sum("sha256" in result for result in results), 1)

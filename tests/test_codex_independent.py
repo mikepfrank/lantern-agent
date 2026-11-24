@@ -80,7 +80,7 @@ class NativeIndependentWorker(unittest.TestCase):
                         "rationale": "Check the recorded outcome of my earlier heartbeat."})}
             elif serial in (8, 9):
                 name, args = (("github_preview", {"commit": proposal["source_commit"]}) if serial == 8 else
-                              ("github_open_draft", {"proposal_id": proposal["proposal_id"]}))
+                              ("github_open_draft", {"proposal_id": proposal["proposal_id"][:12]}))
                 item = {"type": "function_call", "id": f"fc_{serial}", "call_id": f"call_{serial}",
                         "status": "completed", "name": name,
                         "arguments": json.dumps({**args, "rationale": "Propose the fixture change for review."})}
@@ -180,7 +180,10 @@ class NativeIndependentWorker(unittest.TestCase):
                     gh_calls.append(op)
                     if op == "open_draft":
                         self.assertEqual(reviews[-1][0], "github_open_draft")
+                        self.assertEqual(args, {"proposal_id": proposal["proposal_id"]})
                         return {"proposal_id": proposal["proposal_id"], "draft": True}
+                    if op == "evidence":
+                        self.assertEqual(args, {"proposal_id": proposal["proposal_id"][:12]})
                     return proposal
 
                 with patch("lantern.coding_tools.run_code", side_effect=reviewed_run) as runner, \
@@ -233,7 +236,8 @@ class NativeIndependentWorker(unittest.TestCase):
                 self.assertIn(content, history)
         outputs = {item["call_id"]: json.dumps(item["output"]) for item in requests[-1]["input"]
                    if item.get("type") == "function_call_output"}
-        self.assertIn("sha256", outputs["call_2"])
+        self.assertIn("sha256_prefix", outputs["call_2"])
+        self.assertIn("sha256_prefix", outputs["call_3"])
         self.assertIn(note, outputs["call_3"])
         self.assertIn("seconds_until_reset", outputs["call_4"])
         self.assertIn("reserved_usd", outputs["call_4"])

@@ -29,7 +29,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 with ZipFile(sys.argv[2], "x", ZIP_DEFLATED) as app:
     app.writestr("__main__.py", "import sys\nfrom lantern.github_broker import main\nmain(sys.argv[1])\n")
     app.writestr("lantern/__init__.py", "")
-    for name in ("github_broker", "github_flow", "coding_broker"):
+    for name in ("github_broker", "github_flow", "coding_broker", "digest_prefix"):
         app.write(Path(sys.argv[1]) / (name + ".py"), f"lantern/{name}.py")
 PY
     install -m 0644 "$src/lantern/git_workspace.py" "$stage/app/git_workspace.py"

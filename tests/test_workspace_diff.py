@@ -88,6 +88,12 @@ class WorkspaceDiffTests(unittest.TestCase):
             result = self.preview("new", invalid)
             self.assertEqual(result["status"], "unavailable")
             self.assertNotIn(private, str(result))
+        self.assertIn("12", self.preview("new", expected_sha256="deadbeef")["reason"])
+        binary = b"\xff\xfe"
+        digest = hashlib.sha256(binary).hexdigest()
+        (self.root / "note").write_bytes(binary)
+        evidence = self.preview("new", expected_sha256=digest[:12])
+        self.assertEqual((evidence["status"], evidence["base_sha256"]), ("unavailable", digest))
 
     def test_preview_never_opens_hardlinked_file_even_with_correct_digest(self):
         private = self.temp / "private"
@@ -120,7 +126,11 @@ class WorkspaceDiffTests(unittest.TestCase):
         self.assertFalse((self.temp / "new").exists())
 
     def test_executor_rechecks_the_approved_revision(self):
-        evidence = self.preview("proposed", "first")
+        original = b"first"
+        digest = hashlib.sha256(original).hexdigest()
+        (self.root / "note").write_bytes(original)
+        evidence = self.preview("proposed", expected_sha256=digest[:16].upper())
+        self.assertEqual(evidence["base_sha256"], digest)
         (self.root / "note").write_bytes(b"newer")
         result = workspace_tool(self.root, "workspace_write", {"path": "note", "text": "proposed",
                                 "expected_sha256": evidence["base_sha256"]})

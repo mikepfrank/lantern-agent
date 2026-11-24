@@ -67,9 +67,10 @@ class ReviewEvidenceFlow(unittest.TestCase):
     def review(self, case):
         return opus.review(self.judge, case, observer=self.observations.append)
 
-    def propose(self, call_id, note, *, reason="Append to the private reading log."):
+    def propose(self, call_id, note, *, reason="Append to the private reading log.", digest=None):
         return self.gate.dispatch(call_id, "workspace_write", {
-            "path": self.path, "text": note, "expected_sha256": self.sha, "rationale": reason}, self.execute)
+            "path": self.path, "text": note, "expected_sha256": self.sha if digest is None else digest,
+            "rationale": reason}, self.execute)
 
     def retire_fixture_watches(self):
         with database(self.gate.path) as db:
@@ -138,7 +139,7 @@ class ReviewEvidenceFlow(unittest.TestCase):
         self.assertFalse(initial_facts.get("concern_citations"))
         self.flag = ""
         self.xml = '<review decision="deny">The proposed addition still contains the protected quotation.</review>'
-        retry = self.propose("retry-quoted", candidate)
+        retry = self.propose("retry-quoted", candidate, digest=self.sha[:12].upper())
         self.assertIn("denied", retry["error"])
         self.assertEqual(len(self.opus_packets), 2)
         for packet in (self.luna_packets[-1], self.opus_packets[-1]):
@@ -197,11 +198,28 @@ class ReviewEvidenceFlow(unittest.TestCase):
             return self.review(case)
 
         self.gate.review = change_while_reviewing
-        result = self.propose("race", self.original + "An ordinary addition.\n")
+        self.execute = Mock(wraps=self.execute)
+        result = self.propose("race", self.original + "An ordinary addition.\n", digest=self.sha[:12])
         self.assertIn("error", result)
         self.assertEqual((self.files / self.path).read_bytes(), concurrent.encode())
         review, = self.opus_packets
         self.assertEqual(review["host_facts"]["workspace_edit"]["base_sha256"], self.sha)
+        self.assertEqual(self.execute.call_args.args[1]["expected_sha256"], self.sha)
+
+    def test_unresolved_prefix_cannot_run_if_the_matching_file_appears_during_screening(self):
+        self.gate.observe({"input": "Update the note."})
+        (self.files / self.path).unlink()
+        screen = self.gate._screen
+
+        def restore_while_screening(packet):
+            (self.files / self.path).write_bytes(self.original.encode())
+            return screen(packet)
+
+        self.gate._screen = restore_while_screening
+        self.execute = Mock(wraps=self.execute)
+        result = self.propose("stale", "Replacement", digest=self.sha[:12])
+        self.assertIn("error", result)
+        self.execute.assert_not_called()
 
     def test_large_packet_preserves_the_full_candidate_and_marks_omitted_edit_excerpts(self):
         self.gate.observe({"input": "Append to a large fixture."})

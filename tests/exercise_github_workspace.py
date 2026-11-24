@@ -165,8 +165,11 @@ def acceptance(tmp, image, helper):
         preview = tool("github_preview", commit=commit)
         assert preview["paths"] == ["docs/proposal.md"] and preview["base"] == upstream
         assert "+Fixture proposal." in preview["patch"] and "Private edit." not in preview["patch"]
-        args = {"proposal_id": preview["proposal_id"]}
-        assert tools.draft_evidence(tool_socket, args) == preview and not stub.calls
+        prefix = preview.pop("proposal_id_prefix")
+        assert prefix == preview["proposal_id"][:12]
+        evidence = tools.draft_evidence(tool_socket, {"proposal_id": prefix})
+        assert evidence == preview and not stub.calls
+        args = {"proposal_id": evidence["proposal_id"]}
         first = tool("github_open_draft", **args)
         assert first["draft"] is True and first["state"] == "open"
         assert tool("github_open_draft", **args) == first

@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
-from lantern.github_tools import OPEN_DRAFT, draft_evidence, github_tool
+from lantern.github_tools import OPEN_DRAFT, ProposalLookupError, draft_evidence, github_tool
 from lantern.supervision import Supervisor
 
 
@@ -22,14 +22,20 @@ class GithubToolsTests(unittest.TestCase):
     def test_preview_and_evidence_require_the_complete_document_for_that_commit_or_id(self):
         original = sample_proposal()
         with patch("lantern.github_tools._call", return_value=original) as broker:
-            self.assertEqual(github_tool("sock", "github_preview", {"commit": original["source_commit"]}), original)
+            prefix = original["proposal_id"][:12]
+            self.assertEqual(github_tool("sock", "github_preview", {"commit": original["source_commit"]}),
+                             {**original, "proposal_id_prefix": prefix})
+            self.assertEqual(draft_evidence("sock", {"proposal_id": prefix.upper()}), original)
+            broker.assert_called_with("sock", "evidence", {"proposal_id": prefix})
             self.assertEqual(draft_evidence("sock", {"proposal_id": original["proposal_id"]}), original)
+            with self.assertRaises(ValueError):
+                draft_evidence("sock", {"proposal_id": "1" * 12})
             self.assertIn("error", github_tool("sock", "github_preview", {"commit": "a" * 40}))
             for field in ("title", "body", "repository", "base_branch", "patch", "source_commit"):
                 with self.subTest(field=field):
                     broker.return_value = {**original, field: "changed"}
                     with self.assertRaises(ValueError):
-                        draft_evidence("sock", {"proposal_id": original["proposal_id"]})
+                        draft_evidence("sock", {"proposal_id": prefix})
             broker.return_value = {k: v for k, v in original.items() if k != "patch"}
             with self.assertRaises(ValueError):
                 draft_evidence("sock", {"proposal_id": original["proposal_id"]})
@@ -38,7 +44,8 @@ class GithubToolsTests(unittest.TestCase):
         with patch("lantern.github_tools.socket.socket") as make, \
                 patch("lantern.github_tools.socket.AF_UNIX", 1, create=True):
             for name, args in [("github_sync", {"url": "elsewhere"}), ("github_preview", {"commit": "main"}),
-                               (OPEN_DRAFT, {"proposal_id": "1" * 64, "patch": "other"})]:
+                               (OPEN_DRAFT, {"proposal_id": "1" * 64, "patch": "other"}),
+                               (OPEN_DRAFT, {"proposal_id": "1" * 12})]:
                 with self.assertRaises(ValueError):
                     github_tool("sock", name, args)
             make.assert_not_called()
@@ -50,6 +57,41 @@ class GithubToolsTests(unittest.TestCase):
             peer.recv.side_effect = [b'{"upstream":"', b'main"}\n']
             self.assertEqual(github_tool("sock", "github_sync", {}), {"upstream": "main"})
             self.assertEqual(json.loads(peer.sendall.call_args.args[0]), {"op": "sync"})
+
+    def test_bad_or_ambiguous_selector_has_actionable_error(self):
+        with patch("lantern.github_tools._call") as broker:
+            for selector in ("f" * 11, "f" * 65, "../" + "f" * 12, "*", None):
+                with self.subTest(selector=selector), self.assertRaises(ProposalLookupError):
+                    draft_evidence("sock", {"proposal_id": selector})
+            broker.assert_not_called()
+            for code, message in (("missing", "No frozen proposal"), ("ambiguous", "multiple frozen proposals")):
+                broker.return_value = {"lookup_error": code}
+                with self.subTest(code=code), self.assertRaisesRegex(ProposalLookupError, message):
+                    draft_evidence("sock", {"proposal_id": "1" * 12})
+
+    def test_prefix_is_pinned_before_review_and_dispatch(self):
+        proposal = sample_proposal()
+        prefix = proposal["proposal_id"][:12].upper()
+        fetch = Mock(return_value=proposal)
+        luna, judge, execute = Mock(), Mock(), Mock(return_value={"draft": True})
+        luna.screen.return_value = {"escalate": False, "evidence": "", "summary": "Approved fixture."}
+        with TemporaryDirectory() as tmp:
+            session = Supervisor(Path(tmp), luna, judge, Mock(), tool_names=[OPEN_DRAFT], draft_evidence=fetch)
+            session.bind("fixture")
+            session.observe({"input": "Propose the change.", "tools": []})
+            args = {"proposal_id": prefix, "rationale": "Share this patch for review."}
+            result = session.dispatch("new-draft", OPEN_DRAFT, args, execute)
+            self.assertTrue(result["draft"])
+            fetch.assert_called_once_with({"proposal_id": prefix})
+            canonical = {"proposal_id": proposal["proposal_id"]}
+            self.assertEqual(luna.screen.call_args.args[0]["arguments"], canonical)
+            self.assertEqual(luna.screen.call_args.args[0]["host_facts"]["public_draft"], proposal)
+            execute.assert_called_once_with(OPEN_DRAFT, canonical)
+            for code in ("missing", "ambiguous"):
+                fetch.side_effect = ProposalLookupError("Select a longer prefix: " + code)
+                receipt = session.dispatch(code, OPEN_DRAFT, args, execute)
+                self.assertIn(code, receipt["error"])
+                self.assertEqual(execute.call_count, 1)
 
     def test_reviewers_receive_the_frozen_public_content_and_denial_prevents_dispatch(self):
         proposal = sample_proposal()

@@ -146,6 +146,28 @@ class GitHubFlowTests(unittest.TestCase):
         self.assertEqual(self.flow.open_draft(packet["proposal_id"])["state"], "closed")
         self.assertEqual(sum(m == "POST" and p == "pulls" for m, p, _ in self.api.calls), 1)
 
+    def test_prefix_resolves_only_one_frozen_proposal_and_publication_requires_the_full_id(self):
+        packet = self.flow.preview(self.change())
+        identity = packet["proposal_id"]
+        prefix = identity[:12]
+        self.assertEqual(self.flow.evidence(prefix.upper()), packet)
+        self.assertEqual(self.flow.evidence(identity.upper()), packet)
+        missing = ("0" if prefix[0] != "0" else "1") + prefix[1:]
+        self.assertEqual(self.flow.evidence(missing), {"lookup_error": "missing"})
+        with self.assertRaises(ProposalError):
+            self.flow.open_draft(prefix)
+        self.assertFalse(self.api.calls)
+        unverified_record = self.flow.state / (prefix + ("1" if identity[12] == "0" else "0") + "a" * 51 + ".json")
+        unverified_record.write_text("{}", encoding="utf-8")
+        self.assertEqual(self.flow.evidence(prefix), {"lookup_error": "ambiguous"})
+        self.assertEqual(self.flow.evidence(identity[:13]), packet)
+        self.assertEqual(self.flow.evidence(identity), packet)
+        original = self.flow.state / (identity + ".json")
+        original.write_text(original.read_text().replace("Approved feature", "Altered feature"))
+        with self.assertRaisesRegex(ProposalError, "fingerprint"):
+            self.flow.evidence(identity[:13])
+        self.assertFalse(self.api.calls)
+
     def test_private_paths_and_sensitive_contents_never_reach_github(self):
         for path in ["heritage/transcript.txt", ".github/workflows/ci.yml", "lantern/.env", "docs/id_rsa",
                      "docs/notes/november.md", "deploy/test.sqlite"]:

@@ -4,10 +4,10 @@ from contextlib import ExitStack, contextmanager
 import hashlib
 import os
 from pathlib import Path, PureWindowsPath
-import re
 import secrets
 import stat
 
+from .digest_prefix import DIGEST_PREFIX_PATTERN, MIN_DIGEST_PREFIX, normalize_digest_prefix
 from .workspace_diff import edit_summary
 
 
@@ -16,7 +16,8 @@ MAX_BYTES = 4 * MAX_TEXT
 TMP_PREFIX = ".lantern-tmp-"
 PATH = {"type": "string", "maxLength": 512, "description": "Relative path, using / between directories."}
 OFFSET = {"type": "integer", "minimum": 0, "default": 0}
-SHA = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+SHA = {"type": "string", "pattern": DIGEST_PREFIX_PATTERN,
+       "description": f"SHA-256 of the current file, or its first {MIN_DIGEST_PREFIX} or more hex characters."}
 
 
 def _tool(name, description, properties, required):
@@ -29,10 +30,10 @@ def _tool(name, description, properties, required):
 WORKSPACE_TOOLS = (
     _tool("workspace_list", "List one directory of your persistent workspace in name order. Regular files report their size in bytes; directories and links report null.",
           {"path": PATH, "offset": OFFSET, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, []),
-    _tool("workspace_read", "Read a page of a UTF-8 workspace file. The SHA-256 covers the whole file.",
+    _tool("workspace_read", "Read a page of a UTF-8 workspace file. sha256 and sha256_prefix cover the whole file.",
           {"path": PATH, "offset": OFFSET, "length": {"type": "integer", "minimum": 1, "maximum": 8000}}, ["path"]),
     _tool("workspace_write", "Save a complete UTF-8 note or source file. Parent directories are created "
-          "as needed. To replace a file supply its current SHA-256 from workspace_read. "
+          "as needed. To replace a file, copy its sha256_prefix from workspace_read into expected_sha256. "
           "Without expected_sha256 this call only creates a new file.",
           {"path": PATH, "text": {"type": "string", "maxLength": MAX_TEXT}, "expected_sha256": SHA},
           ["path", "text"]),
@@ -171,14 +172,20 @@ def _write_base(parent, name, expected):
     except FileNotFoundError:
         original = None
     if original is not None and expected is None:
-        return None, "File exists. Use workspace_read and supply its sha256 to replace it."
-    if expected is not None and (original is None or hashlib.sha256(original).hexdigest() != expected):
-        return None, "The file changed or is missing. Read it again before saving."
-    return original, None
+        return None, None, "File exists. Use workspace_read and supply its sha256_prefix to replace it."
+    digest = hashlib.sha256(original).hexdigest() if original is not None else None
+    if expected is not None and (digest is None or not digest.startswith(expected)):
+        return None, None, "The SHA-256 does not match the current file or the file is missing. Read it again before saving."
+    return original, digest, None
+
+
+def _file_revision(data):
+    digest = hashlib.sha256(data).hexdigest()
+    return {"sha256": digest, "sha256_prefix": digest[:MIN_DIGEST_PREFIX], "size_bytes": len(data)}
 
 
 def _write(parent, name, data, expected):
-    original, error = _write_base(parent, name, expected)
+    original, _, error = _write_base(parent, name, expected)
     if error:
         return {"error": error}
     temp, kwargs = _at(parent, TMP_PREFIX + secrets.token_hex(16))
@@ -210,7 +217,7 @@ def _write(parent, name, data, expected):
             os.unlink(temp, **kwargs)
         except FileNotFoundError:
             pass
-    return {"sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)}
+    return _file_revision(data)
 
 
 def _checked_parts(name, arguments):
@@ -223,29 +230,35 @@ def _checked_parts(name, arguments):
 
 def _write_values(arguments):
     text = arguments["text"]
-    expected = arguments.get("expected_sha256")
     if not isinstance(text, str) or len(text) > MAX_TEXT:
         raise ValueError("The text exceeds the workspace write limit.")
-    if "expected_sha256" in arguments and (not isinstance(expected, str) or not re.fullmatch("[0-9a-f]{64}", expected)):
-        raise ValueError("Supply a valid SHA-256 digest.")
+    expected = normalize_digest_prefix(arguments["expected_sha256"]) if "expected_sha256" in arguments else None
     return text.encode("utf-8"), expected
 
 
 def workspace_edit_evidence(directory: Path, arguments: dict) -> dict:
-    """Preview only. Execution independently rechecks the same hash or create-only condition."""
+    """Identify the full base digest for review and for the executor's revision check."""
     try:
         parts = _checked_parts("workspace_write", arguments)
-        data, expected = _write_values(arguments)
+        try:
+            data, expected = _write_values(arguments)
+        except ValueError as exc:
+            reason = "Supply valid UTF-8 text." if isinstance(exc, UnicodeError) else str(exc)
+            return {"status": "unavailable", "complete": False, "reason": reason}
         with _parent(directory, parts[:-1], preview=True) as parent:
-            original, error = _write_base(parent, parts[-1], expected)
+            original, base_digest, error = _write_base(parent, parts[-1], expected)
         if error:
             return {"status": "unavailable", "complete": False, "reason": error}
-        old = original.decode("utf-8") if original is not None else None
     except (OSError, ValueError, RuntimeError):
         return {"status": "unavailable", "complete": False,
                 "reason": "Could not verify a safe UTF-8 workspace revision for this proposal."}
+    try:
+        old = original.decode("utf-8") if original is not None else None
+    except UnicodeDecodeError:
+        return {"status": "unavailable", "complete": False, "base_sha256": base_digest,
+                "reason": "The verified base revision is not UTF-8. No text comparison is available."}
     summary = edit_summary(old, arguments["text"])
-    summary["base_sha256"] = expected
+    summary["base_sha256"] = base_digest
     summary["proposed_sha256"] = hashlib.sha256(data).hexdigest()
     return summary
 
@@ -284,8 +297,8 @@ def workspace_tool(directory: Path, name: str, arguments: dict) -> dict:
             content = raw.decode("utf-8")
             if offset > len(content):
                 raise ValueError("Offset is past the end of the workspace file.")
-            return {"path": path, "text": content[offset:offset + limit], "sha256": hashlib.sha256(raw).hexdigest(),
-                    "size_bytes": len(raw), "next_offset": offset + limit if offset + limit < len(content) else None}
+            return {"path": path, "text": content[offset:offset + limit], **_file_revision(raw),
+                    "next_offset": offset + limit if offset + limit < len(content) else None}
     except FileNotFoundError:
         return {"path": path, "error": "Workspace file or directory does not exist."}
     except (OSError, UnicodeError) as exc:

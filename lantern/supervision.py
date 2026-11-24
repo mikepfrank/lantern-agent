@@ -10,7 +10,7 @@ from threading import Condition, local
 from typing import NamedTuple
 
 from . import concerns
-from .github_tools import OPEN_DRAFT
+from .github_tools import OPEN_DRAFT, ProposalLookupError
 from .opus import OPERATOR_QUESTION_LIMIT, OpusCaseTooLarge, OpusResponseError
 from .review_policy import action_facts, concern_refs, ruling_query
 from .review_vendors import HTTPRejection, OpusTransportError, ReviewBudgetUnavailable
@@ -520,6 +520,30 @@ class Supervisor:
 
     def _review_action(self, context, call_id, name, args, execute, feedback):
         rationale = args.pop("rationale", None)
+        # Resolve once, before matching prior rulings. Screening, adjudication
+        # and execution must all refer to exactly the same revision.
+        resource_facts = {}
+        resolution_error = None
+        if name == "workspace_write" and self.workspace_root is not None:
+            edit = workspace_edit_evidence(self.workspace_root, args)
+            resource_facts["workspace_edit"] = edit
+            if "expected_sha256" in args:
+                if edit.get("base_sha256"):
+                    args = {**args, "expected_sha256": edit["base_sha256"]}
+                else:
+                    resolution_error = edit["reason"]
+        if name == OPEN_DRAFT:
+            document = None
+            try:
+                if self.draft_evidence is not None:
+                    document = self.draft_evidence(args)
+            except ProposalLookupError as exc:
+                resolution_error = str(exc)
+            except (OSError, ValueError):
+                pass
+            resource_facts["public_draft"] = document
+            if document is not None:
+                args = {**args, "proposal_id": document["proposal_id"]}
         with database(self.path) as db:
             matching = concerns.list_open(db, self.thread, name)
             prior = db.execute("SELECT reason FROM action_refusals WHERE thread=? AND proposal=?",
@@ -533,15 +557,7 @@ class Supervisor:
                              archive_receipt=room.archive_receipt(self.thread)
                              if room and name in ("read_heritage", "view_pdf_page") else None)
         facts.update(ruling_facts)
-        if name == "workspace_write" and self.workspace_root is not None:
-            facts["workspace_edit"] = workspace_edit_evidence(self.workspace_root, args)
-        if name == OPEN_DRAFT:
-            # Resolve the ID outside the agent's arguments. Both reviewers see this exact
-            # immutable document, and the broker verifies its digest again at publication.
-            try:
-                facts["public_draft"] = self.draft_evidence(args) if self.draft_evidence is not None else None
-            except (OSError, ValueError):
-                facts["public_draft"] = None
+        facts.update(resource_facts)
         packet = {"kind": "tool", "host_facts": facts, "tool": name, "arguments": args,
                   "rationale": rationale, "recent_context": context.recent}
         # Only a version actually inspected and found irrelevant may skip Opus.
@@ -560,6 +576,8 @@ class Supervisor:
             skipped = {(i["id"], i["version"]) for i in checks if i["id"] not in ids}
         with database(self.path) as db:
             self._record_screen(db, scan, context.sequence, "tool", name, call_id)
+        if resolution_error is not None:
+            return {"error": resolution_error}
         if name == OPEN_DRAFT and facts["public_draft"] is None:
             raise ReviewUnavailable("The host could not verify the full public patch and destination for this proposal ID")
         if not isinstance(rationale, str) or not rationale.strip() or len(rationale) > RATIONALE_LIMIT:
