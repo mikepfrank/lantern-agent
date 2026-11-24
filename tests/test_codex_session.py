@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -5,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from lantern.codex_session import CodexError, _Peer, _child_environment
+from lantern.codex_session import CodexError, SteeringInput, _Peer, _child_environment
 
 
 class ChildEnvironmentTests(unittest.TestCase):
@@ -110,6 +111,21 @@ class ToolRequestTests(unittest.IsolatedAsyncioTestCase):
         self.peer.finished = True
         await complete(item={**item, "id": "late"})
         self.assertEqual(delivered, [("msg", "First.")])
+
+    async def test_real_steer_marks_its_request_before_the_rpc_and_confirms_only_after_ack(self):
+        incoming = asyncio.Queue()
+        calls = []
+        self.peer.read = incoming.get
+        async def send(request):
+            calls.append(request["method"])
+            incoming.put_nowait({"id": request["id"], "result": {"turnId": "turn"}})
+            incoming.put_nowait({"method": "turn/completed", "params": {"threadId": "thread",
+                                 "turn": {"id": "turn", "status": "completed"}}})
+        self.peer.send = send
+        await self.peer.finish_turn(lambda: SteeringInput((1,), "more"), self.fail, lambda: 7,
+                                    lambda marker: calls.append(("ack", marker)),
+                                    lambda marker: calls.append(("steer", marker)))
+        self.assertEqual(calls, [("steer", 7), "turn/steer", ("ack", 7)])
 
     async def test_other_threads_turns_and_unregistered_tools_cannot_dispatch(self):
         for invalid in ({"threadId": "another"}, {"turnId": "another"}, {"tool": "shell"},
