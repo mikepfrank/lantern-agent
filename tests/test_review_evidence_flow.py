@@ -254,6 +254,23 @@ class ReviewEvidenceFlow(unittest.TestCase):
                 self.assertEqual(self.execute.call_args.args[1]["expected_sha256"], self.sha)
                 self.assertEqual(path.read_bytes(), concurrent.encode())
 
+    def test_failed_partial_precondition_cannot_become_valid_during_screening(self):
+        self.gate.observe({"input": "Append a note after the marker."})
+        screen = self.gate._screen
+        concurrent = self.original + "Marker"
+
+        def add_marker_during_screen(packet):
+            (self.files / self.path).write_bytes(concurrent.encode())
+            return screen(packet)
+
+        self.gate._screen = add_marker_during_screen
+        self.execute = Mock(wraps=self.execute)
+        result = self.gate.dispatch("suffix", "workspace_append", {"path": self.path, "text": "Follow-up",
+                                    "expected_suffix": "Marker", "rationale": "Add a note."}, self.execute)
+        self.assertIn("expected_suffix", result["error"])
+        self.execute.assert_not_called()
+        self.assertEqual(self.opus_packets, [])
+
     def test_same_result_uses_the_prior_exact_denial_across_all_three_edit_tools(self):
         self.gate.observe({"input": "Try a note edit."})
         self.xml = '<review decision="deny">The change includes the restricted quotation.</review>'
