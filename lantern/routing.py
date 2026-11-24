@@ -3,9 +3,7 @@
 import re
 
 ROUTES = {"fastest": "throughput", "cheapest": "price", "default": None}
-# Darkbloom returned tool calls as ordinary text on the Qwen Responses route.
-# Remove its slug after a fresh native tool-call test succeeds.
-TOOL_PROVIDER_EXCLUSIONS = ("darkbloom",)
+TOOL_PROVIDER_EXCLUSIONS: tuple[str, ...] = ()
 
 ROUTE_TOOL = {
     "name": "set_provider_route",

@@ -304,7 +304,7 @@ class TransportTests(unittest.TestCase):
                 else:
                     self.assertEqual(sent["provider"]["sort"], sort)
                 self.assertEqual(gate.evidence[-1]["route"], route)
-                self.assertEqual(sent["provider"]["ignore"], ["darkbloom"])
+                self.assertNotIn("ignore", sent["provider"])
                 self.assertEqual(sent["provider"]["max_price"]["request"], 0)
                 self.assertNotIn("require_parameters", sent["provider"])
                 self.assertNotIn("only", sent["provider"])
@@ -319,6 +319,7 @@ class TransportTests(unittest.TestCase):
 
     def test_tool_provider_exclusion_tracks_whether_calls_are_enabled(self):
         named = {"type": "function", "name": "chess"}
+        self.enterContext(patch("lantern.transport.TOOL_PROVIDER_EXCLUSIONS", ("fixture-provider",)))
         with self.gateway("cheapest") as gate:
             for tools, choice, enabled in (([], "auto", False), ([named], "none", False),
                                            ([named], "required", True), ([named], named, True)):
@@ -328,7 +329,7 @@ class TransportTests(unittest.TestCase):
                     provider = self.wire[-1][0]["provider"]
                     self.assertEqual(provider["sort"], "price")
                     if enabled:
-                        self.assertEqual(provider["ignore"], ["darkbloom"])
+                        self.assertEqual(provider["ignore"], ["fixture-provider"])
                     else:
                         self.assertNotIn("ignore", provider)
 
