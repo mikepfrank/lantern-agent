@@ -98,7 +98,7 @@ class ChatStore:
                 CREATE INDEX IF NOT EXISTS pdf_views_by_raster ON pdf_views(raster_id);
                 CREATE TABLE IF NOT EXISTS batches (
                     id INTEGER PRIMARY KEY, status TEXT NOT NULL,
-                    outcome INTEGER REFERENCES events(id));
+                    outcome INTEGER REFERENCES events(id), finished_at TEXT);
                 CREATE UNIQUE INDEX IF NOT EXISTS single_active_batch
                     ON batches(status) WHERE status = 'active';
                 CREATE TABLE IF NOT EXISTS inbox (
@@ -109,7 +109,15 @@ class ChatStore:
                     batch_id INTEGER NOT NULL REFERENCES batches(id), call_id TEXT NOT NULL,
                     event_id INTEGER UNIQUE NOT NULL REFERENCES events(id),
                     PRIMARY KEY(batch_id, call_id));
+                CREATE TABLE IF NOT EXISTS reply_blocks (
+                    batch_id INTEGER NOT NULL REFERENCES batches(id), item_id TEXT NOT NULL,
+                    event_id INTEGER UNIQUE NOT NULL REFERENCES events(id),
+                    PRIMARY KEY(batch_id, item_id));
             """ + SCHEMA + operator_release.SCHEMA)
+            # Another process can open the room during an upgrade.
+            db.execute("BEGIN IMMEDIATE")
+            if "finished_at" not in {row["name"] for row in db.execute("PRAGMA table_info(batches)")}:
+                db.execute("ALTER TABLE batches ADD COLUMN finished_at TEXT")
 
     @contextmanager
     def _connect(self, *, write=False):
@@ -433,7 +441,8 @@ class ChatStore:
             else:
                 db.execute("UPDATE inbox SET batch_id=NULL,steered=0 WHERE batch_id=?", (batch_id,))
             receipt = self._append(db, "system", f"Turn {batch_id} is waiting for the daily budget reset at {central_time(until)}.")
-            db.execute("UPDATE batches SET status='deferred',outcome=? WHERE id=?", (receipt, batch_id))
+            db.execute("UPDATE batches SET status='deferred',outcome=?,finished_at=? WHERE id=?",
+                       (receipt, self.clock().isoformat(), batch_id))
 
     def bind_thread(self, batch_id: int, thread_id: str) -> None:
         """Commit the native thread ID before starting its first inference."""
@@ -473,18 +482,33 @@ class ChatStore:
         """Publish a message from a running turn, independent of terminal attachment."""
         if not isinstance(text, str) or not text.strip() or not isinstance(call_id, str) or not call_id.strip():
             raise ValueError("A notification needs message text and a tool call ID")
+        return self._deliver(batch_id, call_id, trim_reply_segment(text), block=False)
+
+    def append_reply_block(self, batch_id: int, item_id: str, text: str) -> int | None:
+        """Publish a completed assistant message once, as soon as the worker receives it."""
+        if not isinstance(text, str):
+            raise ValueError("A reply block needs text")
         text = trim_reply_segment(text)
+        if not text:
+            return None
+        if not isinstance(item_id, str) or not item_id.strip():
+            raise ValueError("A reply block needs an item ID")
+        return self._deliver(batch_id, item_id, text, block=True)
+
+    def _deliver(self, batch_id, identifier, text, *, block):
+        # Native items and explicit tool calls may use the same ID or text.
+        table, key = ("reply_blocks", "item_id") if block else ("notifications", "call_id")
         with self._connect(write=True) as db:
-            known = db.execute("""SELECT e.id,e.text FROM notifications n JOIN events e ON e.id=n.event_id
-                WHERE n.batch_id=? AND n.call_id=?""", (batch_id, call_id)).fetchone()
+            known = db.execute(f"""SELECT e.id,e.text FROM {table} n JOIN events e ON e.id=n.event_id
+                WHERE n.batch_id=? AND n.{key}=?""", (batch_id, identifier)).fetchone()
             if known:
                 # A receipt issued by an older release may contain padding.
                 if trim_reply_segment(known["text"]) != text:
-                    raise ValueError("This notification ID already belongs to different text")
+                    raise ValueError("This delivery ID already belongs to different text")
                 return known["id"]
             self._active(db, batch_id)
             event_id = self._append(db, "lantern", text)
-            db.execute("INSERT INTO notifications VALUES(?,?,?)", (batch_id, call_id, event_id))
+            db.execute(f"INSERT INTO {table}(batch_id,{key},event_id) VALUES(?,?,?)", (batch_id, identifier, event_id))
             return event_id
 
     def _finish(self, db, batch_id, status, text):
@@ -505,8 +529,10 @@ class ChatStore:
             label = "input events" if scheduled else "operator messages"
             text = f"Turn {batch_id} {status} ({label} {ids}). {text}"
         elif not text.strip():
-            # A tool-only turn may already have delivered its entire reply.
-            outcome = db.execute("SELECT MAX(event_id) FROM notifications WHERE batch_id=?", (batch_id,)).fetchone()[0]
+            # The last native message or explicit notification may already be in the room.
+            outcome = db.execute("""SELECT MAX(event_id) FROM (
+                SELECT event_id FROM reply_blocks WHERE batch_id=? UNION ALL
+                SELECT event_id FROM notifications WHERE batch_id=?)""", (batch_id, batch_id)).fetchone()[0]
             if outcome is None:
                 raise ValueError("Lantern returned an empty chat reply")
         if batch["status"] != "active":
@@ -516,7 +542,8 @@ class ChatStore:
             raise ValueError("A different outcome is already recorded for this turn")
         role = "lantern" if status == "complete" else "system"
         event_id = outcome if outcome is not None else self._append(db, role, text)
-        db.execute("UPDATE batches SET status=?,outcome=? WHERE id=?", (status, event_id, batch_id))
+        db.execute("UPDATE batches SET status=?,outcome=?,finished_at=? WHERE id=?",
+                   (status, event_id, self.clock().isoformat(), batch_id))
         return event_id
 
     def complete(self, batch_id: int, text: str) -> int:

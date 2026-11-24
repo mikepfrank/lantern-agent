@@ -127,6 +127,12 @@ class NativeSteering(unittest.TestCase):
                         if worker.done():
                             await worker
                         await asyncio.sleep(.025)
+                    # A reply can be visible before Codex closes the turn. Both
+                    # delivery and completion must still precede obsolete billing.
+                    while store.status()["active_batch"] is not None:
+                        if worker.done():
+                            await worker
+                        await asyncio.sleep(.025)
                 self.assertEqual([(event.role, event.text) for event in store.events()], [
                     ("operator", prompt), ("operator", followup), ("lantern", "I used Orchard-843.")])
                 self.assertFalse(settlement_timed_out.is_set())

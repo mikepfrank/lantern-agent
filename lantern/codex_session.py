@@ -126,15 +126,17 @@ def _check_config(config: dict, model: str, provider: str, expected_url: str | N
 
 
 class _Peer:
-    def __init__(self, process, tools, dispatch):
+    def __init__(self, process, tools, dispatch, on_message=None):
         self.process = process
         self.tools = {tool["name"] for tool in tools}
         self.dispatch = dispatch
+        self.on_message = on_message
         self.seq = 0
         self.thread_id = None
         self.turn_id = None
         self.finished = False
         self.messages = []
+        self.message_items = {}
         self.tool_calls = []
 
     async def send(self, obj):
@@ -224,15 +226,32 @@ class _Peer:
         elif method == "item/completed":
             item = p["item"]
             if item.get("type") == "agentMessage" and item.get("phase") in (None, "final_answer"):
+                if not self.thread_id or self.finished:
+                    return
                 if not isinstance(item.get("text"), str):
                     raise CodexError("Codex returned a non-text assistant message")
                 segment = trim_reply_segment(item["text"])
-                if segment:
-                    self.messages.append(segment)
+                if not segment:
+                    return
+                if self.on_message is not None:
+                    if p.get("threadId") != self.thread_id:
+                        raise CodexError("Codex omitted the assistant message's thread ID")
+                    self.set_turn(p.get("turnId"))
+                    item_id = item.get("id")
+                    if not isinstance(item_id, str) or not item_id:
+                        raise CodexError("Codex omitted the assistant message ID")
+                    if item_id in self.message_items:
+                        if self.message_items[item_id] != segment:
+                            raise CodexError("Codex reused an assistant message ID for different text")
+                        return
+                    self.on_message(item_id, segment)
+                    self.message_items[item_id] = segment
+                self.messages.append(segment)
         elif method == "model/rerouted" or (method == "error" and not p.get("willRetry", False)):
             raise CodexError("Codex reported a provider or turn error")
 
-    async def finish_turn(self, take_input, return_input, capture_steer=None, confirm_steer=None):
+    async def finish_turn(self, take_input, return_input, capture_steer=None, confirm_steer=None,
+                          on_steer_sent=None):
         if take_input is None:
             while not self.finished:
                 await self.handle(await self.read())
@@ -276,6 +295,8 @@ class _Peer:
                         continue
                     steer = take_input() if take_input else None
                     if steer is not None:
+                        if on_steer_sent is not None:
+                            on_steer_sent(displaced_request)
                         self.seq += 1
                         await self.send({"id": self.seq, "method": "turn/steer", "params": {
                             "threadId": self.thread_id, "expectedTurnId": self.turn_id,
@@ -291,15 +312,19 @@ async def run_turn(*, codex_bin: str, codex_home: Path, workspace: Path, model: 
                    dispatch: Callable[[str, str, dict], dict], thread_id: str | None = None,
                    input_parts: list[dict] | None = None,
                    on_thread: Callable[[str], None] | None = None,
+                   on_message: Callable[[str, str], None] | None = None,
                    take_input: Callable[[], SteeringInput | None] | None = None,
                    return_input: Callable[[tuple[int, ...]], None] | None = None,
                    capture_steer: Callable[[], int | None] | None = None,
                    confirm_steer: Callable[[int | None], None] | None = None,
+                   on_steer_sent: Callable[[int | None], None] | None = None,
                    env: dict[str, str] | None = None, base_url: str | None = None,
                    timeout: float = 180.0) -> TurnResult:
     """Start or resume with a local gateway URL or the caller's isolated config.toml.
 
     on_thread runs before inference so the caller can durably record a new thread.
+    on_message receives the native item ID and trimmed text of each completed
+    visible reply block. TurnResult.text retains the complete joined transcript.
     Tool dispatch is synchronous; handlers must keep their own work bounded.
     """
     if take_input is not None and return_input is None:
@@ -314,7 +339,7 @@ async def run_turn(*, codex_bin: str, codex_home: Path, workspace: Path, model: 
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL, limit=MAX_FRAME,
     )
-    peer = _Peer(process, tools, dispatch)
+    peer = _Peer(process, tools, dispatch, on_message)
     try:
         async with asyncio.timeout(timeout):
             init = await peer.request("initialize", {
@@ -352,7 +377,7 @@ async def run_turn(*, codex_bin: str, codex_home: Path, workspace: Path, model: 
                 "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
                 "input": input_parts or [{"type": "text", "text": prompt}]})
             peer.set_turn(resp["turn"]["id"])
-            await peer.finish_turn(take_input, return_input, capture_steer, confirm_steer)
+            await peer.finish_turn(take_input, return_input, capture_steer, confirm_steer, on_steer_sent)
             return TurnResult(tid, peer.turn_id, "\n\n".join(peer.messages), tuple(peer.tool_calls))
     except TimeoutError as exc:
         raise CodexError("Codex timed out; do not replay a turn automatically") from exc

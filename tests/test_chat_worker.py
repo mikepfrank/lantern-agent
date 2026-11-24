@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import unittest
 
 from lantern.chat_store import ChatStore
-from lantern.chat_worker import WorkerBusy, process_batch, serve, worker_lock, worker_online
+from lantern.chat_worker import RoomReplyDelivery, WorkerBusy, process_batch, serve, worker_lock, worker_online
+from lantern.codex_session import CodexError
 
 
 def run_worker(state, block):
@@ -23,6 +24,48 @@ def run_worker(state, block):
         return SimpleNamespace(text="Answered the new input"), []
 
     asyncio.run(serve(state, ChatStore(state), turn, "fastest"))
+
+
+class RoomReplyDeliveryTests(unittest.TestCase):
+    def setUp(self):
+        self.events = []
+        self.delivery = RoomReplyDelivery(lambda key, text: self.events.append((key, text)))
+
+    def test_both_orders_of_confirmation_and_native_message(self):
+        self.delivery.receive("msg1", "Same text")
+        self.assertEqual(self.events, [])
+        self.delivery.confirm(("msg1", "msg2"))
+        self.assertEqual(self.events, [("msg1", "Same text")])
+        self.delivery.receive("msg2", "Same text")
+        self.assertTrue(self.delivery.finish(all_sources_complete=True))
+        self.assertEqual(self.events, [("msg1", "Same text"), ("msg2", "Same text")])
+
+    def test_unknown_native_id_waits_for_clean_finish_and_preserves_order(self):
+        self.delivery.receive("native-generated", "First")
+        self.delivery.confirm(("msg2",))
+        self.delivery.receive("msg2", "Second")
+        self.assertEqual(self.events, [])
+        self.delivery.finish(all_sources_complete=True)
+        self.assertEqual(self.events, [("native-generated", "First"), ("msg2", "Second")])
+
+    def test_steering_discards_unconfirmed_native_item(self):
+        self.delivery.receive("displaced", "Abandoned draft")
+        self.delivery.receive("replacement", "Final")
+        self.delivery.confirm(("replacement",))
+        self.delivery.finish(all_sources_complete=False)
+        self.delivery.close()
+        self.delivery.confirm(("displaced",))
+        self.assertEqual(self.events, [("replacement", "Final")])
+
+    def test_storage_error_is_raised_on_worker_after_gateway_callback(self):
+        def unavailable(item_id, text):
+            raise OSError("private detail")
+
+        delivery = RoomReplyDelivery(unavailable)
+        delivery.receive("msg", "Reply")
+        delivery.confirm(("msg",))
+        with self.assertRaisesRegex(CodexError, "Unable to save a completed reply block"):
+            delivery.finish(all_sources_complete=True)
 
 
 class ChatWorkerTests(unittest.TestCase):
@@ -87,7 +130,8 @@ class ChatWorkerTests(unittest.TestCase):
         self.store.submit("Before dispatch")
         batch = self.store.claim()
 
-        async def turn(prompt, route, thread_id, *, on_thread, take_input, return_input, notify, batch_id, trigger):
+        async def turn(prompt, route, thread_id, *, on_thread, on_message, take_input, return_input, notify,
+                       batch_id, trigger):
             self.assertEqual((batch.id, "operator"), (batch_id, trigger))
             self.assertEqual("Initial\n\nBefore dispatch", prompt)
             on_thread("native-thread")

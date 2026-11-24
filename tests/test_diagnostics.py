@@ -1,4 +1,5 @@
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -60,6 +61,30 @@ class DiagnosticsTests(TestCase):
             one = read_diagnostics(self.state, {"before": one["next_before"], "limit": 30})
             all_rows.extend(one["records"])
         self.assertEqual([r["ref"] for r in all_rows], [f"screen:{i}" for i in range(41, 0, -1)])
+
+    def test_chat_outcome_is_logged_when_turn_finishes_after_visible_block(self):
+        now = datetime(2026, 1, 1, 23, 59, tzinfo=timezone.utc)
+        store = ChatStore(self.state, clock=lambda: now)
+        store.submit("Show progress")
+        batch = store.claim().id
+        receipt = store.append_reply_block(batch, "reply-1", "Progress")
+        self.assertEqual(read_diagnostics(self.state, {})["records"], [])
+        now += timedelta(minutes=2)
+        store.complete(batch, "")
+        record, = read_diagnostics(self.state, {})["records"]
+        self.assertEqual((record["event_id"], record["at_utc"]), (receipt, "2026-01-02T00:01:00.000Z"))
+
+    def test_older_chat_outcome_uses_event_timestamp_before_and_after_upgrade(self):
+        self.sql("chat.sqlite", "CREATE TABLE batches(id INTEGER PRIMARY KEY,status TEXT,outcome INTEGER)")
+        self.sql("chat.sqlite", "CREATE TABLE events(id INTEGER PRIMARY KEY,at TEXT,text TEXT)")
+        self.sql("chat.sqlite", "INSERT INTO events VALUES(7,'2026-01-01T23:59:00Z','historical reply')")
+        self.sql("chat.sqlite", "INSERT INTO batches VALUES(1,'complete',7)")
+        for upgraded in (False, True):
+            if upgraded:
+                self.sql("chat.sqlite", "ALTER TABLE batches ADD COLUMN finished_at TEXT")
+            with self.subTest(upgraded=upgraded):
+                record, = read_diagnostics(self.state, {})["records"]
+                self.assertEqual((record["event_id"], record["at_utc"]), (7, "2026-01-01T23:59:00.000Z"))
 
     def test_pdf_review_identifies_tool_without_showing_reviewed_arguments(self):
         Supervisor(self.state, None, None, None)

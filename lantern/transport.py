@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import secrets
 import socket
-from threading import Thread, Timer
+from threading import Event, Lock, Thread, Timer
 import time
 
 from .attachments import MAX_IMAGE_BYTES, MAX_TURN_IMAGES, SIGNATURE
@@ -459,6 +459,25 @@ def _observe_output(event, observed, evidence, received_ms):
             observed.add("unknown")
 
 
+def _completed_message_ids(event):
+    if event.get("type") == "response.output_item.done":
+        items = [event.get("item")]
+    elif event.get("type") == "response.completed":
+        items = (event.get("response") or {}).get("output") or []
+    else:
+        return
+    for item in items:
+        if (item.get("type") == "message" and item.get("role") == "assistant"
+                and item.get("phase") in (None, "final_answer")
+                and item.get("status") in (None, "completed")):
+            item_id = item.get("id")
+            if isinstance(item_id, str) and item_id.strip() and any(
+                part.get("type") == "output_text" and isinstance(part.get("text"), str) and part["text"].strip()
+                for part in item.get("content") or []
+            ):
+                yield item_id
+
+
 def _completed_outcome(observed):
     if "error" in observed:
         return "failed"
@@ -524,11 +543,13 @@ class OpenRouterGateway:
 
     def __init__(self, api_key, *, route, tools, reserve, settle, observe, unregistered, resuming=False,
                  operator_context="", finish=None, handoff_due=None, image_loader=None, page_image_loader=None,
-                 managed_registry=False, reviewed_calls=None, image_by_digest=None, route_source=None):
+                 managed_registry=False, reviewed_calls=None, image_by_digest=None, route_source=None,
+                 on_response_messages=None):
         if route not in ROUTES or not api_key:
             raise ValueError("a valid route and OpenRouter key are required")
         self.route = route
         self.route_source = route_source
+        self.on_response_messages = on_response_messages
         self.tools = list(tools)
         self.reserve, self.settle = reserve, settle
         self.finish = finish
@@ -546,6 +567,9 @@ class OpenRouterGateway:
         self._api_key = api_key
         self.token = secrets.token_urlsafe(32)
         self.evidence = []
+        self._pending_receipts = {}
+        self._receipt_lock = Lock()
+        self._deferred_receipts = {}
 
     def capture_steer(self):
         """Capture the precise in-flight request before sending native turn/steer."""
@@ -559,7 +583,23 @@ class OpenRouterGateway:
     def confirm_steer(self, marker):
         """Only a matching native ACK qualifies this request for supersession."""
         if marker is not None:
-            self.evidence[marker]["steer_acknowledged"] = True
+            with self._receipt_lock:
+                self.evidence[marker]["steer_acknowledged"] = True
+
+    def begin_steer(self, marker):
+        """Withhold new receipts for an actual steer until its native ACK or rejection."""
+        if marker is not None:
+            with self._receipt_lock:
+                self.evidence[marker]["steer_requested"] = True
+
+    def _report_messages(self, evidence, ids):
+        with self._receipt_lock:
+            if evidence["status"] != "completed" or evidence.get("client_disconnected") or evidence.get("steer_acknowledged"):
+                return
+            if evidence.get("steer_requested") or self._completion_error(through=evidence):
+                self._deferred_receipts[id(evidence)] = (evidence, ids)
+            else:
+                self.on_response_messages(ids)
 
     def assert_turn_complete(self):
         """Validate a native turn's result before releasing it to the operator.
@@ -567,9 +607,28 @@ class OpenRouterGateway:
         A later completed request can supersede an acknowledged steer target.
         Its old provider request still drains normally under the original hold.
         """
-        records = [entry.copy() for entry in self.evidence]
+        for entry in self.evidence:
+            if entry["status"] == "completed":
+                pending = self._pending_receipts.get(id(entry))
+                if pending is not None:
+                    pending.wait()
+        if error := self._completion_error():
+            raise RuntimeError(error)
+        with self._receipt_lock:
+            # A replacement can finish before Codex acknowledges its predecessor's steer.
+            for evidence, ids in self._deferred_receipts.values():
+                if not evidence.get("steer_acknowledged") and not self._completion_error(through=evidence):
+                    self.on_response_messages(ids)
+            self._deferred_receipts.clear()
+
+    def _completion_error(self, through=None):
+        records = []
+        for entry in self.evidence:
+            records.append(entry.copy())
+            if entry is through:
+                break
         if not records or records[-1]["status"] != "completed" or records[-1].get("client_disconnected"):
-            raise RuntimeError("The gateway did not observe a completed final response")
+            return "The gateway did not observe a completed final response"
         for entry in records[:-1]:
             status = entry["status"]
             if status == "completed":
@@ -579,7 +638,8 @@ class OpenRouterGateway:
                 or (status == "interrupted" and entry.get("upstream_transport_interrupted"))
             ):
                 continue
-            raise RuntimeError("The gateway observed an unsuccessful earlier request")
+            return "The gateway observed an unsuccessful earlier request"
+        return None
 
     def __enter__(self):
         gateway = self
@@ -715,6 +775,8 @@ class OpenRouterGateway:
 
                 terminal_cost = None
                 observed = set()
+                message_ids = {}
+                receipt_done = None
                 try:
                     evidence["dispatch_at"] = datetime.now(timezone.utc).isoformat()
                     dispatched = time.monotonic()
@@ -756,6 +818,9 @@ class OpenRouterGateway:
                                     # A refused output can still carry a genuine billable charge.
                                     terminal_cost = _record_usage(response.get("usage"), evidence)
                             _inspect(event, names, evidence)
+                            if gateway.on_response_messages is not None:
+                                for item_id in _completed_message_ids(event):
+                                    message_ids[item_id] = None
                             if kind in GENERATED_DELTAS and "first_token_ms" not in evidence:
                                 if isinstance(event.get("delta"), str) and event["delta"]:
                                     evidence["first_token_ms"] = received_ms
@@ -768,6 +833,10 @@ class OpenRouterGateway:
                                 if status == "failed" and evidence.get("upstream_error_code") in (408, 504):
                                     outcome = "timeout"
                                 meter(status, outcome, terminal_cost, "openrouter" if terminal_cost is not None else None)
+                                if message_ids and status == "completed" and evidence.get("request_outcome") == "usable":
+                                    # Codex can finish as soon as the terminal frame is written.
+                                    receipt_done = Event()
+                                    gateway._pending_receipts[id(evidence)] = receipt_done
                                 evidence["status"] = status
                             deliver(self.wfile.write, frame)
                             if terminal:
@@ -799,6 +868,14 @@ class OpenRouterGateway:
                         deliver(self.fail, 502, "OpenRouter connection failed")
                     else:
                         self.close_connection = True
+
+                finally:
+                    if receipt_done is not None:
+                        try:
+                            gateway._report_messages(evidence, tuple(message_ids))
+                        finally:
+                            receipt_done.set()
+                            del gateway._pending_receipts[id(evidence)]
 
         # server_close() joins these handlers before callers inspect evidence.
         # A canceled client may already have returned a replacement response.

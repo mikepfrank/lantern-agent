@@ -411,6 +411,92 @@ class TransportTests(unittest.TestCase):
             self.assertNotIn("first_token_ms", gate.evidence[-1])
             self.assertNotIn("first_output_ms", gate.evidence[-1])
 
+    def test_message_receipt_identifies_only_complete_visible_assistant_items_after_settlement(self):
+        seen = []
+        def receipt(ids):
+            seen.append((ids, self.settle.call_count))
+
+        message = {"type": "message", "id": "first", "role": "assistant", "status": "completed",
+                   "content": [{"type": "output_text", "text": "evidence"}]}
+        self.stream = (event("response.output_item.added", item={**message, "id": "added-only"})
+                       + event("response.output_item.done", item=message)
+                       + event("response.completed", response={"output": [
+                           message, {**message, "id": "final", "phase": "final_answer"},
+                           {**message, "id": "comment", "phase": "commentary"},
+                           {**message, "id": "user", "role": "user"},
+                           {**message, "id": "partial", "status": "in_progress"},
+                           {**message, "id": "empty", "content": []},
+                           {"id": "thought", "type": "reasoning"},
+                           {"id": "tool", "type": "function_call", "name": "chess", "call_id": "c", "arguments": "{}"},
+                       ], "usage": {"cost": .04}}))
+        with self.gateway("fastest", on_response_messages=receipt) as gate:
+            self.assertEqual(self.request(gate), (200, self.stream))
+            gate.assert_turn_complete()
+            self.assertEqual(seen, [(("first", "final"), 1)])
+
+    def test_no_early_receipt_for_failed_validation_transport_or_prior_request(self):
+        item = {"type": "message", "role": "assistant", "id": "note",
+                "content": [{"type": "output_text", "text": "note"}]}
+        earlier = event("response.output_item.done", item=item)
+        good = event("response.completed", response={"output": [item]})
+        cases = [
+            (b"", "interrupted"), (event("response.failed", response={}), "failed"),
+            (event("response.incomplete", response={}), "incomplete"),
+            (event("response.completed", response={"output": [{"type": "function_call", "name": "outside"}]}),
+             "interrupted"),
+            (event("error", error={"code": 500}) + good, "completed"),
+        ]
+        for suffix, status in cases:
+            with self.subTest(status=status, suffix=suffix), self.gateway("default", on_response_messages=Mock()) as gate:
+                self.stream = earlier + suffix
+                self.request(gate)
+                self.assertEqual(gate.evidence[-1]["status"], status)
+                if status != "completed":
+                    self.stream = good
+                    self.request(gate)
+                    self.assertEqual(gate.evidence[-1]["status"], "completed")
+                gate.on_response_messages.assert_not_called()
+
+    def test_canceled_or_disconnected_streams_never_publish_message_receipts(self):
+        item = {"type": "message", "id": "note", "role": "assistant",
+                "content": [{"type": "output_text", "text": "note"}]}
+        self.stream = event("response.output_item.done", item=item) + event("response.completed", response={"output": []})
+        write = _SocketWriter.write
+        def disconnected(writer, data):
+            if b'"type": "response.completed"' in data:
+                raise BrokenPipeError()
+            return write(writer, data)
+
+        with self.gateway("default", on_response_messages=Mock()) as gate:
+            with patch.object(_SocketWriter, "write", disconnected):
+                self.request(gate)
+            self.assertTrue(gate.evidence[-1]["client_disconnected"])
+            self.observe.side_effect = lambda _: gate.confirm_steer(gate.capture_steer())
+            self.request(gate)
+            self.assertTrue(gate.evidence[-1]["steer_acknowledged"])
+            gate.on_response_messages.assert_not_called()
+
+    def test_final_validation_waits_for_completed_receipt(self):
+        entered, release = Event(), Event()
+        def receive(ids):
+            entered.set()
+            release.wait(4)
+
+        item = {"type": "message", "role": "assistant", "id": "note",
+                "content": [{"type": "output_text", "text": "note"}]}
+        self.stream = event("response.completed", response={"output": [item]})
+        with self.gateway("default", on_response_messages=receive) as gate, ThreadPoolExecutor() as pool:
+            request = pool.submit(self.request, gate)
+            try:
+                self.assertTrue(entered.wait(2))
+                validation = pool.submit(gate.assert_turn_complete)
+                with self.assertRaises(FutureTimeout):
+                    validation.result(timeout=.05)
+            finally:
+                release.set()
+            validation.result(timeout=2)
+            self.assertEqual(request.result(timeout=2), (200, self.stream))
+
     def test_rejected_terminal_frame_is_charged_without_relaying_its_contents(self):
         finish = Mock()
         self.stream = event("response.completed", response={"usage": {"cost": .000032},
@@ -616,37 +702,56 @@ class TransportTests(unittest.TestCase):
     def test_acknowledged_steer_can_publish_before_original_headers_arrive(self):
         waiting, release = Event(), Event()
         self.reserve.side_effect = [31, 32]
+        receipt = Mock()
 
         @contextmanager
         def upstream(body, headers):
-            if json.loads(body)["input"][-1]["content"] == "original":
+            text = json.loads(body)["input"][-1]["content"]
+            if text == "original":
                 waiting.set()
                 if not release.wait(4):
                     raise TimeoutError("Test did not release provider")
-            yield Stream(self.stream)
+            item = {"type": "message", "role": "assistant", "id": text,
+                    "content": [{"type": "output_text", "text": text}]}
+            yield Stream(event("response.output_item.done", item=item) + self.stream)
 
         with patch("lantern.transport._open_upstream", upstream), ThreadPoolExecutor() as pool, \
-             self.gateway("cheapest") as gate:
+             self.gateway("cheapest", on_response_messages=receipt) as gate:
             self.assertIsNone(gate.capture_steer())
             first = pool.submit(self.request, gate, input="original")
             try:
                 self.assertTrue(waiting.wait(2))
                 marker = gate.capture_steer()
                 self.assertEqual(marker, 0)
+                gate.begin_steer(marker)
                 self.assertEqual(self.request(gate, input="amended")[0], 200)
                 self.assertNotIn("client_disconnected", gate.evidence[0])
                 with self.assertRaises(RuntimeError):
                     gate.assert_turn_complete()
+                receipt.assert_not_called()
                 gate.confirm_steer(marker)
                 gate.assert_turn_complete()
+                receipt.assert_called_once_with(("amended",))
                 self.settle.assert_called_once_with(32, Decimal("0.000041"))
                 self.assertFalse(first.done())
             finally:
                 release.set()
             self.assertEqual(first.result()[0], 200)
             gate.assert_turn_complete()
+            receipt.assert_called_once_with(("amended",))
             self.assertEqual(self.settle.call_count, 2)
             self.settle.assert_called_with(31, Decimal("0.000041"))
+
+    def test_message_withheld_during_steer_rpc_is_released_after_rejection(self):
+        item = {"type": "message", "role": "assistant", "id": "original",
+                "content": [{"type": "output_text", "text": "answer"}]}
+        self.stream = event("response.completed", response={"output": [item]})
+        with self.gateway("default", on_response_messages=Mock()) as gate:
+            self.observe.side_effect = lambda _: gate.begin_steer(gate.capture_steer())
+            self.request(gate)
+            gate.on_response_messages.assert_not_called()
+            gate.assert_turn_complete()
+            gate.on_response_messages.assert_called_once_with(("original",))
 
     def test_steer_never_exempts_final_other_requests_or_validation_failures(self):
         gate = self.gateway("fastest")

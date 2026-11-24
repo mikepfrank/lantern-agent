@@ -141,7 +141,9 @@ def _record(kind, row):
 
 def _queries(db, tables, columns):
     if {"chat.batches", "chat.events"} <= tables:
-        yield "chat", """SELECT e.id rid, e.at, b.id batch_id, e.id event_id, b.status,
+        has_finished_at = any(row["name"] == "finished_at" for row in db.execute("PRAGMA chat.table_info(batches)"))
+        completed = "COALESCE(b.finished_at,e.at)" if has_finished_at else "e.at"
+        yield "chat", f"""SELECT e.id rid, {completed} AS at, b.id batch_id, e.id event_id, b.status,
           CASE WHEN b.status='failed' AND e.text LIKE '%. Codex reported a provider or turn error'
                     THEN 'codex_provider_or_turn_error'
                WHEN b.status='failed' AND e.text LIKE '%. The provider reached the %,___-token response limit.'

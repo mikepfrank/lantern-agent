@@ -1,4 +1,5 @@
 from contextlib import closing
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 import sqlite3
@@ -171,6 +172,23 @@ class TurnMetricsTests(unittest.TestCase):
         report = room_turn_metrics(self.state, previous, previous)
         self.assertEqual(report["unattributed_requests_in_period"], 1)
         self.assertIsNone(report["overall"]["usd_per_successful_turn"])
+
+    def test_incremental_reply_uses_completion_day_and_keeps_late_charges_in_scope(self):
+        before = "2026-11-21"
+        store = ChatStore(self.state, clock=lambda: datetime.fromisoformat(before + "T23:58:00+00:00"))
+        store.submit("Start")
+        batch = store.claim()
+        store.append_reply_block(batch.id, "native", "Progress.")
+        self.request(batch.id, "0.02", day=before, time="23:59:00")
+        self.request(None, "0.01", time="00:01:00")
+        self.request(None, "0.01", time="01:01:00")
+        store.clock = lambda: datetime.fromisoformat(DAY + "T00:05:00+00:00")
+        store.complete(batch.id, "")
+        previous = room_turn_metrics(self.state, before, before)
+        self.assertEqual(0, previous["overall"]["successful_turns"])
+        current = room_turn_metrics(self.state, DAY, DAY)["overall"]
+        self.assertEqual((current["successful_turns"], current["settled_qwen_usd"]), (1, "0.02"))
+        self.assertEqual(1, current["possibly_unlinked_requests"])
 
     def test_recovered_links_preserve_native_links_and_actual_charges(self):
         self.turn(1, "complete")

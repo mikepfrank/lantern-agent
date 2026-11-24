@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from contextlib import ExitStack
 from contextvars import ContextVar
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import partial
@@ -22,7 +23,7 @@ from .codex_session import CodexError, run_turn
 from .chat_store import ChatStore
 from .operator_review import ReviewRoom
 from .pdf_tool import PDF_TOOL, view_pdf_page
-from .chat_worker import MESSAGE_TOOL, serve, worker_online
+from .chat_worker import MESSAGE_TOOL, RoomReplyDelivery, serve, worker_online
 from .diagnostics import DIAGNOSTICS_TOOL, read_diagnostics
 from .heritage import HERITAGE_TOOL, read_heritage
 from .github_tools import GITHUB_TOOLS, draft_evidence, github_tool
@@ -326,7 +327,7 @@ async def main(args):
         return supervised_tools(tools)
 
     async def turn(prompt, route, thread=None, *, on_thread=None, take_input=None, return_input=None,
-                   notify=None, scheduled=False, batch_id=None, trigger=None, input_parts=None):
+                   notify=None, on_message=None, scheduled=False, batch_id=None, trigger=None, input_parts=None):
         persona = personas.select(thread, supplied)
         positions = []
         tools = tool_registry(notify)
@@ -483,7 +484,9 @@ async def main(args):
         def dispatch(cid, name, arguments):
             return for_tool(name, cid, supervisor.dispatch, cid, name, arguments, partial(execute, cid))
 
+        delivery = RoomReplyDelivery(on_message) if on_message is not None else None
         gateway = OpenRouterGateway(key, route=route, route_source=route_source, tools=tools, reserve=reserve,
+                                    on_response_messages=delivery.confirm if delivery else None,
                                     image_by_digest=store.image_data_by_digest if store is not None else None,
                                     page_image_loader=(lambda image_id, cid: store.page_image_data(
                                         image_id, cid, thread_id=supervisor.thread)) if store is not None else None,
@@ -509,11 +512,21 @@ async def main(args):
                     tools=tools, dispatch=dispatch,
                     thread_id=thread,
                     on_thread=record_thread, take_input=take_input, return_input=return_input,
-                    capture_steer=gateway.capture_steer, confirm_steer=gateway.confirm_steer,
+                    on_message=delivery.receive if delivery else None,
+                    capture_steer=gateway.capture_steer, on_steer_sent=gateway.begin_steer,
+                    confirm_steer=gateway.confirm_steer,
                     env={"LANTERN_GATEWAY_TOKEN": gateway.token},
                     timeout=600 if args.command == "worker" else 180,
                 )
                 gateway.assert_turn_complete()
+                if delivery and delivery.finish(all_sources_complete=all(
+                    entry["status"] == "completed" and entry.get("request_outcome") == "usable"
+                    and not entry.get("client_disconnected")
+                    and not entry.get("steer_acknowledged") for entry in gateway.evidence
+                )):
+                    # Native text has been handled block by block. There is no
+                    # residual aggregate to append when the worker closes the batch.
+                    result = replace(result, text="")
                 if args.command == "worker":
                     # The superseded response can settle minutes after the
                     # replacement. Keep its reservation while chat continues.
@@ -532,6 +545,9 @@ async def main(args):
                                                         or last.get("output_tokens") == MAX_OUTPUT_TOKENS):
                 raise CodexError(f"The provider reached the {MAX_OUTPUT_TOKENS:,}-token response limit.") from exc
             raise
+        finally:
+            if delivery:
+                delivery.close()
         return result, positions
 
     if args.command == "worker":

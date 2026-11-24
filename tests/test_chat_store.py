@@ -188,6 +188,71 @@ class ChatStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no longer active"):
             peer.notify(batch.id, "stale", "different-call")
 
+    def test_reply_blocks_are_visible_once_per_item_while_the_batch_is_active(self):
+        self.store.submit("Check")
+        batch = self.store.claim()
+        self.assertIsNone(self.store.append_reply_block(batch.id, "empty", " \n "))
+        with self.assertRaisesRegex(ValueError, "empty chat reply"):
+            self.store.complete(batch.id, "")
+        body = "    print(42)"
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            receipts = list(pool.map(lambda _: self.store.append_reply_block(batch.id, "msg1", "\n" + body + "\n"),
+                                     range(8)))
+        self.assertEqual(len(set(receipts)), 1)
+        peer = ChatStore(self.state)
+        self.assertEqual(batch.id, peer.status()["active_batch"])
+        self.assertEqual([body], [e.text for e in peer.events(after=batch.messages[0].id)])
+        self.assertEqual(receipts[0], peer.append_reply_block(batch.id, "msg1", body))
+        with self.assertRaisesRegex(ValueError, "different text"):
+            peer.append_reply_block(batch.id, "msg1", "Changed")
+        # Both identifier namespaces and distinct native messages remain independent.
+        tool_notice = peer.notify(batch.id, "Working", "msg1")
+        final = peer.append_reply_block(batch.id, "msg2", " \nFinished. \n")
+        self.assertEqual(final, peer.complete(batch.id, ""))
+        self.assertEqual(final, peer.complete(batch.id, ""))
+        self.assertEqual(final, peer.append_reply_block(batch.id, "msg2", "Finished."))
+        self.assertEqual(["Working", "Finished."], [e.text for e in peer.events(after=receipts[0])])
+        self.assertLess(tool_notice, final)
+        with self.assertRaisesRegex(ValueError, "no longer active"):
+            peer.append_reply_block(batch.id, "late", "Late")
+        self.store.submit("Next")
+        next_batch = self.store.claim()
+        self.assertNotEqual(receipts[0], peer.append_reply_block(next_batch.id, "msg1", body))
+        last = peer.notify(next_batch.id, "Done", "call1")
+        self.assertEqual(last, peer.complete(next_batch.id, ""))
+
+    def test_interrupt_keeps_published_blocks_then_records_failure(self):
+        self.store.submit("Work")
+        batch = self.store.claim()
+        first = self.store.append_reply_block(batch.id, "msg1", "Checking.")
+        peer = ChatStore(self.state)
+        self.assertEqual(1, peer.recover())
+        self.assertEqual(0, peer.recover())
+        block, interruption = peer.events(after=batch.messages[0].id)
+        self.assertEqual((block.id, block.role, block.text), (first, "lantern", "Checking."))
+        self.assertEqual(interruption.role, "system")
+        self.assertIn("interrupted", interruption.text)
+        self.assertEqual(first, peer.append_reply_block(batch.id, "msg1", "Checking."))
+        with self.assertRaisesRegex(ValueError, "different outcome"):
+            peer.complete(batch.id, "")
+
+    def test_finished_at_migrates_without_rewriting_old_turns(self):
+        self.store.submit("Before upgrade")
+        batch = self.store.claim()
+        self.store.complete(batch.id, "Old reply")
+        with self.store._connect(write=True) as db:
+            db.execute("ALTER TABLE batches DROP COLUMN finished_at")
+            db.execute("DROP TABLE reply_blocks")
+        store = ChatStore(self.state)
+        store.submit("After upgrade")
+        newer = store.claim()
+        store.append_reply_block(newer.id, "msg1", "New reply")
+        store.complete(newer.id, "")
+        with store._connect() as db:
+            older, current = db.execute("SELECT finished_at FROM batches ORDER BY id")
+            self.assertIsNone(older[0])
+            self.assertIsNotNone(datetime.fromisoformat(current[0]).utcoffset())
+
     def test_padded_notification_is_stored_once_and_old_receipts_remain_valid(self):
         self.store.submit("Start")
         batch = self.store.claim()

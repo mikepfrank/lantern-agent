@@ -34,7 +34,7 @@ To use terminal chat directly, run:
 ssh -t lightsail "sudo -iu lantern lantern"
 ```
 
-Press Enter to send. You can type again while Lantern works. The worker offers follow-ups to the active Codex turn. A follow-up arriving after that turn closes starts the next turn in the same conversation. Lantern can send an interim message with `message_operator`. Both those messages and final replies are saved while you are disconnected.
+Press Enter to send. You can type again while Lantern works. During a multi-step turn, the browser and terminal show each completed reply block as its provider response clears. A later tool call can still be running while you read an earlier update. Reconnecting shows the same saved blocks, including any delivered before an interruption. Lantern can also send a deliberate update with `message_operator`. The worker offers follow-ups to the active Codex turn. A follow-up arriving after that turn closes starts the next turn in the same conversation.
 
 Use `/status` for active and queued work, `/history` for recent messages, and `/quit` to detach. Run the same SSH command to return. In a `lantern` login shell, `lantern send "…"` queues a message without opening the terminal interface, and `lantern usage` shows both daily ledgers. A worker restart preserves the conversation and queued messages. If it stops mid-turn, check the interruption notice and any tool effects before resubmitting.
 

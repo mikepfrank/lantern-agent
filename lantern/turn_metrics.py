@@ -59,7 +59,7 @@ def _summary(turns):
 
 def room_turn_metrics(state: Path, start_day: str, end_day: str, *, batch: int | None = None,
                       provider_limit: int = 8):
-    """Select complete/failed batches by UTC outcome-event date, gathering all linked calls across dates."""
+    """Select finished turns by UTC completion date, gathering all linked calls across dates."""
     chat, ledger = state / "chat.sqlite", state / "usage.sqlite"
     if not chat.is_file() or not ledger.is_file():
         return None
@@ -84,16 +84,20 @@ def room_turn_metrics(state: Path, start_day: str, end_day: str, *, batch: int |
         first_input = ("""(SELECT MIN(julianday(input.at)) FROM inbox i JOIN events input ON input.id=i.event_id
                            WHERE i.batch_id=b.id AND i.steered=0)"""
                        if {"batch_id", "event_id", "steered"} <= inbox_fields else "NULL")
-        # A tool-only success can use an earlier notification as its outcome. The next batch's
-        # outcome is then a safe upper bound because a room has only one active batch at a time.
+        # Before the room recorded completion times, a tool-only success could use an earlier
+        # notification as its outcome. The next batch's outcome is then a safe upper bound.
         ordinary = ("NOT EXISTS (SELECT 1 FROM notifications n WHERE n.event_id=b.outcome)"
                     if "notifications" in tables else "b.status='failed'")
         last_possible = f"""CASE WHEN {ordinary} THEN julianday(e.at) ELSE
                 (SELECT julianday(next_event.at) FROM batches next JOIN events next_event ON next_event.id=next.outcome
                  WHERE next.id>b.id ORDER BY next.id LIMIT 1) END"""
+        completed = "e.at"
+        if "finished_at" in {row[1] for row in db.execute("PRAGMA table_info(batches)")}:
+            completed = "COALESCE(b.finished_at,e.at)"
+            last_possible = f"COALESCE(julianday(b.finished_at),{last_possible})"
         for batch_id, status, first, last in db.execute(f"""SELECT b.id,b.status,{first_input},{last_possible}
                 FROM batches b JOIN events e ON e.id=b.outcome
-                WHERE b.status IN ('complete','failed') AND date(e.at) BETWEEN ? AND ?
+                WHERE b.status IN ('complete','failed') AND date({completed}) BETWEEN ? AND ?
                 AND (? IS NULL OR b.id=?)""", (start_day, end_day, batch, batch)):
             batches[batch_id] = status, first, last
         receipts = defaultdict(list)

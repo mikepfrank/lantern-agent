@@ -4,7 +4,9 @@ import asyncio
 from contextlib import contextmanager
 import os
 from pathlib import Path
+import sqlite3
 import sys
+from threading import Lock
 
 from .codex_session import CodexError, SteeringInput
 from .image_ref import image_reference
@@ -22,6 +24,68 @@ MESSAGE_TOOL = {
 
 class WorkerBusy(RuntimeError):
     pass
+
+
+class RoomReplyDelivery:
+    """Match native visible messages to settled provider responses for one room turn."""
+
+    def __init__(self, publish):
+        self.publish = publish
+        self.lock = Lock()
+        self.pending = {}
+        self.confirmed = set()
+        self.saw_message = False
+        self.closed = False
+        self.error = None
+
+    def receive(self, item_id, text):
+        with self.lock:
+            self.saw_message = True
+            self.pending[item_id] = text
+            self._flush()
+            self._check_error()
+
+    def confirm(self, item_ids):
+        # Called on the gateway's HTTP thread. Either half of the pair may arrive first.
+        with self.lock:
+            if not self.closed:
+                self.confirmed.update(item_ids)
+                self._flush()
+
+    def _flush(self):
+        while self.pending and self.error is None:
+            item_id = next(iter(self.pending))
+            if item_id not in self.confirmed:
+                break
+            try:
+                self.publish(item_id, self.pending[item_id])
+            except (sqlite3.Error, OSError, ValueError, RuntimeError) as exc:
+                # Surface storage errors on the worker without disturbing provider settlement.
+                self.error = exc
+                break
+            del self.pending[item_id]
+            self.confirmed.remove(item_id)
+
+    def _check_error(self):
+        if self.error is not None:
+            raise CodexError("Unable to save a completed reply block in the room") from self.error
+
+    def finish(self, *, all_sources_complete):
+        # Called only after the gateway's existing final-turn validation. Some
+        # providers omit stable item IDs. On a clean turn their native text is
+        # safe to release here. On a steered turn require positive attribution.
+        with self.lock:
+            if all_sources_complete:
+                self.confirmed.update(self.pending)
+            else:
+                self.pending = {key: text for key, text in self.pending.items() if key in self.confirmed}
+            self._flush()
+            self._check_error()
+            return self.saw_message
+
+    def close(self):
+        with self.lock:
+            self.closed = True
 
 
 @contextmanager
@@ -103,6 +167,7 @@ async def process_batch(store, batch, turn, route):
         result, _ = await turn(
             prompt, route, batch.thread_id, on_thread=lambda tid: store.bind_thread(batch.id, tid),
             take_input=take_input, return_input=lambda ids: store.release_steer(batch.id, ids), notify=notify,
+            on_message=lambda item_id, text: store.append_reply_block(batch.id, item_id, text),
             batch_id=batch.id, trigger=trigger, **source,
         )
         store.complete(batch.id, result.text)
