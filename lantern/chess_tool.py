@@ -2,10 +2,10 @@
 
 The sibling astra_engine package contains the rules, search, and search
 diagnostics from mikepfrank/astra-chess at commit
-ceb65169f03e99282dd40b3ee0e277c0e8a2947e, copied without changes.
+ceb65169f03e99282dd40b3ee0e277c0e8a2947e, with local FEN input diagnostics.
 """
 
-from .astra_engine.rules import Position
+from .astra_engine.rules import FENError, Position
 from .astra_engine.search import analyze
 
 
@@ -13,27 +13,53 @@ CHESS_TOOL = {
     "name": "chess_analyze",
     "description": (
         "Analyze one orthodox chess position with Astra's local tactical engine. "
-        "Supply a six-field FEN. Candidate lines use SAN and UCI, with scores "
+        "Supply a six-field FEN. The returned fen is the normalized input position. "
+        "Candidate lines use SAN and UCI, with scores "
         "from the side to move. A positive mate_in_plies counts half-moves to "
         "mate for that side. Earlier repetitions cannot be recovered from FEN."
     ),
     "inputSchema": {
         "type": "object",
-        "properties": {"fen": {"type": "string", "description": "Six-field FEN."}},
+        "properties": {"fen": {
+            "type": "string", "maxLength": 256,
+            "description": "Board (8 ranks of 8 squares), side to move, castling, en passant, halfmove clock, fullmove number.",
+        }},
         "required": ["fen"],
         "additionalProperties": False,
     },
 }
 
 
+class ChessInputError(ValueError):
+    """A chess argument diagnostic suitable for returning to Lantern."""
+
+
+class ChessEngineError(RuntimeError):
+    """Internal analysis failure. The exception cause is for host diagnostics."""
+
+
 def analyze_position(arguments: dict) -> dict:
     """Return a bounded search with ranked lines, draw claims, and terminal status."""
     if not isinstance(arguments, dict) or set(arguments) != {"fen"}:
-        raise ValueError("chess_analyze requires exactly one argument named fen")
+        raise ChessInputError("chess_analyze requires one chess argument named 'fen'. "
+                              "Supply the six-field position string. Search settings are fixed.")
     fen = arguments["fen"]
     if not isinstance(fen, str) or len(fen) > 256:
-        raise ValueError("fen must be a string of at most 256 characters")
-    analysis = analyze(Position.from_fen(fen), max_depth=3, time_limit=2.0, multipv=3)
+        raise ChessInputError("The 'fen' argument must be a string of at most 256 characters.")
+    try:
+        return _analysis_result(fen)
+    except ChessInputError:
+        raise
+    except Exception as exc:
+        raise ChessEngineError("The chess engine could not finish this analysis due to an internal error.") from exc
+
+
+def _analysis_result(fen: str) -> dict:
+    try:
+        position = Position.from_fen(fen)
+    except FENError as exc:
+        raise ChessInputError(str(exc)) from exc
+    analysis = analyze(position, max_depth=3, time_limit=2.0, multipv=3)
     return {
         "fen": analysis["start_fen"],
         "turn": analysis["turn"],

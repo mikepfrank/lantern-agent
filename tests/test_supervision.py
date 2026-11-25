@@ -7,10 +7,10 @@ import sqlite3
 import tempfile
 from threading import Event
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from lantern import concerns
-from lantern.chess_tool import CHESS_TOOL
+from lantern.chess_tool import CHESS_TOOL, ChessInputError, analyze_position
 from lantern.opus import OpusCaseTooLarge, OpusResponseError
 from lantern.review_vendors import HTTPRejection, OpusTransportError, ReviewBudgetUnavailable
 from lantern.supervision import CONSULT, ReviewUnavailable, Supervisor, review_summary, supervised_tools
@@ -91,6 +91,43 @@ class ReviewTests(unittest.TestCase):
         self.assertIn("proceeding carefully", action["recent_context"])
         self.assertNotIn("opaque-provider-field", str(action))
         self.assertEqual(self.flags(), [])
+
+    def test_chess_input_error_reaches_model_and_replay_after_review(self):
+        self.gate.observe(self.payload)
+        self.execute.side_effect = lambda name, args: analyze_position(args)
+        args = {"fen": "7k/8/8/8/8/8/8/2K4 w - - 0 1", "rationale": "Check the test board."}
+        with self.assertRaises(ChessInputError) as error:
+            analyze_position({"fen": args["fen"]})
+        first = self.call("bad-rank", args)
+        self.assertEqual(first, {"error": str(error.exception), "error_code": "invalid_chess_arguments"})
+        self.assertIn("rank", first["error"].lower())
+        self.assertEqual(self.call("bad-rank", args), first)
+        self.execute.assert_called_once()
+        self.assertEqual(self.luna.screen.call_args.args[0]["arguments"], {"fen": args["fen"]})
+        self.assertEqual(review_summary(self.state)["invalid_chess_arguments"], 1)
+
+    def test_other_tool_validation_errors_keep_their_existing_boundary(self):
+        self.gate.observe(self.payload)
+        self.execute.side_effect = ValueError("private internal detail")
+        receipt = self.gate.dispatch("archive-error", "read_heritage",
+                                     {"rationale": "Read the test record."}, self.execute)
+        self.assertEqual(receipt, {"error": "Invalid tool arguments."})
+
+    def test_chess_engine_failure_has_distinct_private_diagnostic_and_durable_receipt(self):
+        self.gate.observe(self.payload)
+        self.execute.side_effect = lambda name, args: analyze_position(args)
+        args = {"fen": "7k/8/5KQ1/8/8/8/8/8 w - - 0 1", "rationale": "Analyze this position."}
+        secret = "private details from inside the engine"
+        with patch("lantern.chess_tool.analyze", side_effect=ValueError(secret)), \
+                self.assertLogs("lantern.supervision", level="ERROR") as journal:
+            first = self.call("engine-error", args)
+        self.assertEqual(first["error_code"], "chess_engine_failure")
+        self.assertNotIn(secret, str(first))
+        self.assertIn("ValueError", journal.output[0])
+        self.assertNotIn(secret, journal.output[0])
+        self.assertEqual(self.call("engine-error", args), first)
+        self.execute.assert_called_once()
+        self.assertEqual(review_summary(self.state)["chess_engine_failure"], 1)
 
     def test_flag_explanations_survive_ruling_failure_retries_and_retirement(self):
         gate = self.session(interval=1, batch_id=7)

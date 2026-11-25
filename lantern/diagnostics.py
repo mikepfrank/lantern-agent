@@ -31,6 +31,7 @@ harness_logs view_pdf_page unregistered""".split())
 STATUSES = set("""complete failed interrupted deferred pending completed incomplete upstream_http_error
 invalid_upstream_response settled unconfirmed rejected metered ambiguous archive_error context_unavailable
 context_flagged context_clear tool_flagged tool_clear tool_review_unreadable tool_review_unavailable
+invalid_chess_arguments chess_engine_failure
 opus_allowed opus_denied opus_asked_operator opus_advice unregistered_blocked unregistered_clear unregistered_flagged
 unregistered_review_unreadable unregistered_review_unavailable unregistered_screen_unavailable
 unregistered_opus_allow unregistered_opus_deny context_repeat context_review_unavailable""".split())
@@ -195,12 +196,15 @@ def _queries(db, tables, columns):
         if "supervision.actions" in tables:
             joins += """ LEFT JOIN supervision.actions a ON a.thread=e.thread AND a.call_id=e.call_id
                 AND (e.event IN ('tool_review_unreadable','tool_review_unavailable','opus_denied')
-                OR (e.tool='coding_run' AND e.event IN ('tool_clear','opus_allowed')))"""
+                OR (e.tool IN ('coding_run','chess_analyze') AND e.event IN ('tool_clear','opus_allowed')))"""
             # Only emit named outcomes and typed scalars. The action payload
             # also contains stdout/stderr and must never enter a report.
             safe = "CASE WHEN json_valid(a.result) THEN a.result ELSE '{}' END"
             error = f"json_extract({safe},'$.error')"
-            coding = f""",CASE WHEN e.event='opus_denied' THEN 'opus_denied'
+            coding = f""",CASE WHEN e.tool='chess_analyze' AND e.event IN ('tool_clear','opus_allowed')
+                    AND json_type({safe},'$.error') IS NULL AND json_type({safe},'$.fen')='text'
+                    AND json_type({safe},'$.candidates')='array' THEN 'chess_analysis_returned'
+                WHEN e.event='opus_denied' THEN 'opus_denied'
                 WHEN e.event='tool_review_unreadable' THEN 'opus_response_unreadable'
                 WHEN e.event='tool_review_unavailable' THEN
                     CASE WHEN {error} LIKE 'Luna review unavailable.%' THEN 'luna_unavailable'

@@ -4,12 +4,15 @@ from contextlib import contextmanager
 from copy import deepcopy
 import hashlib
 import json
+import logging
 from pathlib import Path
 import sqlite3
 from threading import Condition, local
+from traceback import extract_tb
 from typing import NamedTuple
 
 from . import concerns
+from .chess_tool import ChessEngineError, ChessInputError
 from .github_tools import OPEN_DRAFT, ProposalLookupError
 from .opus import OPERATOR_QUESTION_LIMIT, OpusCaseTooLarge, OpusResponseError
 from .review_policy import action_facts, concern_refs, ruling_query
@@ -631,6 +634,20 @@ class Supervisor:
                 raise _opus_failure(exc, batch_id=self.batch_id, consultation=True) from exc
             self._event("opus_advice", name, call_id)
             return {"advice": advice, "research": research, "available_research": sources}
+        if name == "chess_analyze":
+            try:
+                return execute(name, args)
+            except ChessInputError as exc:
+                self._event("invalid_chess_arguments", name, call_id)
+                return {"error": str(exc), "error_code": "invalid_chess_arguments"}
+            except ChessEngineError as exc:
+                self._event("chess_engine_failure", name, call_id)
+                cause = exc.__cause__ or exc
+                frames = extract_tb(cause.__traceback__, limit=-1)
+                location = f"{Path(frames[0].filename).name}:{frames[0].lineno}" if frames else "unknown"
+                logging.getLogger(__name__).error("Chess analysis failed on turn %s at %s (%s)",
+                                                  self.batch_id, location, type(cause).__name__)
+                return {"error": str(exc), "error_code": "chess_engine_failure"}
         return execute(name, args)
 
     def _case_with_concerns(self, items, action=None):

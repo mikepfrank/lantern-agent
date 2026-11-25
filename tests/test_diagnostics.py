@@ -98,6 +98,32 @@ class DiagnosticsTests(TestCase):
                               [("tool_clear", tool) for tool in ("view_pdf_page", "workspace_append", "workspace_replace")])
         self.assertNotIn("private-filename", json.dumps(report))
 
+    def test_chess_outcomes_distinguish_screening_errors_and_returned_results(self):
+        Supervisor(self.state, None, None, None)
+        fen = "7k/8/5KQ1/8/8/8/8/8 w - - 0 1"
+        cases = [
+            ("still-running", ["tool_clear"], None),
+            ("finished", ["tool_clear"], {"fen": fen, "candidates": []}),
+            ("invalid", ["tool_clear", "invalid_chess_arguments"],
+             {"error": f"Private detail about {fen}", "error_code": "invalid_chess_arguments"}),
+            ("fault", ["tool_flagged", "opus_allowed", "chess_engine_failure"],
+             {"error": "Private engine details", "error_code": "chess_engine_failure"}),
+        ]
+        for call_id, events, result in cases:
+            self.sql("supervision.sqlite", "INSERT INTO actions VALUES(?,?,?,?)",
+                     ("room", call_id, "digest", json.dumps(result) if result is not None else None))
+            for event in events:
+                self.sql("supervision.sqlite", "INSERT INTO events(thread,event,tool,call_id) VALUES(?,?,?,?)",
+                         ("room", event, "chess_analyze", call_id))
+        report = read_diagnostics(self.state, {"limit": 30})
+        self.assertEqual(report["unavailable_sections"], [])
+        self.assertCountEqual([(row["status"], row.get("outcome_code")) for row in report["records"]],
+                              [("tool_clear", None), ("tool_clear", "chess_analysis_returned"), ("tool_clear", None),
+                               ("invalid_chess_arguments", None), ("tool_flagged", None), ("opus_allowed", None),
+                               ("chess_engine_failure", None)])
+        self.assertNotIn(fen, json.dumps(report))
+        self.assertNotIn("Private", json.dumps(report))
+
     def test_real_ledgers_show_only_allowlisted_results_and_receipts(self):
         secret = "SECRET_private_material_not_for_a_tool"
         store = ChatStore(self.state)

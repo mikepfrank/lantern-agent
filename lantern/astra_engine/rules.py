@@ -20,6 +20,10 @@ _DIRECTIONS = ((1, 0), (-1, 0), (0, 1), (0, -1),
                (1, 1), (1, -1), (-1, 1), (-1, -1))
 
 
+class FENError(ValueError):
+    """The supplied position failed an explicit FEN check."""
+
+
 def square_name(index: int) -> str:
     if not isinstance(index, int) or not 0 <= index < 64:
         raise ValueError("Square index must be between 0 and 63")
@@ -81,14 +85,17 @@ class Position:
     @classmethod
     def from_fen(cls, fen: str) -> Position:
         if not isinstance(fen, str):
-            raise ValueError("FEN must be a string")
+            raise FENError("FEN must be a string.")
         fields = fen.split()
         if len(fields) != 6:
-            raise ValueError("FEN must have six fields")
+            raise FENError(f"FEN has {len(fields)} fields. Expected 6 in order: board, side to move, "
+                           "castling, en passant, halfmove clock, fullmove number. "
+                           "When both castling and en passant are absent, supply two separate '-' fields.")
         placement, active, rights, ep, halfmove_text, fullmove_text = fields
         rows = placement.split("/")
         if len(rows) != 8:
-            raise ValueError("FEN board must have eight ranks")
+            raise FENError(f"FEN board has {len(rows)} ranks. Expected 8 separated by '/', from rank 8 to rank 1. "
+                           "Write '8' for an empty rank.")
         board = ["."] * 64
         for row_index, row in enumerate(rows):
             file = 0
@@ -96,48 +103,54 @@ class Position:
                 if token in "12345678":
                     file += int(token)
                 elif token in _PIECES:
-                    if file >= 8:
-                        raise ValueError("FEN rank exceeds eight squares")
-                    board[(7 - row_index) * 8 + file] = token
+                    if file < 8:
+                        board[(7 - row_index) * 8 + file] = token
                     file += 1
                 else:
-                    raise ValueError(f"Invalid FEN board character: {token!r}")
-                if file > 8:
-                    raise ValueError("FEN rank exceeds eight squares")
+                    raise FENError(f"FEN rank {8 - row_index} contains invalid character {ascii(token)}. "
+                                   "Use piece letters or digits 1 through 8 for empty squares.")
             if file != 8:
-                raise ValueError("Each FEN rank must contain eight squares")
+                label = row if len(row) <= 20 else row[:20] + "..."
+                raise FENError(f"FEN rank {8 - row_index} ('{label}') expands to {file} squares. Expected 8 (a through h).")
         if active not in ("w", "b"):
-            raise ValueError("FEN active color must be w or b")
+            raise FENError("FEN side to move (field 2) must be 'w' or 'b'.")
         turn = WHITE if active == "w" else BLACK
         if rights == "-":
             rights = ""
         elif (not rights or any(char not in "KQkq" for char in rights)
               or len(set(rights)) != len(rights)):
-            raise ValueError("Invalid FEN castling rights")
+            raise FENError("FEN castling (field 3) must be '-' or a combination of KQkq with no duplicates.")
         rights = "".join(char for char in "KQkq" if char in rights)
         if (re.fullmatch(r"[0-9]+", halfmove_text) is None
                 or re.fullmatch(r"[0-9]+", fullmove_text) is None):
-            raise ValueError("FEN counters must be nonnegative integers")
+            raise FENError("FEN halfmove clock and fullmove number (fields 5 and 6) must be decimal integers.")
         halfmove = int(halfmove_text)
         fullmove = int(fullmove_text)
         if fullmove < 1:
-            raise ValueError("FEN fullmove number must be at least one")
+            raise FENError("FEN fullmove number (field 6) must be at least 1.")
         if board.count("K") != 1 or board.count("k") != 1:
-            raise ValueError("A position must contain exactly one king per side")
+            raise FENError(f"FEN contains {board.count('K')} white and {board.count('k')} black kings. Expected one of each.")
         if any(piece.lower() == "p" for piece in board[:8] + board[56:]):
-            raise ValueError("Pawns cannot stand on the first or eighth rank")
-        for color, pawn in ((WHITE, "P"), (BLACK, "p")):
-            if board.count(pawn) > 8 or sum(color_of(piece) == color for piece in board) > 16:
-                raise ValueError("A side cannot have more than eight pawns or sixteen pieces")
+            raise FENError("Pawns cannot stand on rank 1 or rank 8.")
+        for color, pawn, side in ((WHITE, "P", "White"), (BLACK, "p", "Black")):
+            pawns = board.count(pawn)
+            pieces = sum(color_of(piece) == color for piece in board)
+            if pawns > 8 or pieces > 16:
+                raise FENError(f"FEN gives {side} {pawns} pawns and {pieces} pieces including pawns. "
+                               "The limits are 8 pawns and 16 pieces per side.")
         if board.index("k") in _KINGS[board.index("K")]:
-            raise ValueError("Kings cannot occupy adjacent squares")
+            raise FENError("The two kings cannot occupy adjacent squares.")
         for right, king_square, rook_square, king, rook in (
             ("K", 4, 7, "K", "R"), ("Q", 4, 0, "K", "R"),
             ("k", 60, 63, "k", "r"), ("q", 60, 56, "k", "r"),
         ):
             if right in rights and (board[king_square] != king or board[rook_square] != rook):
-                raise ValueError("Castling rights require the king and rook on their home squares")
-        ep_square = None if ep == "-" else parse_square(ep)
+                raise FENError(f"Castling right '{right}' requires the king on {square_name(king_square)} "
+                               f"and the rook on {square_name(rook_square)}.")
+        try:
+            ep_square = None if ep == "-" else parse_square(ep)
+        except ValueError as exc:
+            raise FENError("FEN en passant (field 4) must be '-' or a square on rank 3 or 6.") from exc
         if ep_square is not None:
             expected_rank = 5 if turn == WHITE else 2
             victim_square = ep_square - 8 if turn == WHITE else ep_square + 8
@@ -146,10 +159,12 @@ class Position:
             if (ep_square // 8 != expected_rank or board[ep_square] != "."
                     or board[victim_square] != victim or board[origin_square] != "."
                     or halfmove != 0):
-                raise ValueError("Invalid en passant target or double-push history")
+                raise FENError("FEN en passant (field 4) must match the last double pawn push, "
+                               "with an empty target on the correct rank and a halfmove clock of 0.")
         position = cls(tuple(board), turn, rights, ep_square, halfmove, fullmove)
         if position.in_check(1 - turn):
-            raise ValueError("The side that just moved cannot have left its king in check")
+            side = "Black" if turn == WHITE else "White"
+            raise FENError(f"FEN leaves {side}'s king in check after {side} just moved. Check the board and side to move.")
         return position
 
     def fen(self) -> str:
