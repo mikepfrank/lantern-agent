@@ -14,7 +14,9 @@ test -x /usr/bin/docker
 test -x /usr/bin/python3.12
 getent group lantern >/dev/null
 install -d -m 0700 "$base" /etc/lantern /opt/lantern/coding
-install -d -m 0700 "$mountpoint"
+if ! mountpoint -q "$mountpoint"; then
+    install -d -m 0700 "$mountpoint"
+fi
 exec 9>"$base/install.lock"
 flock -n 9 || { echo "Another coding installation is running." >&2; exit 1; }
 temp=$(mktemp -d "$base/.install.XXXXXXXX")
@@ -140,6 +142,9 @@ install -m 0644 "$src/lantern/coding_broker.py" /opt/lantern/coding/broker.py
 install -d -o root -g root -m 0755 /var/lib/lantern-imports
 install -d -o lantern -g lantern -m 0711 /var/lib/lantern-imports/objects
 install -d -o lantern -g lantern -m 0711 /var/lib/lantern-imports/clone-packs
+# The receiver traverses this fixed mount as uid 65532. Its parent on the
+# host stays private and ordinary coding containers mount only files/.
+chmod 0711 "$mountpoint"
 install -d -o 65532 -g 65532 -m 0700 "$mountpoint/clone-stage"
 install -d -m 0755 /etc/systemd/system/lantern-chat.service.d
 printf '%s\n' '[Service]' 'Environment=LANTERN_FILE_IMPORTS=1' 'Environment=LANTERN_REPO_CLONES=1' \
