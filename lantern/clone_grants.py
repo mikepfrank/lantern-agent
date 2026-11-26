@@ -64,11 +64,9 @@ class CloneGrants:
 
     def propose(self, repository, purpose, branch=None):
         repository = normalize_repository(repository)
-        if branch is not None:
-            branch = validate_branch(branch)
         if not isinstance(purpose, str) or not 1 <= len(purpose.strip()) <= 400 or not purpose.isprintable():
             raise ValueError("Describe the reason for studying this repository in 1–400 printable characters.")
-        remote = resolve_branch(repository, branch)
+        remote = resolve_branch(repository, None if branch == "" else branch)
         return self._request(repository, _id(remote["repository_id"]), validate_branch(remote["branch"]),
                              _commit(remote["commit"]), purpose.strip())
 

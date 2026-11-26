@@ -68,7 +68,8 @@ class NativeIndependentWorker(unittest.TestCase):
         destination = f"/work/repos/{repository}/{revision}"
         pack = b"offline almanac repository fixture"
         clone_actions = [
-            ("request_repository_clone", {"repository": repository, "purpose": "Study the tide prediction method."}),
+            ("request_repository_clone", {"repository": repository, "branch": "",
+                                          "purpose": "Study the tide prediction method."}),
             ("repository_clone_status", {"request_id": 1}),
             ("clone_repository", {"grant_id": 1}),
         ]

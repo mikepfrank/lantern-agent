@@ -38,7 +38,9 @@ class PublicGitTransfer(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(clone.CloneFetchError):
                 clone.normalize_repository(bad)
         self.assertEqual(clone.validate_branch("release/v1.2"), "release/v1.2")
-        for bad in ("HEAD", "a..b", "a/.secret", "--help", "main.lock", "v1/", "f@{1}", "x\nfoo"):
+        for bad in ("HEAD", "a..b", "a/.secret", "--help", "main.lock", "v1/", "f@{1}", "x\nfoo",
+                    "", "a b", "a:b", "a?b", "a[b", "a*b", "a~b", "a^b", "a\\b", "a\x7fb",
+                    "a//b", "/a", "a.", "a.lock/v2", "a" * 129):
             with self.subTest(bad=bad), self.assertRaises(clone.CloneFetchError):
                 clone.validate_branch(bad)
 
@@ -57,6 +59,19 @@ class PublicGitTransfer(unittest.TestCase):
         for bad in ({**good, "ref": "refs/heads/other"}, {**good, "object": {"type": "tag", "sha": sha}}):
             with patch.object(clone, "_api", side_effect=[info, bad]), self.assertRaises(clone.CloneFetchError):
                 clone._resolve("one/two", None)
+
+    def test_nonstandard_branch_names_are_preserved_and_encoded_in_lookup(self):
+        sha = "e" * 40
+        name = "référence/release+stable#50%"
+        encoded = "r%C3%A9f%C3%A9rence/release%2Bstable%2350%25"
+        ref = {"ref": "refs/heads/" + name, "object": {"type": "commit", "sha": sha}}
+        for branch in (None, name):
+            info = {"full_name": "one/two", "id": 123, "private": False,
+                    "default_branch": name if branch is None else "other"}
+            with self.subTest(branch=branch), patch.object(clone, "_api", side_effect=[info, ref]) as api:
+                result = clone._resolve("one/two", branch)
+                self.assertEqual(result, {"repository_id": 123, "commit": sha, "branch": name})
+                api.assert_called_with("/repositories/123/git/ref/heads/" + encoded)
 
     @unittest.skipUnless(shutil.which("git"), "requires Git")
     def test_real_local_upload_pack_produces_self_contained_depth_one_git_checkout(self):

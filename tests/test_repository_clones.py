@@ -57,6 +57,23 @@ class RepositoryApprovalTests(unittest.TestCase):
         self.assertIn("error", clone_tool(self.grants, None, "allow_once", {"id": first["id"]}, "trial"))
         self.fetch.assert_not_called()
 
+    def test_omitted_and_empty_branch_propose_the_same_resolved_revision(self):
+        repo = "astronomy-team/geometry"
+        self.resolve.return_value["branch"] = "trunk"
+        omitted = self.request(repo)
+        self.resolve.assert_called_once_with(repo, None)
+        args = {"repository": repo, "purpose": "Read the observations.", "branch": ""}
+        empty = clone_tool(self.grants, None, "request_repository_clone", args, "next")
+        self.resolve.assert_called_with(repo, None)
+        self.assertEqual((empty["id"], empty["branch"], empty["commit"], empty["status"]),
+                         (omitted["id"], "trunk", FIRST, "pending"))
+        self.resolve.return_value["branch"] = "default"
+        explicit = clone_tool(self.grants, None, "request_repository_clone", {**args, "branch": "default"}, "new")
+        self.resolve.assert_called_with(repo, "default")
+        self.assertEqual(explicit["branch"], "default")
+        self.assertNotEqual(explicit["id"], omitted["id"])
+        self.fetch.assert_not_called()
+
     def test_operator_decision_and_original_pin_survive_restarts(self):
         req = self.request()
         self.resolve.return_value["commit"] = SECOND

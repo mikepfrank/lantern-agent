@@ -18,10 +18,12 @@ CLONE_TOOLS = (
           "Choose a public GitHub repository you want to study, even if Mike has never mentioned it. "
           "Submit its owner/repo or HTTPS URL and your reason for the operator to review privately. "
           "The host looks up only public repository and branch metadata before approval. "
-          "Omit branch to use the repository's default branch.",
+          "Omit branch or pass an empty string to use GitHub's current default branch.",
           {"repository": {"type": "string", "maxLength": 180},
            "purpose": {"type": "string", "minLength": 1, "maxLength": 400},
-           "branch": {"type": "string", "maxLength": 128}}, ["repository", "purpose"]),
+           "branch": {"type": "string", "maxLength": 128,
+                      "description": "Optional exact branch name. Omitted or empty uses the repository default."}},
+          ["repository", "purpose"]),
     _tool("repository_clone_status", "List recent requests or look up one decision and its checkout paths.",
           {"request_id": _ID}, []),
     _tool("clone_repository", "Bring an approved shallow Git checkout into your offline workspace. "

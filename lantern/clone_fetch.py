@@ -40,10 +40,14 @@ def normalize_repository(value):
 
 
 def validate_branch(value):
-    if (not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_./-]{0,127}", value)
-            or value == "HEAD" or ".." in value or value.endswith(".")
+    # Keep the branch exactly as GitHub spells it, including printable Unicode.
+    # It is encoded as a URL path for lookup and never supplied to a shell.
+    if (not isinstance(value, str) or not 1 <= len(value) <= 128 or not value.isprintable()
+            or any(ch in " ~^:?*[\\" for ch in value)
+            or value == "HEAD" or value.startswith("-") or value.endswith(".")
+            or ".." in value or "@{" in value
             or any(not part or part.startswith(".") or part.endswith(".lock") for part in value.split("/"))):
-        raise CloneFetchError("Use a short branch name, such as main or releases/v1.")
+        raise CloneFetchError("Use a valid Git branch name of at most 128 printable characters, or omit branch to use the repository default.")
     return value
 
 
