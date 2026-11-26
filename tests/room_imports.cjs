@@ -17,6 +17,7 @@ async function exercise(browser, width) {
       if (url.pathname === "/api/room") return reply({events: [], status: {online: true}});
       if (url.pathname === "/api/concerns") return reply({concerns: [], as_of: null});
       if (url.pathname === "/api/review-questions") return reply({questions: []});
+      if (url.pathname === "/api/repository-clones") return reply({requests: [], grants: []});
       if (url.pathname.startsWith("/api/file-imports")) {
         if (route.request().method() === "GET") return reply(overview);
         const body = route.request().postDataJSON();

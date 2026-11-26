@@ -75,7 +75,7 @@ class WebSignInTests(unittest.TestCase):
             self.assertEqual(401, request(server, "POST", "/api/sign-in", body={"password": PASSWORD})[0])
             self.assertEqual(404, request(server, "POST", "/api/set-password", body={"password": PASSWORD})[0])
             for path in ("/api/room", "/api/room?after=0", "/api/review-questions", "/api/file-imports",
-                         "/api/messages/1/image", "/api/messages/1/images/1"):
+                         "/api/repository-clones", "/api/messages/1/image", "/api/messages/1/images/1"):
                 self.assertEqual(401, request(server, "GET", path)[0], path)
 
     def test_public_and_tunnel_auth_are_independent(self):
@@ -101,6 +101,9 @@ class WebSignInTests(unittest.TestCase):
                                ("/api/file-imports", {"project": "science", "collection": "test", "files": []}),
                                ("/api/file-imports/1/decide", {"decision": "allow_standing"}),
                                ("/api/file-imports/1/revoke", {}),
+                               ("/api/repository-clones/1/decide", {"decision": "allow_once"}),
+                               ("/api/repository-clones/1/revoke", {}),
+                               ("/api/repository-clones/1/reopen", {}),
                                ("/api/concerns/1/release", {"version": 1})):
                 for origin in (None, "null", "https://different.example.test"):
                     with self.subTest(path=path, origin=origin):
@@ -145,6 +148,43 @@ class WebSignInTests(unittest.TestCase):
             reopened, = overview()["requests"]
             self.assertEqual(200, post(f"{route}/{reopened['id']}/decide", {"decision": "deny"}))
             self.assertFalse(overview()["grants"])
+
+    def test_respond_to_an_agent_repository_request_in_the_signed_in_room(self):
+        route = "/api/repository-clones"
+        remote = {"repository_id": 21, "branch": "research", "commit": "ab" * 20}
+        with listening(self.state) as server:
+            with patch("lantern.clone_grants.resolve_branch", return_value=remote):
+                proposal = server.clone_grants.propose("example/science", "Inspect the data.")
+            server.auth.set_password(PASSWORD)
+            cookie = self.sign_in(server)
+            def post(path, body):
+                return request(server, "POST", path, body=body, headers=cookie)[0]
+            def overview():
+                return request(server, "GET", route, headers=cookie)[2]
+            self.assertEqual(404, post(route, {"repository": "example/other"}))
+            self.assertEqual([proposal], overview()["requests"])
+            base = f"{route}/{proposal['id']}"
+            self.assertEqual(401, request(server, "POST", base + "/decide", body={"decision": "allow_once"})[0])
+            self.assertEqual(400, post(base + "/decide", {"decision": "allow_once", "commit": "ef" * 20}))
+            self.assertEqual(400, post(base + "/decide", {"decision": "allow_everything"}))
+            self.assertEqual(200, post(base + "/decide", {"decision": "allow_standing"}))
+            grant, = overview()["grants"]
+            self.assertEqual(("example/science", "research", remote["commit"], "standing"),
+                             (grant["repository"], grant["branch"], grant["commit"], grant["mode"]))
+            self.assertEqual(200, post(base + "/revoke", {}))
+            self.assertEqual([], overview()["grants"])
+            self.assertEqual("revoked", overview()["closed"][0]["status"])
+            self.assertEqual(400, post(base + "/reopen", {"commit": "ff" * 20}))
+            self.assertEqual(200, post(base + "/reopen", {}))
+            reopened, = overview()["requests"]
+            self.assertNotEqual(proposal["id"], reopened["id"])
+            self.assertEqual(remote["commit"], reopened["commit"])
+            base = f"{route}/{reopened['id']}"
+            self.assertEqual(200, post(base + "/decide", {"decision": "deny"}))
+            self.assertEqual(200, post(base + "/reopen", {}))
+            again, = overview()["requests"]
+            self.assertEqual(200, post(f"{route}/{again['id']}/decide", {"decision": "allow_once"}))
+            self.assertEqual("once", overview()["grants"][0]["mode"])
 
     def test_sessions_survive_restart_and_approve_a_review_once(self):
         with listening(self.state) as first:

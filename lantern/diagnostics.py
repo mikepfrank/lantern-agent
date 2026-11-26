@@ -27,6 +27,7 @@ TOOLS = set("""chess_analyze message_operator read_heritage consult_opus workspa
 workspace_write workspace_append workspace_replace heartbeat set_alarm cancel_alarm schedule_status
 set_provider_route provider_stats web_search read_web_page budget_status coding_run
 github_sync github_preview github_open_draft request_file_import file_import_status import_file
+request_repository_clone repository_clone_status clone_repository
 harness_logs view_pdf_page unregistered""".split())
 STATUSES = set("""complete failed interrupted deferred pending completed incomplete upstream_http_error
 invalid_upstream_response settled unconfirmed rejected metered ambiguous archive_error context_unavailable

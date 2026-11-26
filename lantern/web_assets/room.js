@@ -161,13 +161,16 @@ function locked() {
   importsDialog.close();
   importsForm.reset();
   byId("imports-fields").replaceChildren();
-  byId("imports-list").replaceChildren();
-  byId("imports-count").textContent = "";
-  byId("imports-action-error").textContent = "";
+  for (const panel of [imports, clones]) {
+    byId(panel.id + "-list").replaceChildren();
+    byId(panel.id + "-count").textContent = "";
+    byId(panel.id + "-action-error").textContent = "";
+    byId(panel.id + "-state").textContent = "Sign in to view " + panel.label + ".";
+    panel.snapshot = "";
+    panel.revision++;
+  }
   byId("imports-error").textContent = "";
-  byId("imports-state").textContent = "Sign in to view file imports.";
   byId("imports-new").disabled = true;
-  importsSnapshot = "";
   concernRevision++;
   concernItems = [];
   concernAsOf = null;
@@ -519,11 +522,11 @@ byId("concern-form").addEventListener("submit", async event => {
 
 const importsDialog = byId("imports-dialog");
 const importsForm = byId("imports-form");
-let importsSnapshot = "";
-let importsRevision = 0;
-let fetchingImports = false;
-let changingImports = false;
-let nextImportPoll = 0;
+function grantPanel(id, endpoint, label) {
+  return {id, endpoint, label, snapshot: "", revision: 0, fetching: false, changing: false, nextPoll: 0};
+}
+const imports = grantPanel("imports", "/api/file-imports", "file imports");
+const clones = grantPanel("clones", "/api/repository-clones", "repository clones");
 
 function importText(parent, tag, value) {
   const child = document.createElement(tag);
@@ -532,14 +535,50 @@ function importText(parent, tag, value) {
   return child;
 }
 
-function renderImports(page) {
+function renderFileGrant(card, item, pending) {
+  importText(card, "strong", (pending ? "Request #" : "Grant #") + item.id + " · " + item.project + " · " + item.collection);
+  const files = document.createElement("ul");
+  card.append(files);
+  for (const file of item.files) {
+    const line = document.createElement("li");
+    files.append(line);
+    importText(line, "strong", file.filename);
+    importText(line, "p", file.url);
+    for (const url of file.redirect_urls || []) importText(line, "p", "Allowed redirect · " + url);
+    if (file.sha256) importText(line, "code", "Expected SHA-256 · " + file.sha256);
+  }
+  const scope = pending ? "Allow once delivers each listed file once. Standing permission allows repeat imports from these exact URLs."
+    : item.mode === "standing" ? "Standing permission for the listed files." : "One delivery per listed file.";
+  importText(card, "p", scope).className = "import-scope";
+}
+
+function renderCloneGrant(card, item) {
+  importText(card, "strong", (item.status === "approved" ? "Grant #" : "Request #") + item.id);
+  const target = importText(card, "p", "");
+  const repoURL = "https://github.com/" + item.repository.split("/").map(encodeURIComponent).join("/");
+  const link = importText(target, "a", repoURL);
+  link.href = repoURL + "/tree/" + encodeURIComponent(item.commit);
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  importText(card, "p", "Branch · " + item.branch);
+  importText(card, "code", "Requested commit · " + item.commit);
+  importText(card, "p", "Lantern’s purpose · " + item.purpose);
+  const scope = item.status === "pending" ? "Approve the displayed commit once, or allow future commits from this branch."
+    : item.status === "denied" ? "Denied." : item.status === "revoked" ? "Revoked."
+    : item.mode === "standing" ? "Updates approved for this branch." : "Only this commit is approved.";
+  importText(card, "p", scope).className = "import-scope";
+}
+
+function renderGrants(panel, page) {
   const receipts = page.receipts || [];
-  const snapshot = JSON.stringify([page.requests, page.grants, receipts]);
-  byId("imports-count").textContent = page.requests.length ? " · " + page.requests.length + " pending" : "";
-  byId("imports-state").textContent = page.requests.length || page.grants.length ? "" : "No pending requests or active grants.";
-  if (snapshot === importsSnapshot) return;
-  importsSnapshot = snapshot;
-  const list = byId("imports-list");
+  const closed = page.closed || [];
+  const snapshot = JSON.stringify([page.requests, page.grants, receipts, closed]);
+  byId(panel.id + "-count").textContent = page.requests.length ? " · " + page.requests.length + " pending" : "";
+  byId(panel.id + "-state").textContent = page.requests.length || page.grants.length ? ""
+    : panel === clones ? "No pending repository requests or active grants." : "No pending requests or active grants.";
+  if (snapshot === panel.snapshot) return;
+  panel.snapshot = snapshot;
+  const list = byId(panel.id + "-list");
   list.replaceChildren();
   const groups = [["Pending requests", page.requests], ["Active grants", page.grants]];
   for (const [heading, items] of groups) {
@@ -550,34 +589,38 @@ function renderImports(page) {
       const card = document.createElement("section");
       card.className = "import-card";
       list.append(card);
-      importText(card, "strong", (pending ? "Request #" : "Grant #") + item.id + " · " + item.project + " · " + item.collection);
-      const files = document.createElement("ul");
-      card.append(files);
-      for (const file of item.files) {
-        const line = document.createElement("li");
-        files.append(line);
-        importText(line, "strong", file.filename);
-        importText(line, "p", file.url);
-        for (const url of file.redirect_urls || []) importText(line, "p", "Allowed redirect · " + url);
-        if (file.sha256) importText(line, "code", "Expected SHA-256 · " + file.sha256);
-      }
-      const scope = pending ? "Allow once delivers each listed file once. Standing permission allows repeat imports from these exact URLs."
-        : item.mode === "standing" ? "Standing permission for the listed files." : "One delivery per listed file.";
-      importText(card, "p", scope).className = "import-scope";
+      if (panel === imports) renderFileGrant(card, item, pending);
+      else renderCloneGrant(card, item);
       const buttons = document.createElement("div");
       buttons.className = "review-buttons";
       card.append(buttons);
-      const choices = pending ? [["Allow once", "allow_once"], ["Allow standing", "allow_standing"], ["Deny", "deny"]]
+      const choices = pending ? [[panel === clones ? "Allow this commit" : "Allow once", "allow_once"],
+                                 [panel === clones ? "Allow branch updates" : "Allow standing", "allow_standing"], ["Deny", "deny"]]
         : [["Revoke", "revoke"]];
       for (const [label, action] of choices) {
         const button = importText(buttons, "button", label);
         button.type = "button";
         button.addEventListener("click", () => {
-          const endpoint = "/api/file-imports/" + item.id + (pending ? "/decide" : "/revoke");
-          void changeImport(endpoint, pending ? {decision: action} : {}, false);
+          const endpoint = panel.endpoint + "/" + item.id + (pending ? "/decide" : "/revoke");
+          void changeGrant(panel, endpoint, pending ? {decision: action} : {});
         });
       }
     }
+  }
+  if (closed.length) {
+    const details = document.createElement("details");
+    importText(details, "summary", "Recently denied or revoked");
+    for (const item of closed) {
+      const card = document.createElement("section");
+      card.className = "import-card";
+      details.append(card);
+      renderCloneGrant(card, item);
+      const button = importText(card, "button", "Reopen request");
+      button.type = "button";
+      button.className = "concern-release";
+      button.addEventListener("click", () => void changeGrant(panel, panel.endpoint + "/" + item.id + "/reopen", {}));
+    }
+    list.append(details);
   }
   if (receipts.length) {
     const details = document.createElement("details");
@@ -586,39 +629,46 @@ function renderImports(page) {
       const record = document.createElement("div");
       record.className = "import-card";
       details.append(record);
-      importText(record, "strong", receipt.filename + " · " + receipt.size_bytes.toLocaleString() + " bytes");
+      const name = panel === imports ? receipt.filename : receipt.repository + " · " + receipt.branch;
+      importText(record, "strong", name + " · " + receipt.size_bytes.toLocaleString() + " bytes");
       importText(record, "p", receipt.path);
-      importText(record, "p", receipt.url);
-      if (receipt.final_url !== receipt.url) importText(record, "p", "Final URL · " + receipt.final_url);
-      importText(record, "code", "Received SHA-256 · " + receipt.sha256);
+      if (panel === clones) {
+        if (receipt.previous_commit) importText(record, "p", "Previous commit · " + receipt.previous_commit);
+        importText(record, "code", "Delivered commit · " + receipt.commit);
+      } else {
+        importText(record, "p", receipt.url);
+        if (receipt.final_url !== receipt.url) importText(record, "p", "Final URL · " + receipt.final_url);
+        importText(record, "code", "Received SHA-256 · " + receipt.sha256);
+      }
     }
     list.append(details);
   }
 }
 
-async function pollImports(force = false) {
-  if (!authenticated || document.hidden || changingImports || (!force && (fetchingImports || Date.now() < nextImportPoll))) return;
-  const revision = ++importsRevision;
-  fetchingImports = true;
-  nextImportPoll = Date.now() + 10000;
+async function pollGrants(panel, force = false) {
+  if (!authenticated || document.hidden || panel.changing || (!force && (panel.fetching || Date.now() < panel.nextPoll))) return;
+  const revision = ++panel.revision;
+  panel.fetching = true;
+  panel.nextPoll = Date.now() + 10000;
   try {
-    const page = await request("/api/file-imports");
-    if (authenticated && revision === importsRevision) renderImports(page);
+    const page = await request(panel.endpoint);
+    if (authenticated && revision === panel.revision) renderGrants(panel, page);
   } catch {
-    if (authenticated && revision === importsRevision) byId("imports-state").textContent = "Couldn’t refresh file imports. Retrying…";
+    if (authenticated && revision === panel.revision) byId(panel.id + "-state").textContent = "Couldn’t refresh " + panel.label + ". Retrying…";
   } finally {
-    if (revision === importsRevision) fetchingImports = false;
+    if (revision === panel.revision) panel.fetching = false;
   }
 }
 
-async function changeImport(path, body, fromForm) {
-  if (changingImports || !authenticated) return;
-  changingImports = true;
-  ++importsRevision;
-  const controls = [...byId("imports-list").querySelectorAll("button"), ...importsForm.elements, byId("imports-new")];
+async function changeGrant(panel, path, body, fromForm = false) {
+  if (panel.changing || !authenticated) return;
+  panel.changing = true;
+  ++panel.revision;
+  const controls = [...byId(panel.id + "-list").querySelectorAll("button")];
+  if (panel === imports) controls.push(...importsForm.elements, byId("imports-new"));
   const enabled = controls.filter(control => !control.disabled);
   for (const control of enabled) control.disabled = true;
-  const feedback = byId(fromForm ? "imports-error" : "imports-action-error");
+  const feedback = byId(fromForm ? "imports-error" : panel.id + "-action-error");
   feedback.textContent = "";
   try {
     await request(path, body);
@@ -626,11 +676,11 @@ async function changeImport(path, body, fromForm) {
   } catch (error) {
     if (authenticated) feedback.textContent = error.message || "Update unconfirmed. Check the list before retrying.";
   } finally {
-    changingImports = false;
-    fetchingImports = false;
+    panel.changing = false;
+    panel.fetching = false;
     if (authenticated) {
       for (const control of enabled) control.disabled = false;
-      await pollImports(true);
+      await pollGrants(panel, true);
     }
   }
 }
@@ -661,9 +711,12 @@ byId("imports-new").addEventListener("click", () => {
   importsDialog.showModal();
   importsForm.elements.project.focus();
 });
-byId("imports-panel").addEventListener("toggle", () => { if (byId("imports-panel").open) void pollImports(true); });
+for (const panel of [imports, clones]) {
+  const element = byId(panel.id + "-panel");
+  element.addEventListener("toggle", () => { if (element.open) void pollGrants(panel, true); });
+}
 byId("imports-cancel").addEventListener("click", () => importsDialog.close());
-importsDialog.addEventListener("cancel", event => { if (changingImports) event.preventDefault(); });
+importsDialog.addEventListener("cancel", event => { if (imports.changing) event.preventDefault(); });
 importsForm.addEventListener("input", () => { byId("imports-sample").hidden = true; });
 byId("imports-add").addEventListener("click", () => {
   byId("imports-sample").hidden = true;
@@ -688,7 +741,7 @@ importsForm.addEventListener("submit", event => {
     if (field("redirect_urls")) file.redirect_urls = field("redirect_urls").split(/\r?\n/).map(url => url.trim()).filter(Boolean);
     return file;
   });
-  void changeImport("/api/file-imports", {project: importsForm.elements.project.value.trim(),
+  void changeGrant(imports, imports.endpoint, {project: importsForm.elements.project.value.trim(),
     collection: importsForm.elements.collection.value.trim(), files}, true);
 });
 
@@ -974,7 +1027,8 @@ async function poll() {
   polling = true;
   let delay = 1500;
   void pollConcerns();
-  void pollImports();
+  void pollGrants(imports);
+  void pollGrants(clones);
   try {
     let page;
     if (!initialized) {

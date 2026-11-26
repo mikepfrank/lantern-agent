@@ -31,12 +31,18 @@
       <ul id="concern-list"></ul>
       <p id="concern-updated"></p>
     </div>
-    <details id="imports-panel">
-      <summary>File imports <span id="imports-count" role="status"></span></summary>
-      <p id="imports-state" role="status"></p>
+    <details id="imports-panel" class="grant-panel">
+      <summary>File imports <span class="grant-count" id="imports-count" role="status"></span></summary>
+      <p class="grant-state" id="imports-state" role="status"></p>
       <div id="imports-list"></div>
       <p id="imports-action-error" role="alert"></p>
       <button class="concern-release" id="imports-new" type="button" aria-haspopup="dialog">Add files…</button>
+    </details>
+    <details id="clones-panel" class="grant-panel">
+      <summary>Repository clones <span class="grant-count" id="clones-count" role="status"></span></summary>
+      <p class="grant-state" id="clones-state" role="status"></p>
+      <div id="clones-list"></div>
+      <p id="clones-action-error" role="alert"></p>
     </details>
   </aside>
   <dialog id="imports-dialog" aria-labelledby="imports-title">

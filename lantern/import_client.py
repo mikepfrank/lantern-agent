@@ -10,9 +10,14 @@ from .coding_tools import DEADLINE_SECONDS
 
 def deliver_import(socket_path, filename, sha256):
     request = import_request(filename, sha256)
+    return _deliver(socket_path, {"import_filename": request.filename, "sha256": request.sha256},
+                    "/work/imports/" + filename, "imported")
+
+
+def _deliver(socket_path, fields, path, success):
     if not hasattr(socket, "AF_UNIX"):
         return {"error": "This platform cannot reach the coding workspace."}
-    frame = json.dumps({"import_filename": request.filename, "sha256": request.sha256}).encode("ascii") + b"\n"
+    frame = json.dumps(fields).encode("ascii") + b"\n"
     deadline = time.monotonic() + DEADLINE_SECONDS
     data = bytearray()
     try:
@@ -32,10 +37,12 @@ def deliver_import(socket_path, filename, sha256):
         if data.endswith(b"\n") and data.count(b"\n") == 1:
             body = json.loads(data)
             if type(body) is dict:
-                if (set(body) == {"path", "status"} and body["path"] == "/work/imports/" + filename
-                        and body["status"] in ("imported", "already_present")):
+                if (set(body) == {"path", "status"} and body["path"] == path
+                        and body["status"] in (success, "already_present")):
                     return body
-                if set(body) == {"error"} and isinstance(body["error"], str) and 0 < len(body["error"]) <= 250:
+                definite = (success == "cloned" and set(body) == {"error", "definitive"}
+                            and body["definitive"] is True)
+                if (set(body) == {"error"} or definite) and isinstance(body["error"], str) and 0 < len(body["error"]) <= 250:
                     return body
     except (OSError, ValueError, RecursionError):
         pass

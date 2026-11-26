@@ -134,6 +134,16 @@ A request can cover up to 12 named files. Each file can list up to three redirec
 
 For a first check, select **Use NASA’s WMAP spectrum** in the room, review the source and filename, and allow it once. Ask Lantern to locate the grant with `file_import_status`, import `wmap-spectrum.txt`, and find the multipole bin with the highest average temperature power. The sample pin was measured from the NASA download. [NASA product and documentation](https://lambda.gsfc.nasa.gov/product/wmap/dr5/pow_tt_spec_get.html)
 
+## Approved repository clones
+
+Use the matching coding installer, worker and signed-in room as described under **Approved file imports**. The coding installer provisions the clone staging directory and enables `LANTERN_REPO_CLONES` on the worker. The room records requests, decisions and delivery receipts in `repository-clones.sqlite` in private state.
+
+Lantern supplies a public GitHub `owner/repo` or its HTTPS URL and a purpose. The host anonymously resolves the requested branch (by default, the repository's default branch) and records the repository's numeric GitHub identity and commit. Mike sees the proposal in **Repository clones**. One-time permission covers the displayed commit. Branch permission starts there and covers subsequent tips of that branch in the same repository. Each update is pinned before review. Receipts record the previous and delivered revisions. Mike can deny a request, revoke further deliveries or reconsider a closed request.
+
+The transfer is limited to a 24 MiB Git pack, 48 MiB of checked-out file contents and 8,192 tree entries. The offline coding service creates an editable, depth-one checkout at `/work/repos/<owner>/<repo>/<commit>`. Existing work at earlier revisions is preserved. File content is materialized without invoking project programs or Git filters. Submodule directories stay empty, Git LFS pointers stay as text, and symlinks are represented by their link text. Builds or other commands use the existing supervised coding tool.
+
+For an acceptance check, let Lantern request a repository he wants to study. The example `lsernau/grh-lean` needs no special configuration. Inspect the reason, branch and displayed commit in the room, choose one-time approval, then have Lantern use the grant ID. Compare the receipt's commit to `git rev-parse HEAD` in the delivered directory and ask him to identify one tracked file he can read there.
+
 ## GitHub sync and draft pull requests
 
 From the reviewed source archive on Lightsail, run `sudo bash deploy/install-github.sh FULL_GIT_REVISION` after provisioning the coding environment. Then activate the matching chat worker with `sudo bash deploy/install.sh --worker-only FULL_GIT_REVISION`. This enables the tools on the shared conversation, including after resume and compaction.

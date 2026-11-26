@@ -2,3 +2,4 @@
 !Dockerfile
 !render_pdf.py
 !receive_import.py
+!receive_clone.py

@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import closing, contextmanager, redirect_stderr
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from io import StringIO
 import json
 import os
@@ -17,6 +18,7 @@ from unittest.mock import patch
 
 from lantern.__main__ import arguments, main
 from lantern.chat_store import ChatStore
+from lantern.clone_grants import CloneGrants
 from lantern.file_grants import FileGrants
 from lantern.chat_worker import process_batch
 from test_codex_smoke import reply
@@ -61,6 +63,15 @@ class NativeIndependentWorker(unittest.TestCase):
         ]
         requests, reviews, threads = [], [], []
         proposal = sample_proposal()
+        repository = "tidal-lab/almanac"
+        revision = "a9" * 20
+        destination = f"/work/repos/{repository}/{revision}"
+        pack = b"offline almanac repository fixture"
+        clone_actions = [
+            ("request_repository_clone", {"repository": repository, "purpose": "Study the tide prediction method."}),
+            ("repository_clone_status", {"request_id": 1}),
+            ("clone_repository", {"grant_id": 1}),
+        ]
         journal_edits = [
             ("workspace_append", {"path": filename, "text": "\nQueued.", "expected_suffix": "endgame is next."}),
             ("workspace_replace", {"path": filename, "find": "rook endgame", "replace": "pawn endgame"}),
@@ -100,6 +111,15 @@ class NativeIndependentWorker(unittest.TestCase):
                 item = {"type": "function_call", "id": f"fc_{serial}", "call_id": f"call_{serial}",
                         "status": "completed", "name": name, "arguments": json.dumps(
                             {**args, "rationale": "Analyze the approved tide observations offline."})}
+            elif 14 <= serial < 14 + len(clone_actions):
+                if serial == 15:
+                    # Simulate Mike's signed-in decision after the proposal reached the room.
+                    self.assertEqual(clone_grants.status(1)["status"], "pending")
+                    clone_grants.decide(1, "allow_once")
+                name, args = clone_actions[serial - 14]
+                item = {"type": "function_call", "id": f"fc_{serial}", "call_id": f"call_{serial}",
+                        "status": "completed", "name": name, "arguments": json.dumps(
+                            {**args, "rationale": "Study a public repository relevant to my research."})}
             else:
                 answer = old_answer if serial == 1 else new_answer
                 item = {"type": "message", "role": "assistant", "id": f"msg_{serial}", "status": "completed",
@@ -118,6 +138,13 @@ class NativeIndependentWorker(unittest.TestCase):
                     grant = packet["host_facts"]["file_import_grant"]
                     self.assertEqual((grant["grant_id"], grant["mode"]), (1, "once"))
                     self.assertEqual(grant["file"]["url"], "https://example.org/tides.csv")
+                if packet["tool"] == "clone_repository":
+                    self.assertEqual(packet["arguments"], {"grant_id": 1, "target_commit": revision})
+                    self.assertEqual(packet["host_facts"]["repository_grant"], {
+                        "grant_id": 1, "repository": repository, "repository_id": 371, "branch": "trunk",
+                        "mode": "once", "decided_at": clone_grants.status(1)["decided_at"],
+                        "approved_commit": revision, "target_commit": revision, "previous_commit": None,
+                        "destination": destination})
             report = {"escalate": False, "summary": "Private worker fixture.", "evidence": ""}
             return {"model": payload["model"], "status": "completed",
                     "usage": {"input_tokens": 30, "output_tokens": 15}, "output": [
@@ -212,31 +239,63 @@ class NativeIndependentWorker(unittest.TestCase):
                 grants.decide(1, "allow_once")
                 spool = state / "test-objects"
                 spool.mkdir()
+                clone_grants = CloneGrants(state)
+                packs = state / "test-packs"
+                packs.mkdir()
 
                 def download(url, redirects, destination, limit):
                     destination.write_bytes(b"hour,height\n0,21\n")
                     return url
 
-                with patch.dict(os.environ, LANTERN_FILE_IMPORTS="1"), \
+                def fetch_pack(repo, tip, path, *, repository_id):
+                    self.assertEqual(reviews[-1][0], "clone_repository")
+                    self.assertEqual((repo, tip, repository_id), (repository, revision, 371))
+                    path.write_bytes(pack)
+                    return {"size_bytes": len(pack), "sha256": sha256(pack).hexdigest()}
+
+                with patch.dict(os.environ, LANTERN_FILE_IMPORTS="1", LANTERN_REPO_CLONES="1"), \
                         patch("lantern.file_imports.OBJECTS", spool), \
                         patch("lantern.file_imports.fetch_import", side_effect=download), \
                         patch("lantern.file_imports.deliver_import",
                               return_value={"status": "imported", "path": "/work/imports/tides.csv"}), \
+                        patch("lantern.clone_grants.resolve_branch", return_value={
+                            "repository_id": 371, "branch": "trunk", "commit": revision}) as resolve, \
+                        patch("lantern.repository_clones.PACKS", packs), \
+                        patch("lantern.repository_clones.fetch_pack", side_effect=fetch_pack), \
+                        patch("lantern.repository_clones.deliver_clone", return_value={
+                            "status": "cloned", "path": destination}) as deliver, \
                         patch("lantern.coding_tools.run_code", side_effect=reviewed_run) as runner, \
                         patch("lantern.github_tools._call", side_effect=github):
                     boot(state, "--heartbeat-minutes", "60", "--coding-socket", str(state / "broker.sock"),
                          "--github-socket", str(state / "github.sock"))
                     runner.assert_called_once()
+                    resolve.assert_called_once_with(repository, None)
+                    deliver.assert_called_once_with(state / "broker.sock", repository, revision, sha256(pack).hexdigest())
                 self.assertEqual(gh_calls, ["preview", "evidence", "open_draft"])
                 self.assertEqual(store.status()["thread_id"], tid)
-                self.assertEqual(len(requests), 14)
+                self.assertEqual(len(requests), 17)
                 self.assertEqual(grants.status(1)["status"], "fulfilled")
+                self.assertEqual(clone_grants.status(1)["status"], "fulfilled")
+                clone_outputs = {}
+                for item in requests[-1]["input"]:
+                    if item.get("type") == "function_call_output" and item["call_id"] in ("call_14", "call_15", "call_16"):
+                        output = item["output"]
+                        clone_outputs[item["call_id"]] = json.loads(output[0]["text"] if isinstance(output, list) else output)
+                self.assertEqual(clone_outputs["call_14"]["status"], "pending")
+                self.assertEqual(clone_outputs["call_15"]["status"], "approved")
+                self.assertEqual(clone_outputs["call_16"], {
+                    "status": "cloned", **clone_grants.status(1)["receipts"][0]})
+                self.assertEqual(clone_outputs["call_16"]["path"], destination)
                 self.assertEqual((state / "workspace" / "files" / filename).read_text(encoding="utf-8"),
                                  "Fixture journal: the pawn endgame is next.\nQueued.")
                 self.assertTrue({"coding_run", "github_sync", "github_preview", "github_open_draft",
                                  "file_import_status", "request_file_import", "import_file"} <=
                                 {tool["name"] for tool in requests[5]["tools"]})
                 schemas = {tool["name"]: tool["parameters"] for tool in requests[5]["tools"]}
+                self.assertIn("your own initiative", requests[5]["instructions"])
+                for name, args in clone_actions:
+                    self.assertIn(name, schemas)
+                self.assertEqual(set(schemas["clone_repository"]["properties"]), {"grant_id", "rationale"})
                 self.assertEqual(set(schemas["workspace_append"]["required"]), {"path", "text", "rationale"})
                 self.assertEqual(set(schemas["workspace_replace"]["required"]), {"path", "find", "replace", "rationale"})
                 for name, _ in journal_edits:
@@ -290,5 +349,6 @@ class NativeIndependentWorker(unittest.TestCase):
         self.assertIn("reserved_usd", outputs["call_4"])
         self.assertEqual([tool for tool, _ in reviews], [name for name, _ in actions]
                          + ["coding_run", "harness_logs", "github_preview", "github_open_draft"]
-                         + [name for name, _ in journal_edits] + ["file_import_status", "import_file"])
+                         + [name for name, _ in journal_edits] + ["file_import_status", "import_file"]
+                         + [name for name, _ in clone_actions])
         self.assertTrue(all(scheduled_marker in instructions for _, instructions in reviews[:len(actions)]))

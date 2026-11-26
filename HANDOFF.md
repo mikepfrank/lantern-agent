@@ -2,7 +2,9 @@
 
 ## Current state
 
-**Approved file imports, November 26 (Central).** The private room can approve a set of named scientific data files once or grant repeat access to those files. Lantern can use `file_import_status` and `import_file` to deliver an approved file under `/work/imports`. The NASA WMAP preset was exercised against a temporary Lightsail workspace, including digest verification, offline Python readback and a duplicate request. The private room is where Mike grants a real import. [Setup and acceptance check](deploy/README.md#approved-file-imports)
+**Repository clone requests, November 26 (Central).** Lantern can pick a public GitHub repository and submit a reason for studying it. The private room offers approval for the displayed commit or for updates to the displayed branch. Each approved revision is delivered as a separate shallow checkout. The isolated Lightsail acceptance check fetched `lsernau/grh-lean` at `72fead1`, verified its 1,627 tracked files and README offline, and preserved a local edit on repeat delivery. A live room request still needs Mike's decision. [Setup and acceptance check](deploy/README.md#approved-repository-clones)
+
+**Approved file imports, November 26 (Central).** The private room can approve a set of named scientific data files once or grant repeat access to those files. Lantern can use `file_import_status` and `import_file` to deliver an approved file under `/work/imports`. Mike confirmed that Lantern successfully used the NASA WMAP data in the live room. This completes the live acceptance test for scientific file imports. [Setup and acceptance check](deploy/README.md#approved-file-imports)
 
 **Incremental workspace editing, November 24 (Central).** The next worker adds `workspace_append` for growing logs and `workspace_replace` for exact, unique text edits. Both operate on existing UTF-8 files. The host pins the revision before review and checks it at save time. A live acceptance check is to append one move to a test log and correct a single status line, then read back both changes.
 

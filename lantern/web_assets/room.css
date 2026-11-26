@@ -249,11 +249,12 @@ textarea::placeholder { color: #a09e96; }
 #concern-reason { width: 100%; margin-top: .3rem; padding: .5rem; font: inherit; color: var(--ink); border: 1px solid var(--edge); border-radius: .4rem; background: #191c1b; }
 #concern-submit { color: #282018; background: var(--amber); border-color: transparent; }
 #concern-submit:disabled { color: var(--muted); background: #514b40; }
-#imports-panel { padding: .55rem .2rem; border-top: 1px solid var(--edge); font-size: .9rem; overflow-wrap: anywhere; }
-#imports-panel > summary { width: 100%; color: var(--ink); font: normal 1.18rem/1.4 Georgia, serif; }
-#imports-count, #imports-state, .import-scope { color: var(--muted); font: .85rem/1.45 "Segoe UI", sans-serif; }
-#imports-count:not(:empty) { color: var(--amber); }
-#imports-state, .import-card, #imports-new { margin-top: .55rem; }
+.grant-panel { padding: .55rem .2rem; border-top: 1px solid var(--edge); font-size: .9rem; overflow-wrap: anywhere; }
+.grant-panel > summary { width: 100%; color: var(--ink); font: normal 1.18rem/1.4 Georgia, serif; }
+.grant-count, .grant-state, .import-scope { color: var(--muted); font: .85rem/1.45 "Segoe UI", sans-serif; }
+.grant-count:not(:empty) { color: var(--amber); }
+.grant-panel a { color: var(--teal); }
+.grant-state, .import-card, #imports-new { margin-top: .55rem; }
 .import-card { border-block-start: 1px solid var(--edge); padding-top: .65rem; }
 .import-card h3 { font-size: .95rem; }
 .import-card ul { padding-left: 1.2rem; margin: .5rem 0; }

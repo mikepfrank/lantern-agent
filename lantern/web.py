@@ -20,6 +20,7 @@ from .attachments import MAX_IMAGE_BASE64, MAX_TURN_IMAGES, parse_image
 from .chat_store import ChatStore
 from .chat_worker import worker_online
 from .file_grants import FileGrants
+from .clone_grants import CloneGrants
 from .operator_review import MAX_ANSWER, ReviewRoom
 from .web_auth import LoginThrottled, SESSION_SECONDS, WebAuth
 
@@ -60,6 +61,7 @@ class RoomServer(ThreadingHTTPServer):
         self.state = state
         self.store = ChatStore(state)
         self.file_grants = FileGrants(state)
+        self.clone_grants = CloneGrants(state)
         self.reviews = ReviewRoom(self.store)
         # Large JSON uploads need simultaneous buffers for UTF-8, base64, the
         # verified raster and the SQLite write. Keep room inside MemoryMax.
@@ -221,12 +223,13 @@ class RoomHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     self._json(503, {"error": "The concern list is temporarily unavailable."})
             return
-        if self.path == "/api/file-imports":
+        if self.path in ("/api/file-imports", "/api/repository-clones"):
             if self._authorized():
+                ledger = self.server.file_grants if self.path == "/api/file-imports" else self.server.clone_grants
                 try:
-                    self._json(200, self.server.file_grants.overview())
+                    self._json(200, ledger.overview())
                 except (sqlite3.Error, OSError):
-                    self._json(503, {"error": "File import permissions are temporarily unavailable."})
+                    self._json(503, {"error": "Room permissions are temporarily unavailable."})
             return
         if self.path.partition("?")[0] != "/api/room":
             self._json(404, {"error": "Unknown route."})
@@ -327,7 +330,8 @@ class RoomHandler(BaseHTTPRequestHandler):
         answer_route = re.fullmatch(r"/api/review-questions/([1-9][0-9]{0,18})/answer", self.path)
         release_route = re.fullmatch(r"/api/concerns/([1-9][0-9]{0,18})/release", self.path)
         import_route = re.fullmatch(r"/api/file-imports(?:/([1-9][0-9]{0,18})/(decide|revoke))?", self.path)
-        if self.path != "/api/messages" and not answer_route and not release_route and not import_route:
+        clone_route = re.fullmatch(r"/api/repository-clones/([1-9][0-9]{0,18})/(decide|revoke|reopen)", self.path)
+        if self.path != "/api/messages" and not any((answer_route, release_route, import_route, clone_route)):
             self._json(404, {"error": "Unknown route."})
             return
         if not self._authorized():
@@ -340,7 +344,10 @@ class RoomHandler(BaseHTTPRequestHandler):
                 raise ValueError
             body = json.loads(content.decode("utf-8"))
             if import_route:
-                self._change_import(import_route, body)
+                self._change_grant(self.server.file_grants, import_route, body)
+                return
+            if clone_route:
+                self._change_grant(self.server.clone_grants, clone_route, body)
                 return
             if release_route:
                 number = int(release_route[1])
@@ -391,7 +398,8 @@ class RoomHandler(BaseHTTPRequestHandler):
             if not isinstance(client_id, str) or str(UUID(client_id)) != client_id:
                 raise ValueError
         except (ValueError, OSError, RecursionError):
-            error = ("Supply a valid file import request." if import_route else
+            error = ("Supply a valid repository grant decision." if clone_route else
+                     "Supply a valid file import request." if import_route else
                      "Supply the displayed concern version and an optional single-line reason up to 600 characters." if release_route else
                      f"Send one answer of 1 to {MAX_ANSWER} characters." if answer_route else
                      f"Send text up to {MAX_MESSAGE} characters and a valid message ID.")
@@ -412,10 +420,9 @@ class RoomHandler(BaseHTTPRequestHandler):
             return
         self._json(200, {"id": receipt})
 
-    def _change_import(self, route, body):
+    def _change_grant(self, grants, route, body):
         if not isinstance(body, dict):
             raise ValueError
-        grants = self.server.file_grants
         number = int(route[1]) if route[1] else None
         if number is not None and number >= 2**63:
             raise ValueError
@@ -428,16 +435,20 @@ class RoomHandler(BaseHTTPRequestHandler):
                 if body:
                     raise ValueError("Revoking a grant takes no additional fields.")
                 grants.revoke(number)
+            elif route[2] == "reopen":
+                if body:
+                    raise ValueError("Reconsidering this request takes no additional fields.")
+                grants.reopen(number)
             else:
                 if set(body) != {"project", "collection", "files"}:
                     raise ValueError("Supply a project, collection and list of files.")
                 grants.propose(body["project"], body["collection"], body["files"], operator=True)
         except KeyError:
-            self._json(404, {"error": "Unknown file import request or grant."})
+            self._json(404, {"error": "Unknown request or grant."})
         except ValueError as exc:
-            self._json(400, {"error": str(exc) or "Invalid file import request."})
+            self._json(400, {"error": str(exc) or "Invalid request or grant."})
         except (sqlite3.Error, OSError):
-            self._json(503, {"error": "File import permissions are temporarily unavailable."})
+            self._json(503, {"error": "Room permissions are temporarily unavailable."})
         else:
             self._json(200, {"ok": True})
 

@@ -18,7 +18,7 @@ async function exercise(browser, width) {
       const reply = (json, status = 200) => route.fulfill({json, status});
       if (url.pathname === "/api/room") return reply({events: [], more: false, status: {online: true}});
       if (url.pathname === "/api/review-questions") return reply({questions: []});
-      if (url.pathname === "/api/file-imports") return reply({requests: [], grants: []});
+      if (["/api/file-imports", "/api/repository-clones"].includes(url.pathname)) return reply({requests: [], grants: []});
       if (url.pathname === "/api/concerns") return failRead ? reply({}, 503) : reply({concerns: items, as_of: asOf});
       if (url.pathname === "/api/concerns/13/release") {
         assert.equal(route.request().method(), "POST");

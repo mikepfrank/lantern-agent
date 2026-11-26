@@ -31,6 +31,8 @@ ACTION_LOCK = "/var/lib/lanterncode/action.lock"
 PDF_REPLY_LIMIT = 1400000  # One base64-encoded 1 MiB PNG plus its small JSON envelope.
 IMPORT_OBJECTS = Path("/var/lib/lantern-imports/objects")
 IMPORT_LIMIT = 16 * 1024 * 1024
+CLONE_PACKS = Path("/var/lib/lantern-imports/clone-packs")
+PACK_LIMIT = 24 * 1024 * 1024
 
 
 class PdfPage(NamedTuple):
@@ -47,6 +49,23 @@ class FileImport(NamedTuple):
     sha256: str
 
 
+class RepoClone(NamedTuple):
+    repo: str
+    commit: str
+    sha256: str
+
+
+def clone_request(repo, commit, sha256):
+    if (not isinstance(repo, str) or repo.endswith((".", ".git")) or not re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?/[a-z0-9_][a-z0-9._-]{0,99}", repo)):
+        raise BadRequest("Use the canonical GitHub owner/repository from the grant.")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise BadRequest("The host must supply the full approved commit.")
+    if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise BadRequest("The host must supply the full verified pack digest.")
+    return RepoClone(repo, commit, sha256)
+
+
 def import_request(filename, sha256):
     if not isinstance(filename, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", filename):
         raise BadRequest("An import needs one plain ASCII filename of at most 120 characters.")
@@ -58,18 +77,19 @@ def import_request(filename, sha256):
 def read_import_object(request):
     # This directory has an operator-owned parent. Never pass its worker-owned
     # filenames to Docker, which would resolve them with daemon privileges.
+    directory, limit = (CLONE_PACKS, PACK_LIMIT) if isinstance(request, RepoClone) else (IMPORT_OBJECTS, IMPORT_LIMIT)
     flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
     try:
-        fd = os.open(IMPORT_OBJECTS / request.sha256, flags)
+        fd = os.open(directory / request.sha256, flags)
         try:
             info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > IMPORT_LIMIT:
-                raise BadRequest("The staged import must be a single regular file of at most 16 MiB.")
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
+                raise BadRequest(f"The staged import must be a single regular file of at most {limit // 1048576} MiB.")
             with os.fdopen(fd, "rb", closefd=False) as source:
-                data = source.read(IMPORT_LIMIT + 1)
+                data = source.read(limit + 1)
         finally:
             os.close(fd)
-        if len(data) > IMPORT_LIMIT or len(data) != info.st_size:
+        if len(data) > limit or len(data) != info.st_size:
             raise BadRequest("The staged file changed size before delivery. Retry the import.")
         if hashlib.sha256(data).hexdigest() != request.sha256:
             raise BadRequest("The staged file no longer matches its approved SHA-256.")
@@ -113,6 +133,8 @@ def read_command(conn):
             return pdf_request(body["pdf_path"], body["page"])
         if type(body) is dict and set(body) == {"import_filename", "sha256"}:
             return import_request(body["import_filename"], body["sha256"])
+        if type(body) is dict and set(body) == {"clone_repo", "commit", "sha256"}:
+            return clone_request(body["clone_repo"], body["commit"], body["sha256"])
         if type(body) is not dict or set(body) != {"command"}:
             raise ValueError
         command = body["command"]
@@ -145,6 +167,13 @@ def container_args(image, name, label):
 
 def create_args(image, request=None):
     args = container_args(image, NAME, LABEL)
+    if isinstance(request, RepoClone):
+        # One filesystem mount lets the helper publish a whole checkout atomically.
+        # Its private staging sibling is absent from ordinary coding containers.
+        return [*args, "--volume", f"{VOLUME}:/volume:rw,z", "--workdir=/",
+                "--ulimit=fsize=50331648:50331648", "--env=HOME=/tmp",
+                "--entrypoint=/usr/local/bin/python3", image, "-I",
+                "/opt/lantern/receive_clone.py", request.repo, request.commit, request.sha256]
     if isinstance(request, FileImport):
         return [*args, "--volume", f"{VOLUME}/files:/work:rw,z", "--workdir=/",
                 f"--ulimit=fsize={IMPORT_LIMIT}:{IMPORT_LIMIT}", "--env=HOME=/tmp",
@@ -247,7 +276,7 @@ def execute(conn, command, image):
     if not VOLUME.is_mount():
         raise RuntimeError("Coding storage is not mounted")
     pdf = command if isinstance(command, PdfPage) else None
-    importing = isinstance(command, FileImport)
+    importing = isinstance(command, (FileImport, RepoClone))
     import_data = read_import_object(command) if importing else None
     if pdf and pdf.path == PDF_HERITAGE and not Path(HERITAGE_COPY).is_file():
         raise RuntimeError("Private PDF has not been provisioned")
@@ -268,6 +297,15 @@ def execute(conn, command, image):
                     # The fixed helper signals the outcome by exit code. No source
                     # bytes, workspace text or process output become a receipt.
                     code = result["exit_code"]
+                    if isinstance(command, RepoClone):
+                        if code in (0, 10):
+                            return {"path": f"/work/repos/{command.repo}/{command.commit}",
+                                    "status": "cloned" if code == 0 else "already_present"}
+                        if code in (11, 12):
+                            return {"error": ("The destination is occupied and has been preserved." if code == 11
+                                              else "The pack, commit or tree failed checkout validation or its limits."),
+                                    "definitive": True}
+                        return {"error": "The offline checkout was interrupted or ran out of space. Retry the same grant."}
                     if code in (0, 10):
                         return {"path": "/work/imports/" + command.filename,
                                 "status": "imported" if code == 0 else "already_present"}
@@ -309,7 +347,7 @@ def serve_connection(conn, image):
         logging.warning("Coding request did not finish (%s)", type(exc).__name__)
         if isinstance(command, PdfPage):
             reply = {"error": "The read-only PDF renderer is unavailable or interrupted."}
-        elif isinstance(command, FileImport):
+        elif isinstance(command, (FileImport, RepoClone)):
             reply = {"error": "Import delivery is unavailable or interrupted. It is safe to retry."}
         else:
             reply = {"error": "Coding sandbox unavailable or interrupted. The command may have run. "

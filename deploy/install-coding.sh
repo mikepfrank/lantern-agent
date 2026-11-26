@@ -37,6 +37,7 @@ install -m 0600 "$src/deploy/coding/Dockerfile" "$temp/Dockerfile"
 install -m 0600 "$src/deploy/coding/.dockerignore" "$temp/.dockerignore"
 install -m 0644 "$src/deploy/coding/render_pdf.py" "$temp/render_pdf.py"
 install -m 0644 "$src/deploy/coding/receive_import.py" "$temp/receive_import.py"
+install -m 0644 "$src/deploy/coding/receive_clone.py" "$temp/receive_clone.py"
 docker build --build-arg "BASE=${LANTERN_CODING_BASE:-python:3.12-slim-bookworm}" \
     --iidfile "$temp/image-id" --tag lantern-code:local "$temp"
 image=$(cat "$temp/image-id")
@@ -138,9 +139,11 @@ active_container=$(docker ps -aq --filter 'label=org.lantern.coding-broker=1' --
 install -m 0644 "$src/lantern/coding_broker.py" /opt/lantern/coding/broker.py
 install -d -o root -g root -m 0755 /var/lib/lantern-imports
 install -d -o lantern -g lantern -m 0711 /var/lib/lantern-imports/objects
+install -d -o lantern -g lantern -m 0711 /var/lib/lantern-imports/clone-packs
+install -d -o 65532 -g 65532 -m 0700 "$mountpoint/clone-stage"
 install -d -m 0755 /etc/systemd/system/lantern-chat.service.d
-printf '%s\n' '[Service]' 'Environment=LANTERN_FILE_IMPORTS=1' \
-    'ReadWritePaths=/var/lib/lantern-imports/objects' > "$temp/file-imports.conf"
+printf '%s\n' '[Service]' 'Environment=LANTERN_FILE_IMPORTS=1' 'Environment=LANTERN_REPO_CLONES=1' \
+    'ReadWritePaths=/var/lib/lantern-imports/objects /var/lib/lantern-imports/clone-packs' > "$temp/file-imports.conf"
 install -m 0644 "$temp/file-imports.conf" /etc/systemd/system/lantern-chat.service.d/file-imports.conf
 if [[ -f $temp/heritage.pdf ]]; then
     mv -Tf -- "$temp/heritage.pdf" "$base/heritage.pdf"
