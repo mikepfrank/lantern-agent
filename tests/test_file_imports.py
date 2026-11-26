@@ -88,6 +88,33 @@ class ApprovedImportsTests(unittest.TestCase):
             self.run_import(standing)
         self.fetch.assert_not_called()
 
+    def test_pdf_import_requires_approval_and_delivers_the_original_bytes(self):
+        filename = "grh-handout.pdf"
+        number = self.request([{"filename": filename, "url": "https://example.org/paper.pdf"}])
+        with self.assertRaisesRegex(ValueError, "active grant"):
+            self.run_import(number, filename=filename)
+        self.fetch.assert_not_called()
+        self.grants.decide(number, "allow_once")
+        self.data = b"<html>Download unavailable</html>"
+        with self.assertRaisesRegex(ValueError, "PDF version header"):
+            self.run_import(number, filename=filename)
+        self.delivery.assert_not_called()
+        self.assertEqual(self.grants.status(number)["status"], "approved")
+        self.data = b"%PDF-1.7\r\n%\xe2\xe3\xcf\xd3\r\nxref\r\nstartxref\r\n17\r\n%%EOF\r\n"
+        receipt = self.run_import(number, filename=filename)
+        self.assertEqual(receipt["path"], "/work/imports/" + filename)
+        self.assertEqual(receipt["sha256"], hashlib.sha256(self.data).hexdigest())
+        self.assertEqual(self.destinations[receipt["path"]], self.data)
+        self.assertEqual(self.grants.status(number)["status"], "fulfilled")
+
+    def test_proposal_distinguishes_filename_and_format_errors(self):
+        for name, diagnostic in (("bad/name.pdf", "plain filename"), ("paper", "needs an extension"),
+                                 ("paper.pdf.exe", r"Unsupported import extension '\.exe'.*\.pdf")):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, diagnostic):
+                self.request([{**self.spec, "filename": name}])
+        self.assertEqual(self.grants.overview()["requests"], [])
+        self.fetch.assert_not_called()
+
     def test_revocation_while_fetching_prevents_handoff(self):
         number = self.request()
         self.grants.decide(number, "allow_standing")

@@ -164,6 +164,27 @@ class ImportFetchTests(unittest.TestCase):
                      "A" * 120 + ".txt", "code.py", "archive.zip", "a.tar.gz.sh"):
             self.assertFalse(imports.valid_filename(name), name)
 
+    def test_binary_pdf_checks_the_final_revision_without_decoding_the_body(self):
+        trailer = b"\nstartxref\n12\n%%EOF\r\n"
+        body = b"\n%\xe2\xe3\xcf\xd3\n" + bytes(range(256)) * 20
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "staged"
+            for version in (b"1.0", b"1.7", b"2.0"):
+                data = b"%PDF-" + version + body + trailer + b"incremental update" + trailer
+                path.write_bytes(data)
+                imports.validate_data(path, "paper.PDF")
+                self.assertEqual(path.read_bytes(), data)
+            for bad in (b"<html>Missing</html>", b"%PDF-1.80" + body + trailer, b"%PDF-1.4" + body,
+                        data + b"incomplete update", data[:-len(trailer)] + b"\nstartxref\n999999\n%%EOF"):
+                path.write_bytes(bad)
+                with self.subTest(bad_tail=bad[-32:]), self.assertRaisesRegex(imports.ImportFetchError, "PDF"):
+                    imports.validate_data(path, "paper.pdf")
+            with path.open("wb") as large:
+                large.write(b"%PDF-1.7\n")
+                large.truncate(imports.MAX_BYTES + 1)
+            with self.assertRaisesRegex(imports.ImportFetchError, "size limit"):
+                imports.validate_data(path, "paper.pdf")
+
     def test_bounded_text_parsing(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "data"

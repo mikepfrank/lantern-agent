@@ -2,6 +2,8 @@
 
 ## Current state
 
+**Approved PDF imports, November 26 (Central).** Lantern can request a PDF up to 16 MiB with `request_file_import`. Once Mike approves, `import_file` delivers the original bytes and `view_pdf_page` renders selected pages from the receipt path. A disposable Lightsail test imported the 13,970,118-byte `handout.pdf` from the proof writeup, checked its SHA-256 in the coding workspace, and rendered pages 1 and 677 of 1,353. The production file request goes through the room.
+
 **Repository clone requests, November 26 (Central).** Mike confirmed Lantern's first live clone of `lsernau/grh-lean`. The room receipt records `main` at `72fead1`. Lantern can select a repository's default branch by omitting `branch` or passing an empty string. The room shows the resolved branch and commit before Mike decides whether to approve one revision or future updates to that branch. [Setup and acceptance check](deploy/README.md#approved-repository-clones)
 
 **Approved file imports, November 26 (Central).** The private room can approve a set of named scientific data files once or grant repeat access to those files. Lantern can use `file_import_status` and `import_file` to deliver an approved file under `/work/imports`. Mike confirmed that Lantern successfully used the NASA WMAP data in the live room. This completes the live acceptance test for scientific file imports. [Setup and acceptance check](deploy/README.md#approved-file-imports)

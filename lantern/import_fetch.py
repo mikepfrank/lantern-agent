@@ -21,6 +21,8 @@ DEADLINE_SECONDS = 30
 _CHUNK = 64 * 1024
 _JSON_BYTES = 2 * 1024 * 1024  # The standard JSON decoder materializes the entire tree.
 _TABULAR_LINE = 256 * 1024
+_EXTENSIONS = (".txt", ".csv", ".tsv", ".json", ".pdf", ".tar", ".tar.gz", ".tgz")
+SUPPORTED_FORMATS = ", ".join(_EXTENSIONS) + ", or numbered tar archive parts"
 _ARCHIVE_PART = re.compile(r"\.(?:tar(?:\.gz)?|tgz)\.(?:part[0-9]{2,6}|[0-9]{3})$", re.I)
 _CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _ACTIVE_PREFIX = re.compile(
@@ -42,11 +44,24 @@ class ImportRedirectNeeded(ImportFetchError):
         super().__init__("The data server redirected to a URL that needs approval.")
 
 
-def valid_filename(filename):
+def checked_filename(filename):
     if not isinstance(filename, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", filename):
-        return False
+        raise ImportFetchError("Use a plain filename of 1–120 characters starting with a letter or digit. "
+                               "Use only ASCII letters, digits, dots, hyphens and underscores.")
     name = filename.lower()
-    return name.endswith((".txt", ".csv", ".tsv", ".json", ".tar", ".tar.gz", ".tgz")) or bool(_ARCHIVE_PART.search(name))
+    if not name.endswith(_EXTENSIONS) and not _ARCHIVE_PART.search(name):
+        suffix = Path(filename).suffix
+        reason = f"Unsupported import extension '{suffix}'." if suffix else "The import filename needs an extension."
+        raise ImportFetchError(f"{reason} Supported formats include {SUPPORTED_FORMATS}.")
+    return filename
+
+
+def valid_filename(filename):
+    try:
+        checked_filename(filename)
+        return True
+    except ImportFetchError:
+        return False
 
 
 def checked_import_url(url):
@@ -206,6 +221,17 @@ def _reject_json_constant(_value):
     raise ImportFetchError("Expected valid JSON data.")
 
 
+def _check_pdf(path, size):
+    # Recognize the file envelope only. Object parsing belongs to the offline viewer.
+    with path.open("rb") as source:
+        if not re.match(rb"%PDF-(?:1\.[0-7]|2\.0)[\r\n]", source.read(9)):
+            raise ImportFetchError("Expected a PDF version header at the start of the downloaded file.")
+        source.seek(max(0, size - 4096))
+        trailer = re.search(rb"[\r\n]startxref[ \t\r\n]+([0-9]{1,20})[ \t\r\n]+%%EOF[ \t\r\n]*\Z", source.read(4096))
+    if not trailer or not 0 < int(trailer[1]) < size:
+        raise ImportFetchError("Expected a complete PDF with a final startxref offset and %%EOF marker.")
+
+
 def _table_lines(stream):
     while line := stream.readline(_TABULAR_LINE + 1):
         if len(line) > _TABULAR_LINE:
@@ -215,14 +241,16 @@ def _table_lines(stream):
 
 def validate_data(path, filename):
     """Check the declared format without changing any bytes or unpacking archives."""
-    if not valid_filename(filename):
-        raise ImportFetchError("Unsupported import filename or data format.")
+    checked_filename(filename)
     path = Path(path)
     name = filename.lower()
     try:
         size = path.stat().st_size
         if not 1 <= size <= MAX_BYTES:
             raise ImportFetchError("The data file is empty or exceeds the import size limit.")
+        if name.endswith(".pdf"):
+            _check_pdf(path, size)
+            return
         if name.endswith((".tar", ".tgz", ".tar.gz")) or _ARCHIVE_PART.search(name):
             _check_archive(path, name, size)
             return

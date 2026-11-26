@@ -1,4 +1,5 @@
 from contextlib import closing, contextmanager
+from hashlib import sha256
 from http.client import HTTPConnection
 import json
 from pathlib import Path
@@ -8,8 +9,13 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
+from lantern import file_imports
+from lantern.attachments import parse_image
+from lantern.pdf_tool import view_pdf_page
 from lantern.web import RoomServer, SESSION_COOKIE, canonical_origin
 from lantern.web_auth import LoginThrottled, SESSION_SECONDS
+from test_attachments import png, upload
+from test_pdf_renderer import two_page_pdf
 
 
 ORIGIN = "https://lantern.example.test"
@@ -148,6 +154,56 @@ class WebSignInTests(unittest.TestCase):
             reopened, = overview()["requests"]
             self.assertEqual(200, post(f"{route}/{reopened['id']}/decide", {"decision": "deny"}))
             self.assertFalse(overview()["grants"])
+
+    def test_agent_pdf_request_can_be_approved_imported_and_viewed(self):
+        source = "https://example.org/papers/handout.pdf"
+        document = two_page_pdf()
+        digest = sha256(document).hexdigest()
+        spec = {"filename": "handout.pdf", "url": source, "sha256": digest}
+        spool = self.state / "test-staging"
+        spool.mkdir()
+        socket = "test-coding-broker"
+        target = "/work/imports/handout.pdf"
+
+        def fetch(url, redirects, output, limit):
+            self.assertEqual((url, redirects), (source, []))
+            output.write_bytes(document)
+            return url
+
+        def deliver(broker, filename, verified):
+            self.assertEqual((broker, filename, verified), (socket, spec["filename"], digest))
+            self.assertEqual((spool / verified).read_bytes(), document)
+            return {"path": target, "status": "imported"}
+
+        with listening(self.state) as server, patch.object(file_imports, "OBJECTS", spool), \
+                patch.object(file_imports, "fetch_import", side_effect=fetch) as fetcher, \
+                patch.object(file_imports, "deliver_import", side_effect=deliver) as broker:
+            def call(name, args, key):
+                return file_imports.import_tool(server.file_grants, socket, name, args, key)
+
+            proposal = call("request_file_import", {"project": "Research", "collection": "Paper",
+                                                    "files": [spec]}, "proposal")
+            self.assertEqual(proposal["status"], "pending")
+            args = {"grant_id": proposal["id"], "filename": spec["filename"]}
+            self.assertIn("error", call("import_file", args, "early"))
+            fetcher.assert_not_called()
+            decide = f"/api/file-imports/{proposal['id']}/decide"
+            decision = {"decision": "allow_once"}
+            self.assertEqual(401, request(server, "POST", decide, body=decision)[0])
+            server.auth.set_password(PASSWORD)
+            cookie = self.sign_in(server)
+            self.assertEqual(200, request(server, "POST", decide, headers=cookie, body=decision)[0])
+            receipt = call("import_file", args, "approved")
+            self.assertEqual((receipt["status"], receipt["path"], receipt["size_bytes"], receipt["sha256"]),
+                             ("imported", target, len(document), digest))
+            broker.assert_called_once()
+            image = parse_image(upload(png()))
+            with patch("lantern.pdf_client.render_pdf_page", return_value=(image, 2)) as render:
+                page = view_pdf_page({"path": receipt["path"], "page": 2}, socket_path=socket,
+                                     heritage_enabled=False, store=server.store, thread_id="room", call_id="view")
+            render.assert_called_once_with(socket, target, 2)
+            self.assertEqual((page["path"], page["page"], page["page_count"]), (target, 2, 2))
+            self.assertEqual(image.data, server.store.page_image_data(page["page_image"]["id"], "view", thread_id="room"))
 
     def test_respond_to_an_agent_repository_request_in_the_signed_in_room(self):
         route = "/api/repository-clones"

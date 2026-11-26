@@ -6,7 +6,7 @@ import json
 import re
 import sqlite3
 
-from .import_fetch import MAX_BYTES, checked_import_url, valid_filename
+from .import_fetch import MAX_BYTES, checked_filename, checked_import_url
 
 
 MAX_FILES = 12
@@ -33,9 +33,7 @@ def _manifest(files):
         if (not isinstance(file, dict) or not {"filename", "url"} <= file.keys()
                 or file.keys() - {"filename", "url", "redirect_urls", "sha256"}):
             raise ValueError("Each file needs filename and url, with optional redirect_urls and sha256.")
-        name = file["filename"]
-        if not valid_filename(name):
-            raise ValueError("Use a plain filename with a supported data or archive extension.")
+        name = checked_filename(file["filename"])
         if name.casefold() in names:
             raise ValueError("Each destination filename in a request must be distinct.")
         names.add(name.casefold())

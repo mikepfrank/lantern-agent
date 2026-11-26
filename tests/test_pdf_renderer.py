@@ -11,6 +11,25 @@ from lantern import coding_broker as broker, pdf_client
 from test_attachments import png, upload
 
 
+def two_page_pdf():
+    # Graphic-only pages colored red and blue. No font or extraction dependency.
+    objects = [b"<</Type/Catalog/Pages 2 0 R>>", b"<</Type/Pages/Count 2/Kids[3 0 R 4 0 R]>>"]
+    for stream_id in [5, 6]:
+        objects.append(f"<</Type/Page/Parent 2 0 R/MediaBox[0 0 30 20]/Resources<<>>/Contents {stream_id} 0 R>>".encode())
+    for rgb in [b"1 0 0", b"0 0 1"]:
+        drawing = rgb + b" rg 0 0 30 20 re f\n"
+        objects.append(b"<</Length %d>>\nstream\n" % len(drawing) + drawing + b"endstream")
+    doc = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = []
+    for i, obj in enumerate(objects, 1):
+        offsets.append(len(doc))
+        doc += b"%d 0 obj\n" % i + obj + b"\nendobj\n"
+    xref = len(doc)
+    doc += b"xref\n0 7\n0000000000 65535 f \n" + b"".join(b"%010d 00000 n \n" % n for n in offsets)
+    doc += b"trailer\n<</Size 7/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % xref
+    return bytes(doc)
+
+
 class PdfRendererTests(unittest.TestCase):
     def test_pdf_requests_are_confined_to_one_read_only_mount(self):
         image = "sha256:" + "ab" * 32
@@ -99,23 +118,8 @@ class PdfRendererTests(unittest.TestCase):
                          and Path("/proc/self/fd").is_dir(), "Requires Linux with Poppler")
     def test_poppler_returns_distinct_real_rasters_for_two_graphic_pages(self):
         from lantern.attachments import parse_image
-        # Graphic-only pages colored red and blue. No font or extraction dependency.
-        objects = [b"<</Type/Catalog/Pages 2 0 R>>", b"<</Type/Pages/Count 2/Kids[3 0 R 4 0 R]>>"]
-        for stream_id in [5, 6]:
-            objects.append(f"<</Type/Page/Parent 2 0 R/MediaBox[0 0 30 20]/Resources<<>>/Contents {stream_id} 0 R>>".encode())
-        for rgb in [b"1 0 0", b"0 0 1"]:
-            drawing = rgb + b" rg 0 0 30 20 re f\n"
-            objects.append(b"<</Length %d>>\nstream\n" % len(drawing) + drawing + b"endstream")
-        doc = bytearray(b"%PDF-1.4\n")
-        offsets = []
-        for i, obj in enumerate(objects, 1):
-            offsets.append(len(doc))
-            doc += b"%d 0 obj\n" % i + obj + b"\nendobj\n"
-        xref = len(doc)
-        doc += b"xref\n0 7\n0000000000 65535 f \n" + b"".join(b"%010d 00000 n \n" % n for n in offsets)
-        doc += b"trailer\n<</Size 7/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % xref
         with tempfile.TemporaryFile() as source:
-            source.write(doc)
+            source.write(two_page_pdf())
             source.flush()
             first, second = (render_pdf.render(source.fileno(), p) for p in [1, 2])
         one, two = (parse_image({"mime_type": "image/png", "data": item["png"]}) for item in (first, second))
