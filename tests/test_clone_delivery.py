@@ -10,7 +10,7 @@ from unittest import TestCase, skipUnless
 from unittest.mock import MagicMock, Mock, patch
 
 from deploy.coding import receive_clone as receiver
-from lantern import coding_broker as broker, import_client
+from lantern import clone_fetch, coding_broker as broker, import_client
 from lantern.clone_client import deliver_clone
 
 
@@ -20,6 +20,18 @@ DIGEST = "2" * 64
 
 
 class CloneBrokerTests(TestCase):
+    def test_clone_size_limits_agree_across_fetch_and_checkout(self):
+        pack_limit = 32 * 1024 * 1024
+        checkout_limit = 64 * 1024 * 1024
+        self.assertEqual(clone_fetch.MAX_PACK_BYTES, pack_limit)
+        self.assertEqual(clone_fetch.MAX_CHECKOUT_BYTES, checkout_limit)
+        self.assertGreater(clone_fetch.MAX_WIRE_BYTES, pack_limit)
+        self.assertEqual(broker.PACK_LIMIT, pack_limit)
+        self.assertEqual(receiver.PACK_LIMIT, pack_limit)
+        self.assertEqual(receiver.TREE_LIMIT, checkout_limit)
+        args = broker.create_args("sha256:" + DIGEST, broker.clone_request(REPO, COMMIT, DIGEST))
+        self.assertIn(f"--ulimit=fsize={checkout_limit}:{checkout_limit}", args)
+
     def test_fixed_protocol_container_and_paths(self):
         frame = {"clone_repo": REPO, "commit": COMMIT, "sha256": DIGEST}
         request = broker.read_command(Mock(recv=BytesIO(json.dumps(frame).encode() + b"\n").read))

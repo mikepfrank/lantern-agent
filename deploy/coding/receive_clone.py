@@ -15,8 +15,8 @@ import subprocess
 import sys
 
 
-PACK_LIMIT = 24 * 1024 * 1024
-TREE_LIMIT = 48 * 1024 * 1024
+PACK_LIMIT = 32 * 1024 * 1024
+TREE_LIMIT = 64 * 1024 * 1024
 ENTRY_LIMIT = 8192
 CLONED, ALREADY_PRESENT, OCCUPIED, BAD_PACK, STORAGE_ERROR = 0, 10, 11, 12, 13
 GIT = ["/usr/bin/git", "-c", "core.hooksPath=/dev/null", "-c", "core.protectNTFS=true",

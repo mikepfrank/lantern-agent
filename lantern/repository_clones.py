@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 
 from .clone_client import deliver_clone
-from .clone_fetch import MAX_PACK_BYTES, fetch_pack
+from .clone_fetch import MAX_CHECKOUT_BYTES, MAX_PACK_BYTES, fetch_pack
 from .clone_grants import _commit, _now, checkout_path
 from .file_imports import SPOOL_LIMIT, _prune_spool, _remove_object, _tool, _transfer_slot
 
@@ -28,6 +28,8 @@ CLONE_TOOLS = (
           {"request_id": _ID}, []),
     _tool("clone_repository", "Bring an approved shallow Git checkout into your offline workspace. "
           "Use the numeric grant ID. With standing permission, repeat to get updates to the same branch. "
+          f"The download limit is {MAX_PACK_BYTES // (1024 * 1024)} MiB and the checkout limit is "
+          f"{MAX_CHECKOUT_BYTES // (1024 * 1024)} MiB. "
           "Each new revision gets its own directory so earlier edits survive.",
           {"grant_id": _ID}, ["grant_id"]),
 )

@@ -129,7 +129,9 @@ class PublicGitTransfer(unittest.TestCase):
             with self.subTest(wire=wire[:16]), self.assertRaises(clone.CloneFetchError):
                 clone._pack_response(Response(wire), BytesIO(), sha)
         wire = section + packet(b"\x01" + pack) + b"0000"
-        with patch.object(clone, "MAX_PACK_BYTES", len(pack)-1), self.assertRaisesRegex(clone.CloneFetchError, "24 MiB"):
+        with patch.object(clone, "MAX_PACK_BYTES", len(pack)):
+            self.assertEqual(clone._pack_response(Response(wire), BytesIO(), sha)["size_bytes"], len(pack))
+        with patch.object(clone, "MAX_PACK_BYTES", len(pack)-1), self.assertRaisesRegex(clone.CloneFetchError, "pack exceeds"):
             clone._pack_response(Response(wire), BytesIO(), sha)
         with patch.object(clone, "MAX_WIRE_BYTES", 10), self.assertRaisesRegex(clone.CloneFetchError, "framing"):
             clone._pack_response(Response(wire), BytesIO(), sha)

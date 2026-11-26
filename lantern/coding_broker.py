@@ -32,7 +32,8 @@ PDF_REPLY_LIMIT = 1400000  # One base64-encoded 1 MiB PNG plus its small JSON en
 IMPORT_OBJECTS = Path("/var/lib/lantern-imports/objects")
 IMPORT_LIMIT = 16 * 1024 * 1024
 CLONE_PACKS = Path("/var/lib/lantern-imports/clone-packs")
-PACK_LIMIT = 24 * 1024 * 1024
+PACK_LIMIT = 32 * 1024 * 1024
+CHECKOUT_LIMIT = 64 * 1024 * 1024
 
 
 class PdfPage(NamedTuple):
@@ -171,7 +172,7 @@ def create_args(image, request=None):
         # One filesystem mount lets the helper publish a whole checkout atomically.
         # Its private staging sibling is absent from ordinary coding containers.
         return [*args, "--volume", f"{VOLUME}:/volume:rw,z", "--workdir=/",
-                "--ulimit=fsize=50331648:50331648", "--env=HOME=/tmp",
+                f"--ulimit=fsize={CHECKOUT_LIMIT}:{CHECKOUT_LIMIT}", "--env=HOME=/tmp",
                 "--entrypoint=/usr/local/bin/python3", image, "-I",
                 "/opt/lantern/receive_clone.py", request.repo, request.commit, request.sha256]
     if isinstance(request, FileImport):

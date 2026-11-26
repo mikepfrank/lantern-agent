@@ -15,9 +15,9 @@ from urllib.parse import quote
 from .page_fetch import _PublicConnection, PageFetchError
 
 
-MAX_PACK_BYTES = 24 * 1024 * 1024
+MAX_PACK_BYTES = 32 * 1024 * 1024
 MAX_ENTRIES = 8192
-MAX_CHECKOUT_BYTES = 48 * 1024 * 1024  # Enforced in the offline receiver.
+MAX_CHECKOUT_BYTES = 64 * 1024 * 1024  # Enforced in the offline receiver.
 MAX_WIRE_BYTES = MAX_PACK_BYTES + 256 * 1024
 DEADLINE_SECONDS = 75
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -162,7 +162,7 @@ def _pack_response(response, output, commit):
         data = chunk[1:]
         length += len(data)
         if length > MAX_PACK_BYTES:
-            raise CloneFetchError("The shallow pack exceeds 24 MiB.")
+            raise CloneFetchError(f"The shallow pack exceeds {MAX_PACK_BYTES // (1024 * 1024)} MiB.")
         header += data[:12 - len(header)]
         joined = trailer + data
         pack_hash.update(joined[:-20])
