@@ -158,6 +158,16 @@ function controls() {
 
 function locked() {
   authenticated = false;
+  importsDialog.close();
+  importsForm.reset();
+  byId("imports-fields").replaceChildren();
+  byId("imports-list").replaceChildren();
+  byId("imports-count").textContent = "";
+  byId("imports-action-error").textContent = "";
+  byId("imports-error").textContent = "";
+  byId("imports-state").textContent = "Sign in to view file imports.";
+  byId("imports-new").disabled = true;
+  importsSnapshot = "";
   concernRevision++;
   concernItems = [];
   concernAsOf = null;
@@ -507,6 +517,181 @@ byId("concern-form").addEventListener("submit", async event => {
   }
 });
 
+const importsDialog = byId("imports-dialog");
+const importsForm = byId("imports-form");
+let importsSnapshot = "";
+let importsRevision = 0;
+let fetchingImports = false;
+let changingImports = false;
+let nextImportPoll = 0;
+
+function importText(parent, tag, value) {
+  const child = document.createElement(tag);
+  child.textContent = value;
+  parent.append(child);
+  return child;
+}
+
+function renderImports(page) {
+  const receipts = page.receipts || [];
+  const snapshot = JSON.stringify([page.requests, page.grants, receipts]);
+  byId("imports-count").textContent = page.requests.length ? " · " + page.requests.length + " pending" : "";
+  byId("imports-state").textContent = page.requests.length || page.grants.length ? "" : "No pending requests or active grants.";
+  if (snapshot === importsSnapshot) return;
+  importsSnapshot = snapshot;
+  const list = byId("imports-list");
+  list.replaceChildren();
+  const groups = [["Pending requests", page.requests], ["Active grants", page.grants]];
+  for (const [heading, items] of groups) {
+    if (!items.length) continue;
+    importText(list, "h3", heading);
+    for (const item of items) {
+      const pending = items === page.requests;
+      const card = document.createElement("section");
+      card.className = "import-card";
+      list.append(card);
+      importText(card, "strong", (pending ? "Request #" : "Grant #") + item.id + " · " + item.project + " · " + item.collection);
+      const files = document.createElement("ul");
+      card.append(files);
+      for (const file of item.files) {
+        const line = document.createElement("li");
+        files.append(line);
+        importText(line, "strong", file.filename);
+        importText(line, "p", file.url);
+        for (const url of file.redirect_urls || []) importText(line, "p", "Allowed redirect · " + url);
+        if (file.sha256) importText(line, "code", "Expected SHA-256 · " + file.sha256);
+      }
+      const scope = pending ? "Allow once delivers each listed file once. Standing permission allows repeat imports from these exact URLs."
+        : item.mode === "standing" ? "Standing permission for the listed files." : "One delivery per listed file.";
+      importText(card, "p", scope).className = "import-scope";
+      const buttons = document.createElement("div");
+      buttons.className = "review-buttons";
+      card.append(buttons);
+      const choices = pending ? [["Allow once", "allow_once"], ["Allow standing", "allow_standing"], ["Deny", "deny"]]
+        : [["Revoke", "revoke"]];
+      for (const [label, action] of choices) {
+        const button = importText(buttons, "button", label);
+        button.type = "button";
+        button.addEventListener("click", () => {
+          const endpoint = "/api/file-imports/" + item.id + (pending ? "/decide" : "/revoke");
+          void changeImport(endpoint, pending ? {decision: action} : {}, false);
+        });
+      }
+    }
+  }
+  if (receipts.length) {
+    const details = document.createElement("details");
+    importText(details, "summary", "Recent deliveries");
+    for (const receipt of receipts) {
+      const record = document.createElement("div");
+      record.className = "import-card";
+      details.append(record);
+      importText(record, "strong", receipt.filename + " · " + receipt.size_bytes.toLocaleString() + " bytes");
+      importText(record, "p", receipt.path);
+      importText(record, "p", receipt.url);
+      if (receipt.final_url !== receipt.url) importText(record, "p", "Final URL · " + receipt.final_url);
+      importText(record, "code", "Received SHA-256 · " + receipt.sha256);
+    }
+    list.append(details);
+  }
+}
+
+async function pollImports(force = false) {
+  if (!authenticated || document.hidden || changingImports || (!force && (fetchingImports || Date.now() < nextImportPoll))) return;
+  const revision = ++importsRevision;
+  fetchingImports = true;
+  nextImportPoll = Date.now() + 10000;
+  try {
+    const page = await request("/api/file-imports");
+    if (authenticated && revision === importsRevision) renderImports(page);
+  } catch {
+    if (authenticated && revision === importsRevision) byId("imports-state").textContent = "Couldn’t refresh file imports. Retrying…";
+  } finally {
+    if (revision === importsRevision) fetchingImports = false;
+  }
+}
+
+async function changeImport(path, body, fromForm) {
+  if (changingImports || !authenticated) return;
+  changingImports = true;
+  ++importsRevision;
+  const controls = [...byId("imports-list").querySelectorAll("button"), ...importsForm.elements, byId("imports-new")];
+  const enabled = controls.filter(control => !control.disabled);
+  for (const control of enabled) control.disabled = true;
+  const feedback = byId(fromForm ? "imports-error" : "imports-action-error");
+  feedback.textContent = "";
+  try {
+    await request(path, body);
+    if (fromForm) importsDialog.close();
+  } catch (error) {
+    if (authenticated) feedback.textContent = error.message || "Update unconfirmed. Check the list before retrying.";
+  } finally {
+    changingImports = false;
+    fetchingImports = false;
+    if (authenticated) {
+      for (const control of enabled) control.disabled = false;
+      await pollImports(true);
+    }
+  }
+}
+
+function updateImportFields() {
+  const rows = [...byId("imports-fields").children];
+  rows.forEach((row, index) => {
+    row.querySelector("legend").textContent = "File " + (index + 1);
+    row.querySelector("button").hidden = rows.length === 1;
+  });
+  byId("imports-add").disabled = rows.length >= 12;
+}
+
+function addImportFile() {
+  const row = byId("import-file-fields").content.firstElementChild.cloneNode(true);
+  byId("imports-fields").append(row);
+  row.querySelector("button").addEventListener("click", () => { row.remove(); updateImportFields(); });
+  updateImportFields();
+  return row;
+}
+
+byId("imports-new").addEventListener("click", () => {
+  importsForm.reset();
+  byId("imports-fields").replaceChildren();
+  addImportFile();
+  byId("imports-error").textContent = "";
+  byId("imports-sample").hidden = false;
+  importsDialog.showModal();
+  importsForm.elements.project.focus();
+});
+byId("imports-panel").addEventListener("toggle", () => { if (byId("imports-panel").open) void pollImports(true); });
+byId("imports-cancel").addEventListener("click", () => importsDialog.close());
+importsDialog.addEventListener("cancel", event => { if (changingImports) event.preventDefault(); });
+importsForm.addEventListener("input", () => { byId("imports-sample").hidden = true; });
+byId("imports-add").addEventListener("click", () => {
+  byId("imports-sample").hidden = true;
+  addImportFile().querySelector("input").focus();
+});
+byId("imports-sample").addEventListener("click", () => {
+  const row = byId("imports-fields").firstElementChild;
+  importsForm.elements.project.value = "cosmology";
+  importsForm.elements.collection.value = "WMAP nine-year temperature spectrum";
+  row.querySelector("[name=filename]").value = "wmap-spectrum.txt";
+  row.querySelector("[name=url]").value = "https://lambda.gsfc.nasa.gov/data/map/dr5/dcp/spectra/wmap_binned_tt_spectrum_9yr_v5.txt";
+  row.querySelector("[name=sha256]").value = "6fcf09b3a1dbeb85ae9687bd43e80686ce85017b0b5ce019c44ae5a1337f2616";
+  row.querySelector("details").open = true;
+  byId("imports-sample").hidden = true;
+});
+importsForm.addEventListener("submit", event => {
+  event.preventDefault();
+  const files = [...byId("imports-fields").children].map(row => {
+    const field = name => row.querySelector("[name=" + name + "]").value.trim();
+    const file = {filename: field("filename"), url: field("url")};
+    if (field("sha256")) file.sha256 = field("sha256");
+    if (field("redirect_urls")) file.redirect_urls = field("redirect_urls").split(/\r?\n/).map(url => url.trim()).filter(Boolean);
+    return file;
+  });
+  void changeImport("/api/file-imports", {project: importsForm.elements.project.value.trim(),
+    collection: importsForm.elements.collection.value.trim(), files}, true);
+});
+
 function closeReview() {
   reviewId = null;
   if (reviewDialog.open) reviewDialog.close();
@@ -789,6 +974,7 @@ async function poll() {
   polling = true;
   let delay = 1500;
   void pollConcerns();
+  void pollImports();
   try {
     let page;
     if (!initialized) {

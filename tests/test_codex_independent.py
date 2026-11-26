@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 from lantern.__main__ import arguments, main
 from lantern.chat_store import ChatStore
+from lantern.file_grants import FileGrants
 from lantern.chat_worker import process_batch
 from test_codex_smoke import reply
 from test_github_tools import sample_proposal
@@ -93,6 +94,12 @@ class NativeIndependentWorker(unittest.TestCase):
                 item = {"type": "function_call", "id": f"fc_{serial}", "call_id": f"call_{serial}",
                         "status": "completed", "name": name,
                         "arguments": json.dumps({**args, "rationale": "Edit the private fixture journal."})}
+            elif serial in (12, 13):
+                name, args = (("file_import_status", {}) if serial == 12 else
+                              ("import_file", {"grant_id": 1, "filename": "tides.csv"}))
+                item = {"type": "function_call", "id": f"fc_{serial}", "call_id": f"call_{serial}",
+                        "status": "completed", "name": name, "arguments": json.dumps(
+                            {**args, "rationale": "Analyze the approved tide observations offline."})}
             else:
                 answer = old_answer if serial == 1 else new_answer
                 item = {"type": "message", "role": "assistant", "id": f"msg_{serial}", "status": "completed",
@@ -107,6 +114,10 @@ class NativeIndependentWorker(unittest.TestCase):
                 reviews.append((packet["tool"], payload["instructions"]))
                 if packet["tool"] == "github_open_draft":
                     self.assertEqual(packet["host_facts"]["public_draft"], proposal)
+                if packet["tool"] == "import_file":
+                    grant = packet["host_facts"]["file_import_grant"]
+                    self.assertEqual((grant["grant_id"], grant["mode"]), (1, "once"))
+                    self.assertEqual(grant["file"]["url"], "https://example.org/tides.csv")
             report = {"escalate": False, "summary": "Private worker fixture.", "evidence": ""}
             return {"model": payload["model"], "status": "completed",
                     "usage": {"input_tokens": 30, "output_tokens": 15}, "output": [
@@ -195,17 +206,35 @@ class NativeIndependentWorker(unittest.TestCase):
                         self.assertEqual(args, {"proposal_id": proposal["proposal_id"][:12]})
                     return proposal
 
-                with patch("lantern.coding_tools.run_code", side_effect=reviewed_run) as runner, \
+                grants = FileGrants(state)
+                grants.propose("oceans", "tidal observations", [
+                    {"url": "https://example.org/tides.csv", "filename": "tides.csv"}])
+                grants.decide(1, "allow_once")
+                spool = state / "test-objects"
+                spool.mkdir()
+
+                def download(url, redirects, destination, limit):
+                    destination.write_bytes(b"hour,height\n0,21\n")
+                    return url
+
+                with patch.dict(os.environ, LANTERN_FILE_IMPORTS="1"), \
+                        patch("lantern.file_imports.OBJECTS", spool), \
+                        patch("lantern.file_imports.fetch_import", side_effect=download), \
+                        patch("lantern.file_imports.deliver_import",
+                              return_value={"status": "imported", "path": "/work/imports/tides.csv"}), \
+                        patch("lantern.coding_tools.run_code", side_effect=reviewed_run) as runner, \
                         patch("lantern.github_tools._call", side_effect=github):
                     boot(state, "--heartbeat-minutes", "60", "--coding-socket", str(state / "broker.sock"),
                          "--github-socket", str(state / "github.sock"))
                     runner.assert_called_once()
                 self.assertEqual(gh_calls, ["preview", "evidence", "open_draft"])
                 self.assertEqual(store.status()["thread_id"], tid)
-                self.assertEqual(len(requests), 12)
+                self.assertEqual(len(requests), 14)
+                self.assertEqual(grants.status(1)["status"], "fulfilled")
                 self.assertEqual((state / "workspace" / "files" / filename).read_text(encoding="utf-8"),
                                  "Fixture journal: the pawn endgame is next.\nQueued.")
-                self.assertTrue({"coding_run", "github_sync", "github_preview", "github_open_draft"} <=
+                self.assertTrue({"coding_run", "github_sync", "github_preview", "github_open_draft",
+                                 "file_import_status", "request_file_import", "import_file"} <=
                                 {tool["name"] for tool in requests[5]["tools"]})
                 schemas = {tool["name"]: tool["parameters"] for tool in requests[5]["tools"]}
                 self.assertEqual(set(schemas["workspace_append"]["required"]), {"path", "text", "rationale"})
@@ -261,5 +290,5 @@ class NativeIndependentWorker(unittest.TestCase):
         self.assertIn("reserved_usd", outputs["call_4"])
         self.assertEqual([tool for tool, _ in reviews], [name for name, _ in actions]
                          + ["coding_run", "harness_logs", "github_preview", "github_open_draft"]
-                         + [name for name, _ in journal_edits])
+                         + [name for name, _ in journal_edits] + ["file_import_status", "import_file"])
         self.assertTrue(all(scheduled_marker in instructions for _, instructions in reviews[:len(actions)]))

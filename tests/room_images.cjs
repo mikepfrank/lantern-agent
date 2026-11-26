@@ -23,6 +23,7 @@ async function exercise(browser, width) {
           return send({ events: rows.filter(row => row.id > after), more: false, status: { online: true } });
         }
         if (url.pathname === "/api/review-questions") return send({ questions: [] });
+        if (url.pathname === "/api/file-imports") return send({ requests: [], grants: [] });
         if (url.pathname === "/api/concerns") return send({ concerns: [], as_of: null });
         if (url.pathname === "/api/messages") {
           const body = route.request().postDataJSON();

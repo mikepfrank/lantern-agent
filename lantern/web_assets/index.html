@@ -22,7 +22,7 @@
     </div>
   </header>
   <div class="room-layout">
-  <aside class="concerns" aria-label="Standing concerns">
+  <aside class="concerns" aria-label="Operator controls">
     <h2><button id="concern-toggle" aria-controls="concern-panel" aria-expanded="false" type="button">
       Standing concerns <span id="concern-count"></span>
     </button></h2>
@@ -31,7 +31,42 @@
       <ul id="concern-list"></ul>
       <p id="concern-updated"></p>
     </div>
+    <details id="imports-panel">
+      <summary>File imports <span id="imports-count" role="status"></span></summary>
+      <p id="imports-state" role="status"></p>
+      <div id="imports-list"></div>
+      <p id="imports-action-error" role="alert"></p>
+      <button class="concern-release" id="imports-new" type="button" aria-haspopup="dialog">Add files…</button>
+    </details>
   </aside>
+  <dialog id="imports-dialog" aria-labelledby="imports-title">
+    <form id="imports-form">
+      <h2 id="imports-title">Request a file import</h2>
+      <p>Choose up to 12 data files of 16 MiB each. Lantern receives approved files in <code>/work/imports</code>.</p>
+      <button class="concern-release" id="imports-sample" type="button">Use NASA’s WMAP spectrum</button>
+      <label>Project <input name="project" maxlength="80" required></label>
+      <label>Collection <input name="collection" maxlength="80" required></label>
+      <div id="imports-fields"></div>
+      <button type="button" class="concern-release" id="imports-add">Add another file</button>
+      <p id="imports-error" role="alert"></p>
+      <div class="review-buttons">
+        <button id="imports-cancel" type="button">Cancel</button>
+        <button type="submit">Review request</button>
+      </div>
+    </form>
+  </dialog>
+  <template id="import-file-fields">
+    <fieldset>
+      <legend>File</legend>
+      <label>Filename <input name="filename" required placeholder="observations.csv"></label>
+      <label>Exact HTTPS URL <input name="url" required type="url" spellcheck="false"></label>
+      <details><summary>Checksum and redirects</summary>
+        <label>Expected SHA-256 (optional) <input name="sha256" pattern="[0-9a-fA-F]{64}" spellcheck="false"></label>
+        <label>Permitted redirect URLs (one per line) <textarea name="redirect_urls" rows="2" spellcheck="false"></textarea></label>
+      </details>
+      <button class="concern-release" type="button">Remove file</button>
+    </fieldset>
+  </template>
   <template id="concern-card">
     <li>
       <div class="concern-meta"><h3></h3><span class="concern-status"></span></div>

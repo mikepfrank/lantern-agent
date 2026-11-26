@@ -36,6 +36,7 @@ fi
 install -m 0600 "$src/deploy/coding/Dockerfile" "$temp/Dockerfile"
 install -m 0600 "$src/deploy/coding/.dockerignore" "$temp/.dockerignore"
 install -m 0644 "$src/deploy/coding/render_pdf.py" "$temp/render_pdf.py"
+install -m 0644 "$src/deploy/coding/receive_import.py" "$temp/receive_import.py"
 docker build --build-arg "BASE=${LANTERN_CODING_BASE:-python:3.12-slim-bookworm}" \
     --iidfile "$temp/image-id" --tag lantern-code:local "$temp"
 image=$(cat "$temp/image-id")
@@ -135,6 +136,12 @@ active_container=$(docker ps -aq --filter 'label=org.lantern.coding-broker=1' --
     echo "A Lantern coding container is active. Retry after it finishes." >&2; exit 1;
 }
 install -m 0644 "$src/lantern/coding_broker.py" /opt/lantern/coding/broker.py
+install -d -o root -g root -m 0755 /var/lib/lantern-imports
+install -d -o lantern -g lantern -m 0711 /var/lib/lantern-imports/objects
+install -d -m 0755 /etc/systemd/system/lantern-chat.service.d
+printf '%s\n' '[Service]' 'Environment=LANTERN_FILE_IMPORTS=1' \
+    'ReadWritePaths=/var/lib/lantern-imports/objects' > "$temp/file-imports.conf"
+install -m 0644 "$temp/file-imports.conf" /etc/systemd/system/lantern-chat.service.d/file-imports.conf
 if [[ -f $temp/heritage.pdf ]]; then
     mv -Tf -- "$temp/heritage.pdf" "$base/heritage.pdf"
 elif [[ -f $base/heritage.pdf ]]; then

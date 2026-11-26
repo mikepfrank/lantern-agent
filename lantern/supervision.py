@@ -224,7 +224,8 @@ def recovered_excerpt(error, evidence_excerpt):
 
 class Supervisor:
     def __init__(self, state: Path, luna, review, consult, *, sample_every: int = 12, tool_names=None,
-                 batch_id: int | None = None, operator_room=None, draft_evidence=None, workspace_root=None):
+                 batch_id: int | None = None, operator_room=None, draft_evidence=None, workspace_root=None,
+                 import_evidence=None):
         if type(sample_every) is not int or sample_every < 1:
             raise ValueError("Sample interval must be a positive integer")
         self.path = state / DATABASE
@@ -234,6 +235,7 @@ class Supervisor:
         self.batch_id = batch_id
         self.operator_room = operator_room
         self.draft_evidence = draft_evidence
+        self.import_evidence = import_evidence
         self.workspace_root = workspace_root
         self.thread = None
         self._observations = Condition()
@@ -555,6 +557,13 @@ class Supervisor:
                 resolution_error = edit["reason"]
         elif name in ("workspace_append", "workspace_replace"):
             resolution_error = "The host could not verify the workspace revision for this edit."
+        if name == "import_file":
+            try:
+                if self.import_evidence is None:
+                    raise ValueError("File import grants are unavailable in this room.")
+                resource_facts["file_import_grant"] = self.import_evidence(args)
+            except ValueError as exc:
+                resolution_error = str(exc)
         if name == OPEN_DRAFT:
             document = None
             try:

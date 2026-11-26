@@ -74,7 +74,7 @@ class WebSignInTests(unittest.TestCase):
                 self.assertEqual(200, request(server, "GET", asset)[0])
             self.assertEqual(401, request(server, "POST", "/api/sign-in", body={"password": PASSWORD})[0])
             self.assertEqual(404, request(server, "POST", "/api/set-password", body={"password": PASSWORD})[0])
-            for path in ("/api/room", "/api/room?after=0", "/api/review-questions",
+            for path in ("/api/room", "/api/room?after=0", "/api/review-questions", "/api/file-imports",
                          "/api/messages/1/image", "/api/messages/1/images/1"):
                 self.assertEqual(401, request(server, "GET", path)[0], path)
 
@@ -98,6 +98,9 @@ class WebSignInTests(unittest.TestCase):
             for path, body in (("/api/sign-in", {"password": PASSWORD}), ("/api/sign-out", {}),
                                ("/api/messages", {"text": "fixture", "client_id": str(uuid4())}),
                                ("/api/review-questions/1/answer", {"answer": "Fixture answer"}),
+                               ("/api/file-imports", {"project": "science", "collection": "test", "files": []}),
+                               ("/api/file-imports/1/decide", {"decision": "allow_standing"}),
+                               ("/api/file-imports/1/revoke", {}),
                                ("/api/concerns/1/release", {"version": 1})):
                 for origin in (None, "null", "https://different.example.test"):
                     with self.subTest(path=path, origin=origin):
@@ -106,6 +109,42 @@ class WebSignInTests(unittest.TestCase):
                                                                                "X-Forwarded-Host": HOST})[0])
             self.assertEqual(200, request(server, "GET", "/api/room", headers=cookie)[0])
             self.assertEqual([], server.store.events())
+
+    def test_grant_named_files_together_from_a_signed_in_room(self):
+        data = {"project": "Observatory", "collection": "Night one", "files": [
+            {"filename": "counts.csv", "url": "https://example.org/data/counts.csv",
+             "redirect_urls": ["https://example.org/mirror/counts.csv"], "sha256": "ab" * 32},
+            {"filename": "sky.txt", "url": "https://example.org/data/sky.txt"}]}
+        route = "/api/file-imports"
+        with listening(self.state) as server:
+            server.auth.set_password(PASSWORD)
+            self.assertEqual(401, request(server, "POST", route, body=data)[0])
+            cookie = self.sign_in(server)
+            def post(path, body):
+                return request(server, "POST", path, body=body, headers=cookie)[0]
+            def overview():
+                return request(server, "GET", route, headers=cookie)[2]
+            self.assertEqual(200, post(route, data))
+            snapshot = overview()
+            self.assertEqual([], snapshot["grants"])
+            pending, = snapshot["requests"]
+            self.assertEqual(data["files"][0]["redirect_urls"], pending["files"][0]["redirect_urls"])
+            decide = f"{route}/{pending['id']}/decide"
+            self.assertEqual(401, request(server, "POST", decide, body={"decision": "allow_once"})[0])
+            self.assertEqual(400, post(decide, {"decision": "permit_all"}))
+            self.assertEqual(200, post(decide, {"decision": "allow_standing"}))
+            snapshot = overview()
+            self.assertEqual([], snapshot["requests"])
+            approved, = snapshot["grants"]
+            self.assertEqual(("standing", 2), (approved["mode"], len(approved["files"])))
+            revoke = f"{route}/{approved['id']}/revoke"
+            self.assertEqual(400, post(revoke, {"other": True}))
+            self.assertEqual(200, post(revoke, {}))
+            self.assertEqual([], overview()["grants"])
+            self.assertEqual(200, post(route, data))
+            reopened, = overview()["requests"]
+            self.assertEqual(200, post(f"{route}/{reopened['id']}/decide", {"decision": "deny"}))
+            self.assertFalse(overview()["grants"])
 
     def test_sessions_survive_restart_and_approve_a_review_once(self):
         with listening(self.state) as first:

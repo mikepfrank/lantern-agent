@@ -6,6 +6,7 @@ RUN apt-get update \
     && find / -xdev -type f -perm /6000 -exec chmod a-s {} + \
     && mkdir -p /work
 COPY render_pdf.py /opt/lantern/render_pdf.py
+COPY receive_import.py /opt/lantern/receive_import.py
 USER 65532:65532
 WORKDIR /work
 ENTRYPOINT ["/bin/sh"]

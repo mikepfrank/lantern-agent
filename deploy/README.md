@@ -124,6 +124,16 @@ Use `exit` to close the inspection shell. The volume remains available between L
 
 The first worker start with coding enabled backs up the existing native room in `operator-backups/coding-workspace-v1/` before adding the tool. The worker, browser and broker can be inspected separately with `systemctl status lantern-chat lantern-web lantern-code.socket lantern-code.service`. For a coding-only outage, recover the mount and broker before retrying. Check for completed edits if a command lost its response.
 
+## Approved file imports
+
+Install the matching coding image and broker using `sudo bash deploy/install-coding.sh PATH_TO_SEED_BUNDLE FULL_GIT_REVISION`, then activate the matching worker at an idle boundary. On an already seeded host the installer requires an existing bundle path and preserves the editable checkout. Restart `lantern-admin-web.service` to load the room controls from the worker release. Use the full installer to update the optional SSH-link web room as well.
+
+The coding installer enables file imports for the worker and provisions a private staging directory. The room stores its decisions in `file-imports.sqlite` under the existing private state directory. The downloader accepts only the exact public HTTPS sources approved for a named file. It checks every redirect and presents a new mirror in the room for a separate decision. The offline broker verifies the full digest and delivers a regular file without replacing an existing entry. Identical bytes at the same destination can satisfy an interrupted delivery.
+
+A request can cover up to 12 named files. Each file can list up to three redirect URLs. The download limit is 16 MiB per file, with 64 MiB total staging capacity. The UTF-8 data formats are plain text, CSV, TSV and JSON (2 MiB for JSON). Tar, gzip-compressed tar and numbered archive parts can be stored for inspection. The import operation never extracts archive members or executes their contents. File verification checks the full expected SHA-256 when the grant specifies one. Otherwise the receipt records the digest calculated on arrival. A new source, another use of the data, and public redistribution each have their own authority.
+
+For a first check, select **Use NASA’s WMAP spectrum** in the room, review the source and filename, and allow it once. Ask Lantern to locate the grant with `file_import_status`, import `wmap-spectrum.txt`, and find the multipole bin with the highest average temperature power. The sample pin was measured from the NASA download. [NASA product and documentation](https://lambda.gsfc.nasa.gov/product/wmap/dr5/pow_tt_spec_get.html)
+
 ## GitHub sync and draft pull requests
 
 From the reviewed source archive on Lightsail, run `sudo bash deploy/install-github.sh FULL_GIT_REVISION` after provisioning the coding environment. Then activate the matching chat worker with `sudo bash deploy/install.sh --worker-only FULL_GIT_REVISION`. This enables the tools on the shared conversation, including after resume and compaction.

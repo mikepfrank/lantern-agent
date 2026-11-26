@@ -2,6 +2,8 @@
 
 ## Current state
 
+**Approved file imports, November 26 (Central).** The private room can approve a set of named scientific data files once or grant repeat access to those files. Lantern can use `file_import_status` and `import_file` to deliver an approved file under `/work/imports`. The NASA WMAP preset was exercised against a temporary Lightsail workspace, including digest verification, offline Python readback and a duplicate request. The private room is where Mike grants a real import. [Setup and acceptance check](deploy/README.md#approved-file-imports)
+
 **Incremental workspace editing, November 24 (Central).** The next worker adds `workspace_append` for growing logs and `workspace_replace` for exact, unique text edits. Both operate on existing UTF-8 files. The host pins the revision before review and checks it at save time. A live acceptance check is to append one move to a test log and correct a single status line, then read back both changes.
 
 **Short SHA-256 inputs, November 24 (Central).** Workspace reads and writes return a 12-character `sha256_prefix`, and GitHub previews return a `proposal_id_prefix`. The host resolves these before review and uses the full digest for the action. For this release, install the matching GitHub broker before rotating the idle worker so the broker can resolve frozen proposal prefixes. The release includes the queued Darkbloom routing update.
