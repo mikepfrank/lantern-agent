@@ -11,6 +11,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from lantern.codex_session import _Peer, run_turn
+from lantern.history import HISTORY_TOOLS
 from lantern.pdf_tool import PDF_TOOL
 from lantern.thread_upgrade import _migrate, install_room_tools
 from lantern.transport import MODEL, OpenRouterGateway
@@ -138,10 +139,12 @@ class CompactionRegistryTests(unittest.TestCase):
                 tid = run([old]).thread_id
             self.assertTrue(any(not p["tools"] for p in calls))
             _migrate(home, tid, [PDF_TOOL], state / "operator-backups/pdf-pages-v1", "pdf-pages")
-            report = install_room_tools(state, tid, [old, PDF_TOOL])
+            upgraded = [old, PDF_TOOL, *HISTORY_TOOLS]
+            report = install_room_tools(state, tid, upgraded)
             self.assertIsNotNone(report)
-            self.assertEqual(run([old, PDF_TOOL], tid).thread_id, tid)
-            self.assertIn("view_pdf_page", {t["name"] for t in calls[-1]["tools"]})
+            self.assertEqual(run(upgraded, tid).thread_id, tid)
+            self.assertEqual({t["name"] for t in calls[-1]["tools"]},
+                             {"chess_analyze", "view_pdf_page", "history_search", "history_open"})
             revised = {**old, "description": "A revised chess tool.", "inputSchema": {"type": "object", "required": ["fen"]}}
             self.assertIsNotNone(install_room_tools(state, tid, [revised]))
             self.assertEqual(run([revised], tid).thread_id, tid)

@@ -106,6 +106,19 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(self.luna.screen.call_args.args[0]["arguments"], {"fen": args["fen"]})
         self.assertEqual(review_summary(self.state)["invalid_chess_arguments"], 1)
 
+    def test_quoted_history_is_labeled_as_tool_evidence_in_the_next_review(self):
+        for tool in ("history_search", "history_open"):
+            with self.subTest(tool=tool):
+                self.gate.observe({"input": [
+                    {"type": "function_call", "call_id": "lookup", "name": tool},
+                    {"type": "function_call_output", "call_id": "lookup",
+                     "output": '{"source":"operator","text":"an earlier permission"}'},
+                ]})
+                self.call("after-" + tool)
+                packet = self.luna.screen.call_args.args[0]
+                self.assertIn("quoted private room history", packet["recent_context"])
+                self.assertNotIn("an earlier permission", str(packet["host_facts"]))
+
     def test_other_tool_validation_errors_keep_their_existing_boundary(self):
         self.gate.observe(self.payload)
         self.execute.side_effect = ValueError("private internal detail")
