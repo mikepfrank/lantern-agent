@@ -19,6 +19,11 @@ const reviewSubmit = byId("review-submit");
 const concernDialog = byId("concern-dialog");
 const concernToggle = byId("concern-toggle");
 const concernList = byId("concern-list");
+const exportDialog = byId("export-dialog");
+const exportRange = byId("export-range");
+const exportDays = byId("export-days");
+const exportSave = byId("export-save");
+let exportRequest = null;
 const idleHint = matchMedia("(pointer: fine)").matches ? "Enter to send · Shift + Enter for a new line" : "";
 const storageKey = (name) => "lantern.room." + name;
 const cookieRoom = location.protocol === "https:";
@@ -144,6 +149,7 @@ function connection(state, label) {
 }
 
 function controls() {
+  byId("export-open").disabled = !authenticated || !initialized;
   draft.disabled = !authenticated || !initialized;
   draft.readOnly = Boolean(pending);
   attach.disabled = !authenticated || !initialized || Boolean(pending) || attachments.length + filesToPrepare.length >= maxImages;
@@ -158,6 +164,7 @@ function controls() {
 
 function locked() {
   authenticated = false;
+  closeExport();
   importsDialog.close();
   importsForm.reset();
   byId("imports-fields").replaceChildren();
@@ -221,8 +228,11 @@ class RequestError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-async function request(path, body, responseType = "json") {
+async function request(path, body, responseType = "json", signal) {
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) abort();
+  signal?.addEventListener("abort", abort, {once: true});
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
     const headers = cookieRoom ? {} : { Authorization: "Bearer " + linkKey };
@@ -244,6 +254,7 @@ async function request(path, body, responseType = "json") {
     return result;
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener("abort", abort);
   }
 }
 
@@ -791,7 +802,7 @@ function updateReviewQueue(items) {
   byId("review-next").hidden = items.length < 2;
   reviewInbox.hidden = !items.length;
   reviewInbox.textContent = items.length > 1 ? "Answer Opus (" + items.length + ")" : "Answer Opus";
-  if (!items.length || reviewDialog.open || concernDialog.open || document.hidden) return;
+  if (!items.length || reviewDialog.open || concernDialog.open || exportDialog.open || document.hidden) return;
   const next = items.find((item) => !deferredReviews.has(item.id) && !stored("review-later." + item.id));
   if (next && !(document.activeElement === draft && draft.value)) openReview(next);
 }
@@ -939,6 +950,105 @@ function messageImage(path, metadata, description) {
 byId("image-close").addEventListener("click", () => imageDialog.close());
 imageDialog.addEventListener("close", () => byId("image-full").removeAttribute("src"));
 
+function imageMetadata(event) {
+  return event.images || (event.image ? [event.image] : []);
+}
+
+function imagePath(event, index) {
+  return "/api/messages/" + event.id + (event.images ? "/images/" + index : "/image");
+}
+
+function resetExport() {
+  const url = exportSave.getAttribute("href");
+  if (url) URL.revokeObjectURL(url);
+  exportSave.removeAttribute("href");
+  exportSave.hidden = true;
+  byId("export-submit").hidden = false;
+  byId("export-submit").disabled = false;
+  byId("export-cancel").textContent = "Cancel";
+  byId("export-error").textContent = "";
+  byId("export-status").textContent = "";
+  exportRange.disabled = false;
+  exportDays.disabled = !byId("export-recent").checked;
+  byId("export-day-field").hidden = exportDays.disabled;
+}
+
+function closeExport() {
+  exportRequest?.abort();
+  exportRequest = null;
+  resetExport();
+  if (exportDialog.open) exportDialog.close();
+}
+
+byId("export-open").addEventListener("click", () => exportDialog.showModal());
+byId("export-cancel").addEventListener("click", closeExport);
+exportDialog.addEventListener("cancel", event => { event.preventDefault(); closeExport(); });
+window.addEventListener("pagehide", closeExport);
+exportRange.addEventListener("input", resetExport);
+
+byId("export-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!authenticated || exportRequest) return;
+  resetExport();
+  const days = byId("export-recent").checked ? exportDays.valueAsNumber : null;
+  const controller = new AbortController();
+  const {signal} = controller;
+  exportRequest = controller;
+  exportRange.disabled = true;
+  byId("export-submit").disabled = true;
+  const status = byId("export-status");
+  status.textContent = "Preparing conversation…";
+  let failureMessage = "Couldn’t prepare the Word file. Check the connection and try again.";
+  try {
+    const transcript = createTranscriptRtf({timeZone: shortTime.resolvedOptions().timeZone});
+    let query = days === null ? "" : "?days=" + days;
+    let count = 0;
+    do {
+      const page = await request("/api/export" + query, undefined, "json", signal);
+      for (const item of page.events) {
+        if (signal.aborted) return;
+        const images = await Promise.all(imageMetadata(item).map(async (metadata, index) => {
+          try {
+            const blob = await request(imagePath(item, index), undefined, "image", signal);
+            return {...metadata, bytes: new Uint8Array(await blob.arrayBuffer())};
+          } catch (error) {
+            failureMessage = "Couldn’t load attachment " + (index + 1) + " for event " + item.id + ". Please retry the export.";
+            throw error;
+          }
+        }));
+        if (signal.aborted) return;
+        transcript.addEvent(item, images);
+        count++;
+      }
+      if (signal.aborted) return;
+      status.textContent = "Prepared " + count + (count === 1 ? " event…" : " events…");
+      query = page.next_cursor ? "?" + new URLSearchParams({cursor: page.next_cursor}) : "";
+    } while (query);
+    if (!count) {
+      status.textContent = "No conversation events in this range.";
+      return;
+    }
+    exportSave.href = URL.createObjectURL(transcript.finish());
+    exportSave.download = "Lantern-conversation-" + (days === null ? "all" : "last-" + days + (days === 1 ? "-day" : "-days")) + ".rtf";
+    exportSave.hidden = false;
+    byId("export-submit").hidden = true;
+    byId("export-cancel").textContent = "Close";
+    status.textContent = "Word file ready · " + count + (count === 1 ? " event." : " events.");
+    exportSave.click();
+  } catch {
+    if (signal.aborted) return;
+    controller.abort();
+    status.textContent = "";
+    byId("export-error").textContent = failureMessage;
+  } finally {
+    if (exportRequest === controller) {
+      exportRequest = null;
+      exportRange.disabled = false;
+      byId("export-submit").disabled = false;
+    }
+  }
+});
+
 function messageNode(event) {
   const speakers = { operator: "You", lantern: "Lantern", system: "Service" };
   const role = Object.hasOwn(speakers, event.role) ? event.role : "system";
@@ -963,12 +1073,12 @@ function messageNode(event) {
   }
   item.append(header);
   if (role === "operator") {
-    const images = event.images || (event.image ? [event.image] : []);
+    const images = imageMetadata(event);
     if (images.length) {
       const gallery = document.createElement("div");
       gallery.className = "message-gallery";
       images.forEach((metadata, i) => {
-        const path = "/api/messages/" + event.id + (event.images ? "/images/" + i : "/image");
+        const path = imagePath(event, i);
         const description = images.length === 1 ? "attached image" : "attached image " + (i + 1) + " of " + images.length;
         gallery.append(messageImage(path, metadata, description));
       });
@@ -977,22 +1087,6 @@ function messageNode(event) {
   }
   if (event.text) item.append(body);
   return item;
-}
-
-function appendPlainMessage(body, text) {
-  // Preserve existing literal text and fenced code in operator and service messages.
-  const blocks = text.split(/^\x60{3}[^\r\n]*\r?\n([\s\S]*?)^\x60{3}[ \t]*(?:\r?\n|$)/gm);
-  blocks.forEach((part, i) => {
-    if (i % 2) {
-      const pre = document.createElement("pre");
-      const code = document.createElement("code");
-      code.textContent = part.replace(/\r?\n$/, "");
-      pre.append(code);
-      body.append(pre);
-    } else {
-      body.append(document.createTextNode(part));
-    }
-  });
 }
 
 function syncJump() {

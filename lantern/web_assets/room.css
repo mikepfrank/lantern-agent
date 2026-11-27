@@ -109,7 +109,11 @@ button:disabled, textarea:disabled { cursor: default; }
 .connection[data-state="live"] i { background: var(--teal); }
 .connection[data-state="offline"], .connection[data-state="locked"] { color: #edbb99; }
 main { display: flex; flex: 1; min-height: 0; flex-direction: column; padding-bottom: max(1.15rem, env(safe-area-inset-bottom)); }
-.room-heading { display: flex; align-items: baseline; gap: .8rem; justify-content: space-between; padding: 1.45rem 0 1rem; border-bottom: 1px solid var(--edge); }
+.room-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem .8rem; padding: 1.45rem 0 1rem; border-bottom: 1px solid var(--edge); }
+.room-heading h1 { margin-inline-end: auto; }
+#export-open { padding: .32rem .65rem; border: 1px solid var(--edge); border-radius: .43rem; color: var(--ink); background: transparent; font-size: .84rem; }
+#export-open:hover:enabled { border-color: var(--muted); }
+#export-open:disabled { color: var(--muted); }
 h1 { margin: 0; font: normal clamp(1.6rem, 4vw, 2rem)/1.2 "Hedvig Letters Serif", Georgia, serif; letter-spacing: -.035em; }
 .worker { text-align: right; color: var(--muted); }
 .worker[data-state="working"] { color: var(--amber); }
@@ -117,16 +121,30 @@ h1 { margin: 0; font: normal clamp(1.6rem, 4vw, 2rem)/1.2 "Hedvig Letters Serif"
   color: var(--amber); background: #2b2924; border: 1px solid #756248;
   border-radius: .43rem; padding: .4rem .7rem; font-weight: 600;
 }
-#review-inbox { margin-left: auto; font-size: .84rem; }
+#review-inbox { font-size: .84rem; }
 #review-notice { margin: 0; color: var(--muted); font-size: .85rem; }
 #review-notice:not(:empty) { margin-top: .5rem; }
-#review-dialog, #concern-dialog, #imports-dialog {
+#review-dialog, #concern-dialog, #imports-dialog, #export-dialog {
   width: min(32rem, calc(100% - 2rem)); max-height: calc(100dvh - 2rem);
   padding: 1.25rem; border: 1px solid #756248; border-radius: .8rem;
   background: #242625; color: var(--ink); box-shadow: 0 .8rem 4rem #0007;
 }
-#review-dialog::backdrop, #concern-dialog::backdrop, #imports-dialog::backdrop { background: #080b0bc9; }
-#review-title, #concern-title, #imports-title { margin: 0; font: normal 1.6rem/1.2 "Hedvig Letters Serif", Georgia, serif; }
+#review-dialog::backdrop, #concern-dialog::backdrop, #imports-dialog::backdrop, #export-dialog::backdrop { background: #080b0bc9; }
+#review-title, #concern-title, #imports-title, #export-title { margin: 0; font: normal 1.6rem/1.2 "Hedvig Letters Serif", Georgia, serif; }
+#export-dialog { width: min(26rem, calc(100% - 2rem)); }
+#export-range { border: 0; padding: 0; margin: 1.1rem 0; }
+#export-range legend { color: var(--muted); font-size: .86rem; }
+#export-range label { display: flex; align-items: center; gap: .5rem; margin: .55rem 0 0; }
+#export-range input[type=radio] { accent-color: var(--amber); }
+#export-range #export-day-field { margin-inline-start: 1.6rem; }
+#export-days { width: 6rem; padding: .28rem .45rem; font: inherit; color: var(--ink); background: #191c1b; border: 1px solid var(--edge); border-radius: .35rem; }
+#export-status, #export-error { font-size: .9rem; color: var(--muted); }
+#export-error { color: #fac3a3; }
+#export-status:empty, #export-error:empty { margin: 0; }
+#export-dialog .review-buttons { align-items: center; flex-wrap: wrap; }
+#export-submit { background: var(--amber); color: #282018; }
+#export-submit:disabled { opacity: .6; }
+#export-save { color: var(--teal); }
 #review-about { margin: .5rem 0 1rem; color: var(--muted); }
 .review-details { padding: .8rem; margin-bottom: 1rem; border-left: 2px solid var(--amber); background: #1d201f; overflow-wrap: anywhere; }
 .review-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .5rem; align-items: baseline; margin-bottom: .55rem; color: var(--muted); font-size: .78rem; }

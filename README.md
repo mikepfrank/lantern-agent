@@ -20,6 +20,8 @@ ssh -t -o ExitOnForwardFailure=yes -L 127.0.0.1:8765:127.0.0.1:8765 lightsail "s
 
 The browser and terminal show the same conversation. Either interface can send a follow-up while Lantern is working. The host handles `/release-concern` in both interfaces. `/help` runs locally in the terminal and goes to Lantern as an ordinary message in the browser.
 
+Choose **Export…** beside **Conversation** to download a Word-compatible `.rtf` file. Select the entire saved conversation or the last *N* days, measured back from when you start the export. The file includes messages and service events in order, with speaker names, local timestamps, formatted replies and embedded image attachments. The browser reads older events automatically and builds the document locally.
+
 Use **+** to select image files or paste a screenshot into the message box. You can combine both methods to attach up to four images to one message. The previews show their send order. Remove any preview before sending, then add a shared caption or send the images on their own. Ordinary text paste works in the same box.
 
 The browser accepts PNG, JPEG and WebP and reduces each image to fit 1 MiB and 1,600 pixels per side. Click a thumbnail in the conversation to see the saved copy. Qwen receives the four most recent images in its current context, including rendered PDF pages. Older uploads remain in chat and can be attached again. Luna receives the pixels during full-context checks. The terminal shows the image dimensions and caption.

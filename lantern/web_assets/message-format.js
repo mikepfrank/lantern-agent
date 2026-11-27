@@ -84,3 +84,19 @@ function renderLanternMarkdown(body, text) {
   pre.textContent = text;
   body.append(pre);
 }
+
+function appendPlainMessage(body, text) {
+  // Preserve existing literal text and fenced code in operator and service messages.
+  const blocks = text.split(/^\x60{3}[^\r\n]*\r?\n([\s\S]*?)^\x60{3}[ \t]*(?:\r?\n|$)/gm);
+  blocks.forEach((part, i) => {
+    if (i % 2) {
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      code.textContent = part.replace(/\r?\n$/, "");
+      pre.append(code);
+      body.append(pre);
+    } else {
+      body.append(document.createTextNode(part));
+    }
+  });
+}

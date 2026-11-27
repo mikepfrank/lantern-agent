@@ -42,7 +42,7 @@ const { chromium } = require("playwright");
       if (["/api/file-imports", "/api/repository-clones"].includes(url.pathname)) return reply(200, {requests: [], grants: []});
       if (url.pathname === "/api/concerns") return reply(200, { concerns: [], as_of: null });
       const file = url.pathname === "/" ? (signedIn ? "index.html" : "login.html") : url.pathname.slice(1);
-      assert.ok(["login.html", "login.js", "index.html", "room.css", "room.js", "message-format.js", "markdown-it-15.0.3.min.js"].includes(file));
+      assert.ok(["login.html", "login.js", "index.html", "room.css", "room.js", "transcript-rtf.js", "message-format.js", "markdown-it-15.0.3.min.js"].includes(file));
       return route.fulfill({ path: path.join(assets, file), headers: { "Cache-Control": "no-store" } });
     });
     const password = page.getByLabel("Password");

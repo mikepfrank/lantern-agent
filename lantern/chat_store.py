@@ -227,6 +227,21 @@ class ChatStore:
             rows = db.execute(query + " ORDER BY e.id DESC LIMIT ?", (*params, limit)).fetchall()
             return [_event(db, row) for row in reversed(rows)]
 
+    def export_page(self, *, after: int, through: int | None, since: datetime | None,
+                    limit: int) -> tuple[int, list[Event]]:
+        """Page through the append-only room log with the upper ID fixed on the first request."""
+        with self._connect() as db:
+            if through is None:
+                through = db.execute("SELECT COALESCE(MAX(id),0) FROM events").fetchone()[0]
+            query = EVENT_SELECT + "WHERE e.id>? AND e.id<=?"
+            params = [after, through]
+            if since is not None:
+                # _append writes UTC ISO timestamps. Use their full precision at the cutoff.
+                query += " AND e.at>=?"
+                params.append(since.isoformat())
+            rows = db.execute(query + " ORDER BY e.id LIMIT ?", (*params, limit))
+            return through, [_event(db, row) for row in rows]
+
     def read_cursor(self) -> int | None:
         with self._connect() as db:
             return db.execute("SELECT read_cursor FROM room WHERE id=1").fetchone()[0]

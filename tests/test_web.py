@@ -1,4 +1,5 @@
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 import base64
 from http.client import HTTPConnection
 import json
@@ -53,7 +54,8 @@ class WebRoomTests(unittest.TestCase):
 
     def test_static_shell_and_private_routes(self):
         self.store.submit("private content")
-        for path in ("/", "/room.css", "/room.js", "/markdown-it-15.0.3.min.js", "/message-format.js"):
+        for path in ("/", "/room.css", "/room.js", "/markdown-it-15.0.3.min.js", "/message-format.js",
+                     "/transcript-rtf.js"):
             code, headers, content = self.request("GET", path, auth=False)
             self.assertEqual(200, code)
             self.assertEqual("no-store", headers["Cache-Control"])
@@ -293,6 +295,7 @@ class WebRoomTests(unittest.TestCase):
         self.assertEqual(409, self.request("POST", "/api/messages", body={**body, "images": uploads[::-1]})[0])
         event, = self.request("GET", "/api/room")[2]["events"]
         self.assertEqual(receipt["id"], event["id"])
+        self.assertEqual([event], self.request("GET", "/api/export")[2]["events"])
         self.assertEqual(body["text"], event["text"])
         self.assertEqual(4, len(event["images"]))
         self.assertEqual(event["images"][0], event["image"])
@@ -314,6 +317,38 @@ class WebRoomTests(unittest.TestCase):
         self.assertEqual([], self.store.events())
         self.assertEqual(200, self.request("POST", "/api/messages", body={**base, "images": [first, first]})[0])
         self.assertEqual(1, self.store.status()["queued"])
+
+    def test_export_freezes_date_range_and_last_id_across_pages(self):
+        end = datetime(2026, 11, 2, 6, 15, 0, 123456, tzinfo=timezone.utc)
+        cutoff = end - timedelta(days=1)
+        self.store.clock = lambda: cutoff - timedelta(microseconds=1)
+        old = self.store.submit("Before the rolling cutoff")
+        self.store.clock = lambda: cutoff
+        ids = [self.store.submit(f"Message {i}") for i in range(PAGE_SIZE + 1)]
+        self.room.store.clock = lambda: end
+        code, headers, page = self.request("GET", "/api/export?days=1")
+        self.assertEqual((200, "no-store"), (code, headers["Cache-Control"]))
+        self.assertEqual(ids[:PAGE_SIZE], [e["id"] for e in page["events"]])
+        full = self.request("GET", "/api/export")[2]
+        self.assertEqual(old, full["events"][0]["id"])
+        self.room.store.clock = self.store.clock = lambda: end + timedelta(days=2)
+        self.store.submit("Arrived after the download started")
+        for snapshot in (page, full):
+            final = self.request("GET", "/api/export?cursor=" + snapshot["next_cursor"])[2]
+            expected = ids if snapshot is page else [old, *ids]
+            self.assertEqual(expected, [e["id"] for e in snapshot["events"] + final["events"]])
+            self.assertIsNone(final["next_cursor"])
+        self.assertIsNone(self.store.read_cursor())
+
+    def test_export_empty_history_and_invalid_parameters(self):
+        self.assertEqual({"events": [], "next_cursor": None}, self.request("GET", "/api/export?days=1")[2])
+        self.assertEqual(401, self.request("GET", "/api/export?days=bad", auth=False)[0])
+        self.assertEqual(403, self.request("GET", "/api/export", headers={"Origin": "null"})[0])
+        for invalid in ("days=", "days=0", "days=-2", "days=1.5", "days=365001", "days=1&days=2",
+                        "days=1&cursor=1~2~", "limit=200", "cursor=4~3~", "cursor=1~9223372036854775808~",
+                        "cursor=1~5~20261699000000123456"):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(400, self.request("GET", "/api/export?" + invalid)[0])
 
     def test_history_pages_and_invalid_inputs(self):
         for i in range(PAGE_SIZE + 3):

@@ -30,7 +30,7 @@ async function exercise(browser, width) {
         return reply({id: 123}, 202);
       }
       const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-      assert.ok(["index.html", "room.css", "room.js", "message-format.js", "markdown-it-15.0.3.min.js"].includes(name));
+      assert.ok(["index.html", "room.css", "room.js", "transcript-rtf.js", "message-format.js", "markdown-it-15.0.3.min.js"].includes(name));
       return route.fulfill({path: path.join(__dirname, "../lantern/web_assets", name)});
     });
     await page.goto("http://127.0.0.1:18765/#key=fixture-key");

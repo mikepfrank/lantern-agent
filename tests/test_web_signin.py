@@ -80,7 +80,7 @@ class WebSignInTests(unittest.TestCase):
                 self.assertEqual(200, request(server, "GET", asset)[0])
             self.assertEqual(401, request(server, "POST", "/api/sign-in", body={"password": PASSWORD})[0])
             self.assertEqual(404, request(server, "POST", "/api/set-password", body={"password": PASSWORD})[0])
-            for path in ("/api/room", "/api/room?after=0", "/api/review-questions", "/api/file-imports",
+            for path in ("/api/room", "/api/room?after=0", "/api/export", "/api/review-questions", "/api/file-imports",
                          "/api/repository-clones", "/api/messages/1/image", "/api/messages/1/images/1"):
                 self.assertEqual(401, request(server, "GET", path)[0], path)
 
@@ -96,6 +96,7 @@ class WebSignInTests(unittest.TestCase):
             event = {"client_id": str(uuid4()), "text": "Hello from the browser"}
             self.assertEqual(200, request(public, "POST", "/api/messages", body=event, headers=cookie)[0])
             self.assertEqual(event["text"], request(tunnel, "GET", "/api/room", headers=bearer)[2]["events"][0]["text"])
+            self.assertEqual(event["text"], request(public, "GET", "/api/export", headers=cookie)[2]["events"][0]["text"])
 
     def test_exact_origin_is_required_for_all_mutations(self):
         with listening(self.state) as server:

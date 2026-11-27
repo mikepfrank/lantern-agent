@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/room.css">
   <script src="/markdown-it-15.0.3.min.js" defer></script>
   <script src="/message-format.js" defer></script>
+  <script src="/transcript-rtf.js" defer></script>
   <script src="/room.js" defer></script>
 </head>
 <body class="room">
@@ -106,9 +107,28 @@
   <main>
     <div class="room-heading">
       <h1>Conversation</h1>
+      <button id="export-open" type="button" aria-haspopup="dialog" aria-label="Export conversation" disabled>Export…</button>
       <button id="review-inbox" type="button" aria-haspopup="dialog" hidden>Answer Opus</button>
       <span class="worker" id="worker" aria-live="polite"></span>
     </div>
+    <dialog id="export-dialog" aria-labelledby="export-title">
+      <form id="export-form">
+        <h2 id="export-title">Export conversation</h2>
+        <fieldset id="export-range">
+          <legend>Include</legend>
+          <label><input type="radio" name="export-scope" value="all" checked> Entire conversation</label>
+          <label><input id="export-recent" type="radio" name="export-scope" value="recent"> Last N days</label>
+          <label id="export-day-field" hidden>Number of days <input id="export-days" type="number" min="1" max="365000" step="1" value="7" required disabled></label>
+        </fieldset>
+        <p id="export-status" role="status"></p>
+        <p id="export-error" role="alert"></p>
+        <div class="review-buttons">
+          <button id="export-cancel" type="button">Cancel</button>
+          <button id="export-submit" type="submit">Download Word file (.rtf)</button>
+          <a id="export-save" hidden>Download again</a>
+        </div>
+      </form>
+    </dialog>
     <p id="review-notice" role="status"></p>
     <dialog id="review-dialog" aria-labelledby="review-title" aria-describedby="review-about">
       <form id="review-form">

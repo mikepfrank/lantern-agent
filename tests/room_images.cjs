@@ -48,7 +48,7 @@ async function exercise(browser, width) {
         throw Error(url.pathname);
       }
       const file = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-      assert.ok(["index.html", "room.css", "room.js", "message-format.js", "markdown-it-15.0.3.min.js"].includes(file));
+      assert.ok(["index.html", "room.css", "room.js", "transcript-rtf.js", "message-format.js", "markdown-it-15.0.3.min.js"].includes(file));
       return route.fulfill({ path: path.join(__dirname, "../lantern/web_assets", file), headers: {
         "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src data: blob:"
       } });

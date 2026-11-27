@@ -1,6 +1,7 @@
 """Private operator chat served on loopback for SSH forwarding or an HTTPS proxy."""
 
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 import json
@@ -38,7 +39,12 @@ ASSETS = {
     "/room.js": ("room.js", "text/javascript; charset=utf-8"),
     "/markdown-it-15.0.3.min.js": ("markdown-it-15.0.3.min.js", "text/javascript; charset=utf-8"),
     "/message-format.js": ("message-format.js", "text/javascript; charset=utf-8"),
+    "/transcript-rtf.js": ("transcript-rtf.js", "text/javascript; charset=utf-8"),
 }
+
+
+def _event_json(event):
+    return {**asdict(event), "image": event.image}
 
 
 def canonical_origin(origin: str) -> str:
@@ -231,7 +237,12 @@ class RoomHandler(BaseHTTPRequestHandler):
                 except (sqlite3.Error, OSError):
                     self._json(503, {"error": "Room permissions are temporarily unavailable."})
             return
-        if self.path.partition("?")[0] != "/api/room":
+        path = self.path.partition("?")[0]
+        if path == "/api/export":
+            if self._authorized():
+                self._export_page()
+            return
+        if path != "/api/room":
             self._json(404, {"error": "Unknown route."})
             return
         if not self._authorized():
@@ -265,8 +276,46 @@ class RoomHandler(BaseHTTPRequestHandler):
         except (OSError, sqlite3.Error):
             self._json(503, {"error": "The conversation store is temporarily unavailable."})
             return
-        self._json(200, {"events": [{**asdict(event), "image": event.image} for event in events],
+        self._json(200, {"events": [_event_json(event) for event in events],
                          "more": len(rows) > PAGE_SIZE, "status": status})
+
+    def _export_page(self):
+        store = self.server.store
+        after, through, since = 0, None, None
+        try:
+            query = parse_qs(urlsplit(self.path).query, strict_parsing=True,
+                             keep_blank_values=True, max_num_fields=1)
+            if "days" in query:
+                value = query["days"][0]
+                if not re.fullmatch(r"[1-9][0-9]{0,5}", value) or int(value) > 365000:
+                    raise ValueError
+                since = store.clock().astimezone(timezone.utc) - timedelta(days=int(value))
+            elif "cursor" in query:
+                match = re.fullmatch(r"([1-9][0-9]{0,18})~([1-9][0-9]{0,18})~([0-9]{20})?", query["cursor"][0])
+                if match is None:
+                    raise ValueError
+                after, through = int(match[1]), int(match[2])
+                if not after < through < 2**63:
+                    raise ValueError
+                if match[3]:
+                    since = datetime.strptime(match[3], "%Y%m%d%H%M%S%f").replace(tzinfo=timezone.utc)
+            elif query:
+                raise ValueError
+        except (ValueError, OverflowError):
+            self._json(400, {"error": "Invalid export range or cursor."})
+            return
+        try:
+            through, rows = store.export_page(after=after, through=through, since=since, limit=PAGE_SIZE + 1)
+        except sqlite3.Error:
+            self._json(503, {"error": "The conversation store is temporarily unavailable."})
+            return
+        events = rows[:PAGE_SIZE]
+        cursor = None
+        if len(rows) > PAGE_SIZE:
+            cutoff = since.strftime("%Y%m%d%H%M%S%f") if since else ""
+            cursor = f"{events[-1].id}~{through}~{cutoff}"
+        self._json(200, {"events": [_event_json(event) for event in events],
+                         "next_cursor": cursor})
 
     def do_POST(self):
         # Read a bounded, well-framed request before answering. Closing a
