@@ -969,6 +969,18 @@ function imagePath(event, index) {
   return "/api/messages/" + event.id + (event.images ? "/images/" + index : "/image");
 }
 
+// Markers have their own references. Only original events advance the room cursor.
+function* timeline(events, annotations = []) {
+  let i = 0;
+  for (const event of events) {
+    while (i < annotations.length && (annotations[i].after_event_id ?? 0) < event.id) {
+      yield annotations[i++];
+    }
+    yield event;
+  }
+  yield* annotations.slice(i);
+}
+
 function resetExport() {
   const url = exportSave.getAttribute("href");
   if (url) URL.revokeObjectURL(url);
@@ -1014,9 +1026,10 @@ byId("export-form").addEventListener("submit", async event => {
     const transcript = createTranscriptRtf({timeZone: shortTime.resolvedOptions().timeZone});
     let query = days === null ? "" : "?days=" + days;
     let count = 0;
+    let markerCount = 0;
     do {
       const page = await request("/api/export" + query, undefined, "json", signal);
-      for (const item of page.events) {
+      for (const item of timeline(page.events, page.annotations)) {
         if (signal.aborted) return;
         const images = await Promise.all(imageMetadata(item).map(async (metadata, index) => {
           try {
@@ -1029,13 +1042,14 @@ byId("export-form").addEventListener("submit", async event => {
         }));
         if (signal.aborted) return;
         transcript.addEvent(item, images);
-        count++;
+        if (item.role === "annotation") markerCount++;
+        else count++;
       }
       if (signal.aborted) return;
       status.textContent = "Prepared " + count + (count === 1 ? " event…" : " events…");
       query = page.next_cursor ? "?" + new URLSearchParams({cursor: page.next_cursor}) : "";
     } while (query);
-    if (!count) {
+    if (!count && !markerCount) {
       status.textContent = "No conversation events in this range.";
       return;
     }
@@ -1044,7 +1058,8 @@ byId("export-form").addEventListener("submit", async event => {
     exportSave.hidden = false;
     byId("export-submit").hidden = true;
     byId("export-cancel").textContent = "Close";
-    status.textContent = "Word file ready · " + count + (count === 1 ? " event." : " events.");
+    status.textContent = "Word file ready · " + count + (count === 1 ? " event" : " events")
+      + (markerCount ? ", " + markerCount + (markerCount === 1 ? " historical annotation" : " historical annotations") : "") + ".";
     exportSave.click();
   } catch {
     if (signal.aborted) return;
@@ -1061,10 +1076,11 @@ byId("export-form").addEventListener("submit", async event => {
 });
 
 function messageNode(event) {
-  const speakers = { operator: "You", lantern: "Lantern", system: "Service" };
+  const speakers = { operator: "You", lantern: "Lantern", system: "Service", annotation: "Historical annotation" };
   const role = Object.hasOwn(speakers, event.role) ? event.role : "system";
   const item = document.createElement("article");
   item.className = "message " + role;
+  if (role === "annotation") item.dataset.ref = event.ref;
   const header = document.createElement("header");
   const speaker = document.createElement("span");
   speaker.className = "speaker";
@@ -1110,15 +1126,32 @@ function latest() {
   syncJump();
 }
 
-function appendEvents(rows) {
+const displayedAnnotations = new Set();
+
+function timelineNodes(rows, annotations) {
+  const nodes = [];
+  for (const row of timeline(rows, annotations)) {
+    if (row.role === "annotation") {
+      if (displayedAnnotations.has(row.ref)) continue;
+      displayedAnnotations.add(row.ref);
+    }
+    nodes.push(messageNode(row));
+  }
+  return nodes;
+}
+
+function appendEvents(rows, annotations) {
   const newRows = rows.filter((row) => row.id > cursor);
-  if (!newRows.length) return;
+  const nodes = timelineNodes(newRows, annotations);
+  if (!nodes.length) return;
   const sticky = follow;
   byId("empty").hidden = true;
-  feed.append(...newRows.map(messageNode));
-  earliest ||= newRows[0].id;
-  cursor = newRows[newRows.length - 1].id;
-  remember("cursor", String(cursor));
+  feed.append(...nodes);
+  if (newRows.length) {
+    earliest ||= newRows[0].id;
+    cursor = newRows[newRows.length - 1].id;
+    remember("cursor", String(cursor));
+  }
   if (sticky) latest();
   else syncJump();
   if (initialized && newRows.some((row) => row.role === "lantern")) {
@@ -1145,13 +1178,13 @@ async function poll() {
         if (anchor.events.length) page = anchor;
       }
       older.hidden = !page.more;
-      appendEvents(page.events);
+      appendEvents(page.events, page.annotations);
       if (!cursor) byId("empty").textContent = "Send your first message to Lantern.";
       initialized = true;
       delay = 50;
     } else {
       page = await request("/api/room?after=" + cursor);
-      appendEvents(page.events);
+      appendEvents(page.events, page.annotations);
       if (page.more) delay = 50;
     }
     connection("live", "Connected");
@@ -1179,7 +1212,7 @@ older.addEventListener("click", async () => {
     const page = await request("/api/room?before=" + earliest);
     const anchor = feed.firstElementChild;
     const offset = anchor.getBoundingClientRect().top;
-    feed.prepend(...page.events.map(messageNode));
+    feed.prepend(...timelineNodes(page.events, page.annotations));
     if (page.events.length) earliest = page.events[0].id;
     older.hidden = !page.more;
     historyView.scrollTop += anchor.getBoundingClientRect().top - offset;

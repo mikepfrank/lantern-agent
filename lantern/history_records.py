@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 
+from .compaction_annotations import annotation_text
 from .history_calls import call_event_stream
 
 
@@ -97,9 +98,14 @@ _CALLS = """SELECT n.ref,n.at,n.source,CASE n.source WHEN 'call' THEN 'lantern' 
     LEFT JOIN native_turn_links group_links ON group_links.native_turn=n.native_turn
     WHERE (SELECT thread FROM checkpoint WHERE id=1)=(SELECT thread_id FROM chat.room WHERE id=1)"""
 
+_ANNOTATIONS = """SELECT 'annotation:' || a.id,stamp(a.occurred_at),'service','service',NULL,
+    annotation_text(a.occurred_at),NULL,NULL,3,a.id,NULL,NULL,stamp(a.recorded_at)
+    FROM chat.compaction_annotations a WHERE a.thread_id=(SELECT thread_id FROM chat.room WHERE id=1)
+    AND stamp(a.recorded_at)<=annotation_cutoff()"""
+
 
 @contextmanager
-def history_records(state, thread, index_dir=None):
+def history_records(state, thread, index_dir=None, *, annotation_cutoff="9999"):
     state = Path(state)
     chat = state / "chat.sqlite"
     # Check the room before opening or populating a private index.
@@ -159,5 +165,11 @@ def history_records(state, thread, index_dir=None):
                 UNION ALL SELECT m.native_turn,r.batch_id FROM message_anchors m
                     JOIN chat.reply_blocks r ON r.item_id=m.item_id)
                 WHERE native_turn IS NOT NULL GROUP BY native_turn HAVING count(DISTINCT turn)=1""")
-        db.execute("CREATE TEMP VIEW history AS " + " UNION ALL ".join(sources))
+        originals = " UNION ALL ".join(sources)
+        records = f"SELECT *,NULL AS recorded_at FROM ({originals})"
+        if db.execute("SELECT 1 FROM chat.sqlite_master WHERE type='table' AND name='compaction_annotations'").fetchone():
+            db.create_function("annotation_text", 1, annotation_text, deterministic=True)
+            db.create_function("annotation_cutoff", 0, lambda: annotation_cutoff, deterministic=True)
+            records += " UNION ALL " + _ANNOTATIONS
+        db.execute("CREATE TEMP VIEW history AS " + records)
         yield db, warnings

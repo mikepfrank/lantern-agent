@@ -8,6 +8,10 @@ For routine worker updates on the existing Lightsail host, sign in as `ec2-user`
 
 The operator command is installed from `deploy/lantern-update-worker` with `sudo install -o root -g root -m 0755 deploy/lantern-update-worker /usr/local/bin/lantern-update-worker`. Use the component-specific instructions below for browser, proxy, or broker changes.
 
+### First release with compaction notices
+
+Deploy the worker and both web services together using the full installer below. Keep the UTC switchover timestamp. In an existing room, preview the historical checkpoints with `sudo -u lantern /usr/local/bin/lantern compaction-annotations --check --before "$cutover"`, where `cutover` is that timestamp in ISO format. Check the reported count and placement, then repeat with `--apply`. Another `--check` should report zero additions. The first application saves the boundary for future runs. The import adds a separate set of retrospective records to the room database and preserves original event IDs and native checkpoints.
+
 Use an archive from the local repository. Record the full revision and the archive digest before uploading it to a private staging directory owned by the Lightsail administrator.
 
 On a fresh host restore the private `heritage/` directory separately under `/home/lantern/.local/state/lantern/`. Use owner `lantern`, directory mode `0700`, and file mode `0600`. The operator's original files are `Lantern.md`, `lmstudio-chat.md`, `lmstudio-chat.txt` and `lmstudio-chat.pdf`. The page text companion `lmstudio-chat.pdf-pages.json` is UTF-8 JSON with `sha256` for the original PDF bytes and `pages` containing one extracted string per page, in order. The service mounts this folder read-only. It belongs outside the release archive and Git bundles.

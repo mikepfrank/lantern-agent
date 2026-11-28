@@ -183,6 +183,8 @@ time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: .74re
 .message.operator { margin-left: auto; width: fit-content; max-width: 88%; padding: .75rem 1rem .85rem; border: 1px solid #35433e; border-radius: .8rem .2rem .8rem .8rem; background: #202b27; }
 .operator .speaker { color: var(--teal); }
 .message.system { border-left: 2px solid #696356; padding-left: .9rem; color: var(--muted); font-size: .87rem; }
+.message.annotation { border-left: 2px dashed #696356; padding-left: .9rem; color: var(--muted); font-size: .87rem; }
+.annotation .speaker { color: var(--muted); }
 .system .speaker { color: var(--muted); }
 .body pre { tab-size: 4; overflow: auto; padding: .8rem; margin: .5rem 0; background: #111414; border: 1px solid var(--edge); white-space: pre; border-radius: .4rem; }
 .body code { font: .88em/1.5 "IBM Plex Mono", Consolas, monospace; }

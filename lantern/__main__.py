@@ -114,6 +114,11 @@ def arguments():
     send.add_argument("--id", help="Optional stable ID for retrying the same submission")
     history = commands.add_parser("history", help="Print recent conversation events as JSON")
     history.add_argument("--limit", type=int, default=30)
+    annotations = commands.add_parser("compaction-annotations", help="Preview or record historical compaction markers")
+    action = annotations.add_mutually_exclusive_group()
+    action.add_argument("--check", action="store_true", help="Preview placements (default)")
+    action.add_argument("--apply", action="store_true", help="Save the historical markers and their cutoff")
+    annotations.add_argument("--before", help="Exclusive cutoff as an ISO timestamp with timezone")
     commands.add_parser("status", help="Read worker, queue, and active turn status")
     logs = commands.add_parser("logs", help="Read the same bounded harness diagnostics available to Lantern")
     logs.add_argument("--limit", type=int, default=10)
@@ -134,6 +139,10 @@ def arguments():
 
 async def main(args):
     state = args.state.resolve()
+    if args.command == "compaction-annotations":
+        from .compaction_annotations import import_compaction_annotations
+        print(json.dumps(import_compaction_annotations(state, apply=args.apply, before=args.before), indent=2))
+        return
     if args.command == "reviewer-pilot":
         from .shadow_pilot import ShadowPilot, run_shadow
         from .shadow_vendor import call_sonnet

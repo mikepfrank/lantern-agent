@@ -16,6 +16,7 @@ import uuid
 
 from lantern import concerns
 from lantern.chat_store import ChatStore
+from lantern.compaction_annotations import ANNOTATIONS_SCHEMA
 from lantern.operator_review import ReviewRoom
 from lantern.web import PAGE_SIZE, RoomServer
 from test_attachments import chunk, png, upload
@@ -361,8 +362,44 @@ class WebRoomTests(unittest.TestCase):
             self.assertIsNone(final["next_cursor"])
         self.assertIsNone(self.store.read_cursor())
 
+    def test_retrospective_annotations_follow_event_pages_and_export_by_occurrence(self):
+        end = datetime(2026, 11, 27, 12, tzinfo=timezone.utc)
+        ancient = end - timedelta(days=3)
+        self.store.clock = lambda: ancient
+        first = self.store.submit("An older message")
+        self.store.bind_thread(self.store.claim().id, "room-thread")
+        self.store.clock = lambda: end - timedelta(hours=2)
+        ids = [self.store.submit(f"Later {i}") for i in range(PAGE_SIZE)]
+        self.room.store.clock = lambda: end
+        with self.store._connect(write=True) as db:
+            db.execute(ANNOTATIONS_SCHEMA)
+            db.executemany("""INSERT INTO compaction_annotations
+                (thread_id,occurred_at,recorded_at,after_event_id,checkpoint_key) VALUES(?,?,?,?,?)""",
+                [(thread, at.isoformat(), end.isoformat(), anchor, str(i))
+                 for i, (thread, at, anchor) in enumerate([
+                     ("room-thread", ancient - timedelta(hours=1), None),
+                     ("room-thread", end - timedelta(hours=3), first),
+                     ("room-thread", end - timedelta(hours=1), ids[-1]),
+                     ("other-thread", end, ids[-1])])])
+        recent = self.request("GET", "/api/room")[2]
+        old = self.request("GET", f"/api/room?before={ids[0]}")[2]
+        self.assertEqual([first, *ids], [e["id"] for e in old["events"] + recent["events"]])
+        self.assertEqual(["annotation:3"], [m["ref"] for m in recent["annotations"]])
+        self.assertEqual([None, first], [m["after_event_id"] for m in old["annotations"]])
+        self.assertEqual("annotation", old["annotations"][0]["role"])
+        self.assertIn("saved checkpoint", old["annotations"][0]["text"])
+        self.assertEqual([], self.request("GET", f"/api/room?after={ids[-1]}")[2]["annotations"])
+        full = self.request("GET", "/api/export")[2]
+        final = self.request("GET", "/api/export?cursor=" + full["next_cursor"])[2]
+        self.assertEqual(["annotation:1", "annotation:2", "annotation:3"],
+                         [m["ref"] for m in full["annotations"] + final["annotations"]])
+        recent = self.request("GET", "/api/export?days=1")[2]
+        self.assertEqual(ids, [e["id"] for e in recent["events"]])
+        self.assertEqual([first, ids[-1]], [m["after_event_id"] for m in recent["annotations"]])
+        self.assertIsNone(self.store.read_cursor())
+
     def test_export_empty_history_and_invalid_parameters(self):
-        self.assertEqual({"events": [], "next_cursor": None}, self.request("GET", "/api/export?days=1")[2])
+        self.assertEqual({"events": [], "annotations": [], "next_cursor": None}, self.request("GET", "/api/export?days=1")[2])
         self.assertEqual(401, self.request("GET", "/api/export?days=bad", auth=False)[0])
         self.assertEqual(403, self.request("GET", "/api/export", headers={"Origin": "null"})[0])
         for invalid in ("days=", "days=0", "days=-2", "days=1.5", "days=365001", "days=1&days=2",

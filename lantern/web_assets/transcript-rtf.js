@@ -92,7 +92,7 @@ function createTranscriptRtf({timeZone} = {}) {
       throw Error("Some of the message attachments are missing.");
     }
     const isLantern = event.role === "lantern";
-    const author = isLantern ? "Lantern" : event.role === "operator" ? "You" : "Service";
+    const author = {lantern: "Lantern", operator: "You", annotation: "Historical annotation"}[event.role] ?? "Service";
     const date = new Date(event.at);
     const at = Number.isNaN(date.getTime()) ? String(event.at) : clock.format(date);
     const parts = ["{\\pard\\keepn\\sb200\\sa60\\plain\\f0\\fs22 {\\b " +

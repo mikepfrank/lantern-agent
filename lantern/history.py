@@ -86,7 +86,10 @@ def _date_bound(value, end):
 
 
 def _metadata(row):
-    return {k: row[k] for k in ("ref", "at", "source", "author", "turn", "tool") if row[k] is not None}
+    metadata = {k: row[k] for k in ("ref", "at", "source", "author", "turn", "tool") if row[k] is not None}
+    if row["recorded_at"] is not None:
+        metadata.update(provenance="retrospective_checkpoint_annotation", recorded_at=row["recorded_at"])
+    return metadata
 
 
 def _find(db, ref, cutoff):
@@ -207,7 +210,10 @@ def history_tool(state, thread, name, arguments, *, cutoff=None, index_dir=None)
     try:
         _arguments(name, arguments)
         through = utc_stamp(cutoff) if cutoff is not None else "9999"
-        with history_records(state, thread, index_dir) as (db, warnings):
+        annotation_cutoff = through
+        if name == "history_search" and "until" in arguments:
+            annotation_cutoff = min(through, _date_bound(arguments["until"], end=True))
+        with history_records(state, thread, index_dir, annotation_cutoff=annotation_cutoff) as (db, warnings):
             handler = _search if name == "history_search" else _open
             return {"notice": NOTICE, "warnings": warnings, **handler(db, arguments, through)}
     except _BadLookup as exc:

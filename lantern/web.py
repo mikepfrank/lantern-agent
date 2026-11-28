@@ -20,6 +20,7 @@ from . import operator_release
 from .attachments import MAX_IMAGE_BASE64, MAX_TURN_IMAGES, parse_image
 from .chat_store import ChatStore
 from .chat_worker import worker_online
+from .compaction_annotations import annotation_text
 from .file_grants import FileGrants
 from .clone_grants import CloneGrants
 from .operator_review import MAX_ANSWER, ReviewRoom
@@ -45,6 +46,22 @@ ASSETS = {
 
 def _event_json(event):
     return {**asdict(event), "image": event.image}
+
+
+def _annotations(store, first_anchor, last_anchor, *, since=None):
+    """Return separate timeline rows. Anchor zero places a checkpoint before the first room event."""
+    if first_anchor > last_anchor:
+        return []
+    with store._connect() as db:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='compaction_annotations'").fetchone():
+            return []
+        rows = db.execute("""SELECT c.id, c.after_event_id, c.occurred_at, c.recorded_at
+            FROM compaction_annotations c JOIN room r ON r.id=1 AND r.thread_id=c.thread_id
+            WHERE COALESCE(c.after_event_id,0) BETWEEN ? AND ?
+            ORDER BY c.after_event_id, c.occurred_at, c.id""", (first_anchor, last_anchor))
+        return [{"ref": f"annotation:{row['id']}", "role": "annotation", "after_event_id": row["after_event_id"],
+                 "at": row["occurred_at"], "recorded_at": row["recorded_at"], "text": annotation_text(row["occurred_at"])}
+                for row in rows if since is None or datetime.fromisoformat(row["occurred_at"]) >= since]
 
 
 def canonical_origin(origin: str) -> str:
@@ -267,9 +284,12 @@ class RoomHandler(BaseHTTPRequestHandler):
             if direction == "after":
                 rows = store.events(after=cursor, limit=PAGE_SIZE + 1)
                 events = rows[:PAGE_SIZE]
+                first_anchor = cursor + 1 if cursor else 0
             else:
                 rows = store.recent(limit=PAGE_SIZE + 1, before=cursor)
                 events = rows[-PAGE_SIZE:]
+                first_anchor = events[0].id if len(rows) > PAGE_SIZE else 0
+            annotations = _annotations(store, first_anchor, events[-1].id if events else 0)
             state = store.status()
             online = worker_online(self.server.state)
             status = {"online": online, "working": state["active_batch"] is not None,
@@ -279,6 +299,7 @@ class RoomHandler(BaseHTTPRequestHandler):
             self._json(503, {"error": "The conversation store is temporarily unavailable."})
             return
         self._json(200, {"events": [_event_json(event) for event in events],
+                         "annotations": annotations,
                          "more": len(rows) > PAGE_SIZE, "status": status})
 
     def _export_page(self):
@@ -308,15 +329,18 @@ class RoomHandler(BaseHTTPRequestHandler):
             return
         try:
             through, rows = store.export_page(after=after, through=through, since=since, limit=PAGE_SIZE + 1)
+            events = rows[:PAGE_SIZE]
+            last_anchor = events[-1].id if len(rows) > PAGE_SIZE else through
+            annotations = _annotations(store, after + 1 if after else 0, last_anchor, since=since)
         except sqlite3.Error:
             self._json(503, {"error": "The conversation store is temporarily unavailable."})
             return
-        events = rows[:PAGE_SIZE]
         cursor = None
         if len(rows) > PAGE_SIZE:
             cutoff = since.strftime("%Y%m%d%H%M%S%f") if since else ""
             cursor = f"{events[-1].id}~{through}~{cutoff}"
         self._json(200, {"events": [_event_json(event) for event in events],
+                         "annotations": annotations,
                          "next_cursor": cursor})
 
     def do_POST(self):

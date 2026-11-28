@@ -17,6 +17,8 @@ async function exercise(browser, cookieRoom) {
     const old = {at, id: 1, role: "operator", text: "Earliest event", image};
     const latest = {at, id: 7, role: "lantern", text: "Latest **message**"};
     const service = {at, id: 6, role: "system", text: "Service notice"};
+    const marker = {at, role: "annotation", ref: "annotation:1", after_event_id: 1,
+      text: "Reconstructed checkpoint. This notice was added later."};
     const origin = cookieRoom ? "https://fixture.test" : "http://127.0.0.1:18765";
     const assets = ["index.html", "room.css", "room.js", "transcript-rtf.js", "message-format.js", "markdown-it-15.0.3.min.js"];
     let missingImage = false, pendingPage;
@@ -43,7 +45,7 @@ async function exercise(browser, cookieRoom) {
         if (url.searchParams.get("days") === "3") { pendingPage = route; return; }
         if (url.searchParams.get("days") === "7") return reply({events: [service, latest], next_cursor: null});
         assert.equal(url.search, "");
-        return reply({events: [old], next_cursor: "fixed+page/2"});
+        return reply({events: [old], annotations: [marker], next_cursor: "fixed+page/2"});
       }
       const file = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
       assert.ok(assets.includes(file), file);
@@ -67,6 +69,9 @@ async function exercise(browser, cookieRoom) {
     assert.ok(all.rtf.includes("\\pngblip"));
     assert.ok(all.rtf.includes("Earliest event"));
     assert.ok(all.rtf.indexOf("Earliest event") < all.rtf.indexOf("Service notice"));
+    assert.ok(all.rtf.indexOf("Earliest event") < all.rtf.indexOf("Historical annotation"));
+    assert.ok(all.rtf.indexOf(marker.text) < all.rtf.indexOf("Service notice"));
+    assert.ok(all.rtf.includes(marker.text));
     assert.ok(all.rtf.indexOf("Service notice") < all.rtf.indexOf("Latest "));
     await dialog.getByLabel("Last N days").check();
     const days = dialog.getByLabel("Number of days");

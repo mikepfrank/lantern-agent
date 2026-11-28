@@ -11,13 +11,18 @@ async function exercise(browser, width) {
     page.on("pageerror", error => errors.push(error.message));
     const at = "2026-11-27T19:00:00Z";
     const rows = Array.from({length: 24}, (_, i) => ({id: i + 1, role: "lantern", at, text: `Message ${i + 1}`}));
+    const markers = [0, 2, 3].map((anchor, i) => ({after_event_id: anchor || null, at,
+      ref: "annotation:" + (i + 1), role: "annotation", text: "Reconstructed checkpoint " + (i + 1)}));
     let compacting = false, connected = true;
     await context.route("http://127.0.0.1:18765/**", async route => {
       const url = new URL(route.request().url());
       if (url.pathname === "/api/room") {
         if (!connected) return route.fulfill({status: 503, json: {error: "Fixture disconnected"}});
-        const after = Number(url.searchParams.get("after"));
-        return route.fulfill({json: {events: rows.filter(row => row.id > after), more: false,
+        const after = url.searchParams.get("after"), before = url.searchParams.get("before");
+        const events = after !== null ? rows.filter(row => row.id > Number(after))
+          : before !== null ? rows.filter(row => row.id < Number(before)) : rows.slice(2);
+        const annotations = after !== null ? [] : before !== null ? markers.slice(0, 2) : markers.slice(2);
+        return route.fulfill({json: {events, annotations, more: after === null && before === null,
           status: {online: true, working: true, compacting, queued: 0}}});
       }
       if (url.pathname.startsWith("/api/")) {
@@ -28,6 +33,16 @@ async function exercise(browser, width) {
     });
     await page.goto("http://127.0.0.1:18765/#key=fixture-key");
     await page.getByText("Message 24", {exact: true}).waitFor();
+    await page.reload();
+    await page.getByText("Reconstructed checkpoint 3", {exact: true}).waitFor();
+    await page.locator("#older").click();
+    await page.getByText("Reconstructed checkpoint 1", {exact: true}).waitFor();
+    assert.deepEqual((await page.locator("#events .body").allTextContents()).slice(0, 7),
+      ["Reconstructed checkpoint 1", "Message 1", "Message 2", "Reconstructed checkpoint 2",
+        "Message 3", "Reconstructed checkpoint 3", "Message 4"]);
+    assert.equal(await page.locator(".annotation .speaker").first().textContent(), "Historical annotation");
+    assert.equal(await page.evaluate(() => sessionStorage.getItem("lantern.room.cursor")), "24");
+    await page.locator("#history").evaluate(h => h.scrollTop = h.scrollHeight);
     const label = page.locator("#compaction-status"), composer = page.locator("#composer");
     assert.equal(await label.textContent(), "");
     await page.getByLabel("Message Lantern").fill("Keep my draft.");
@@ -36,7 +51,7 @@ async function exercise(browser, width) {
     assert.equal(await label.getAttribute("role"), "status");
     const indicator = await label.boundingBox(), input = await composer.boundingBox();
     assert.ok(indicator.height > 0 && indicator.y + indicator.height <= input.y + 1);
-    assert.equal(await page.locator("#events article").count(), 24);
+    assert.equal(await page.locator("#events article").count(), 27);
     await page.waitForFunction(() => {
       const h = document.querySelector("#history");
       return h.scrollHeight - h.clientHeight - h.scrollTop < 2;

@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from lantern.chat_store import ChatStore
+from lantern.compaction_annotations import ANNOTATIONS_SCHEMA
 from lantern.history import PAGE, history_tool
 from lantern.supervision import Supervisor
 from test_history_calls import call, record, result
@@ -81,6 +82,41 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual((item["text"], item["author"]), (event.text, "service"))
         self.assertEqual(datetime.fromisoformat(item["at"]), datetime.fromisoformat(event.at))
         self.assertEqual(self.store.status()["queued"], 0)
+
+    def test_retrospective_compactions_preserve_refs_chronology_and_as_of_evidence(self):
+        occurred = "2026-11-27T06:00:00.000000+00:00"
+        added = "2026-11-28T17:12:34.000000+00:00"
+        with self.store._connect(write=True) as db:
+            db.execute(ANNOTATIONS_SCHEMA)
+            db.executemany("""INSERT INTO compaction_annotations(id,thread_id,occurred_at,recorded_at,
+                after_event_id,checkpoint_key) VALUES(?,?,?,?,?,?)""", [
+                (i, thread, occurred, added, self.reply, f"internal-key-{i}")
+                for i, thread in [(1, self.thread), (2, self.thread), (3, "other-room")]])
+        search = {"source": "service", "query": "compaction", "limit": 1}
+        newest = self.tool("history_search", search)
+        self.assertEqual(newest["next_cursor"], "annotation:2")
+        older = self.tool("history_search", {**search, "cursor": newest["next_cursor"]})
+        self.assertEqual(older["matches"][0]["ref"], "annotation:1")
+        self.assertIsNone(older["next_cursor"])
+        page = self.tool("history_open", {"ref": "annotation:1"})
+        item = page["item"]
+        self.assertEqual((item["at"], item["recorded_at"]), (occurred, added))
+        self.assertEqual((item["source"], item["author"], item["provenance"]),
+                         ("service", "service", "retrospective_checkpoint_annotation"))
+        self.assertIn("checkpoint", item["text"])
+        self.assertNotIn("internal-key", repr(page))
+        self.assertEqual(page["before"][0]["ref"], f"room:{self.reply}")
+        self.assertEqual(page["after"][0]["ref"], "annotation:2")
+        self.assertIn("error", history_tool(self.state, self.thread, "history_open", {"ref": "annotation:3"}))
+        before_added = "2026-11-28T17:12:33Z"
+        self.assertFalse(self.tool("history_search", {**search, "until": before_added})["matches"])
+        self.assertFalse(self.tool("history_search", {**search, "until": added}, cutoff=before_added)["matches"])
+        self.assertIn("error", history_tool(self.state, self.thread, "history_open", {"ref": "annotation:1"},
+                                            cutoff=before_added))
+        replay = self.tool("history_open", {"ref": f"room:{self.reply}"}, cutoff=before_added)
+        self.assertEqual(replay["after"], [])
+        self.assertEqual(self.tool("history_search", {**search, "until": added}, cutoff=added)["next_cursor"],
+                         "annotation:2")
 
     def test_native_records_pair_and_survive_compaction_concurrent_reads_and_restart(self):
         with self.rollout.open("ab") as file:
