@@ -126,17 +126,19 @@ def _check_config(config: dict, model: str, provider: str, expected_url: str | N
 
 
 class _Peer:
-    def __init__(self, process, tools, dispatch, on_message=None):
+    def __init__(self, process, tools, dispatch, on_message=None, on_compaction=None):
         self.process = process
         self.tools = {tool["name"] for tool in tools}
         self.dispatch = dispatch
         self.on_message = on_message
+        self.on_compaction = on_compaction
         self.seq = 0
         self.thread_id = None
         self.turn_id = None
         self.finished = False
         self.messages = []
         self.message_items = {}
+        self.compaction_items = {}
         self.tool_calls = []
 
     async def send(self, obj):
@@ -223,6 +225,24 @@ class _Peer:
             if p["turn"].get("status") != "completed":
                 raise CodexError("Codex turn ended without completing")
             self.finished = True
+        elif (method in ("item/started", "item/completed")
+              and p["item"].get("type") == "contextCompaction"):
+            if self.on_compaction is None or not self.thread_id or self.finished:
+                return
+            if p.get("threadId") != self.thread_id:
+                raise CodexError("Codex omitted the compaction's thread ID")
+            self.set_turn(p.get("turnId"))
+            item_id = p["item"].get("id")
+            if not isinstance(item_id, str) or not item_id:
+                raise CodexError("Codex omitted the compaction item ID")
+            phase = "started" if method == "item/started" else "completed"
+            previous = self.compaction_items.get(item_id)
+            if previous == phase or previous == "completed":
+                return
+            # A completed item is authoritative even if the start was not observed.
+            at_ms = p.get("startedAtMs" if phase == "started" else "completedAtMs")
+            self.on_compaction(self.thread_id, item_id, phase, at_ms if type(at_ms) is int else None)
+            self.compaction_items[item_id] = phase
         elif method == "item/completed":
             item = p["item"]
             if item.get("type") == "agentMessage" and item.get("phase") in (None, "final_answer"):
@@ -313,6 +333,7 @@ async def run_turn(*, codex_bin: str, codex_home: Path, workspace: Path, model: 
                    input_parts: list[dict] | None = None,
                    on_thread: Callable[[str], None] | None = None,
                    on_message: Callable[[str, str], None] | None = None,
+                   on_compaction: Callable[[str, str, str, int | None], None] | None = None,
                    take_input: Callable[[], SteeringInput | None] | None = None,
                    return_input: Callable[[tuple[int, ...]], None] | None = None,
                    capture_steer: Callable[[], int | None] | None = None,
@@ -325,6 +346,8 @@ async def run_turn(*, codex_bin: str, codex_home: Path, workspace: Path, model: 
     on_thread runs before inference so the caller can durably record a new thread.
     on_message receives the native item ID and trimmed text of each completed
     visible reply block. TurnResult.text retains the complete joined transcript.
+    on_compaction receives the thread ID, item ID, native lifecycle phase and
+    timestamp in epoch milliseconds when available. A failed turn can end after a start.
     Tool dispatch is synchronous; handlers must keep their own work bounded.
     """
     if take_input is not None and return_input is None:
@@ -339,7 +362,7 @@ async def run_turn(*, codex_bin: str, codex_home: Path, workspace: Path, model: 
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL, limit=MAX_FRAME,
     )
-    peer = _Peer(process, tools, dispatch, on_message)
+    peer = _Peer(process, tools, dispatch, on_message, on_compaction)
     try:
         async with asyncio.timeout(timeout):
             init = await peer.request("initialize", {

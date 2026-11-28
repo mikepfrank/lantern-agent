@@ -10,7 +10,8 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from lantern.codex_session import _Peer, run_turn
+from lantern.chat_store import ChatStore
+from lantern.codex_session import CodexError, _Peer, _isolation_args, run_turn
 from lantern.history import HISTORY_TOOLS
 from lantern.pdf_tool import PDF_TOOL
 from lantern.thread_upgrade import _migrate, install_room_tools
@@ -23,6 +24,77 @@ def saved(tool):
 
 
 class CompactionRegistryTests(unittest.TestCase):
+    def test_compaction_notifications_are_scoped_and_duplicate_delivery_is_idempotent(self):
+        seen = []
+        peer = _Peer(None, [], None, on_compaction=lambda *event: seen.append(event))
+        peer.thread_id, peer.turn_id = "thread", "turn"
+
+        def notify(method, **params):
+            asyncio.run(peer.handle({"method": method, "params": {
+                "item": {"type": "contextCompaction", "id": "first"},
+                "threadId": "thread", "turnId": "turn", **params}}))
+
+        for wrong in ({"threadId": "other"}, {"turnId": "other"}, {"threadId": None},
+                      {"turnId": None}, {"item": {"type": "contextCompaction"}}):
+            with self.subTest(wrong=wrong), self.assertRaises(CodexError):
+                notify("item/started", **wrong)
+        notify("item/started", startedAtMs=10)
+        notify("item/started", startedAtMs=11)
+        notify("item/completed", completedAtMs=20)
+        notify("item/completed", completedAtMs=21)
+        notify("item/started", startedAtMs=10)
+        notify("item/completed", item={"type": "contextCompaction", "id": "second"})
+        self.assertEqual(seen, [("thread", "first", "started", 10), ("thread", "first", "completed", 20),
+                                ("thread", "second", "completed", None)])
+
+    @unittest.skipUnless(os.environ.get("LANTERN_TEST_CODEX") == "1", "requires native Codex")
+    def test_automatic_compaction_updates_room_and_following_model_request(self):
+        calls, activity = [], []
+        tool = {"name": "chess_analyze", "description": "Chess", "inputSchema": {"type": "object"}}
+
+        @contextmanager
+        def provider(body, headers):
+            calls.append(json.loads(body))
+            n = len(calls)
+            item = {"type": "message", "role": "assistant", "id": f"msg_{n}", "status": "completed",
+                    "content": [{"type": "output_text", "text": "A synthetic chess note."}]}
+            yield reply(n, item, input_tokens=5500 if n == 1 else 100)
+
+        def small_context(*args):
+            return [*_isolation_args(*args), "-c", "model_auto_compact_token_limit=4200"]
+
+        with TemporaryDirectory() as tmp, patch("lantern.transport._open_upstream", provider), \
+                patch("lantern.codex_session._isolation_args", small_context):
+            state = Path(tmp).resolve()
+            store = ChatStore(state)
+            home, work = state / "codex", state / "work"
+            home.mkdir()
+            work.mkdir()
+            for prompt in ("A chess note.", "Continue the note."):
+                store.submit(prompt)
+                batch = store.claim().id
+                tid = store.status()["thread_id"]
+
+                def record(thread_id, item_id, phase, at_ms):
+                    store.record_compaction(batch, thread_id, item_id, phase, at_ms)
+                    activity.append(store.status()["compacting"])
+
+                with OpenRouterGateway("fixture", route="fastest", tools=[tool], reserve=lambda _: 1,
+                        settle=lambda *_: None, observe=lambda *_: None, unregistered=lambda *_: None,
+                        resuming=bool(tid), latest_compaction=lambda: store.latest_compaction(tid)) as gate:
+                    result = asyncio.run(run_turn(codex_bin=os.environ.get("LANTERN_CODEX_BIN") or shutil.which("codex"),
+                        codex_home=home, workspace=work, model=MODEL, provider="lantern", persona="Test.",
+                        prompt=prompt, tools=[tool], dispatch=lambda *_: {}, thread_id=tid, base_url=gate.base_url,
+                        on_thread=lambda thread_id: store.bind_thread(batch, thread_id), on_compaction=record,
+                        env={"LANTERN_GATEWAY_TOKEN": gate.token}, timeout=28))
+                store.complete(batch, result.text)
+
+            self.assertEqual([bool(call["tools"]) for call in calls], [True, False, True])
+            self.assertEqual(activity, [True, False])
+            notice, = [event for event in store.events() if event.role == "system"]
+            self.assertIn("Context compaction completed", notice.text)
+            self.assertIn(notice.text, json.dumps(calls[-1]["input"]))
+
     def test_interrupted_checkpoint_repair_takes_its_own_snapshot_and_preserves_later_turns(self):
         with TemporaryDirectory() as tmp:
             state = Path(tmp).resolve()
@@ -109,12 +181,17 @@ class CompactionRegistryTests(unittest.TestCase):
     def test_native_manual_compaction_then_migrated_resume_advertises_tool(self):
         old = {"name": "chess_analyze", "description": "Chess", "inputSchema": {"type": "object"}}
         calls = []
+        compactions = []
+        fail_compaction = False
         @contextmanager
         def provider(body, headers):
             calls.append(json.loads(body))
             n = len(calls)
-            yield reply(n, {"type": "message", "role": "assistant", "id": f"msg_{n}", "status": "completed",
-                            "content": [{"type": "output_text", "text": "Synthetic chess note."}]})
+            stream = reply(n, {"type": "message", "role": "assistant", "id": f"msg_{n}", "status": "completed",
+                               "content": [{"type": "output_text", "text": "Synthetic chess note."}]})
+            if fail_compaction and not calls[-1]["tools"]:
+                stream.status = 403
+            yield stream
         finish = _Peer.finish_turn
         async def compact(peer, *args):
             await finish(peer, *args)
@@ -133,10 +210,16 @@ class CompactionRegistryTests(unittest.TestCase):
                     return asyncio.run(run_turn(codex_bin=os.environ.get("LANTERN_CODEX_BIN") or shutil.which("codex"),
                                                 codex_home=home, workspace=work, model=MODEL, provider="lantern",
                                                 persona="Test.", prompt="Recall the chess note.", tools=tools,
+                                                on_compaction=lambda *event: compactions.append(event),
                                                 dispatch=lambda *_: {}, thread_id=tid, base_url=gate.base_url,
                                                 env={"LANTERN_GATEWAY_TOKEN": gate.token}, timeout=28))
             with patch.object(_Peer, "finish_turn", compact):
                 tid = run([old]).thread_id
+            started, completed = compactions
+            self.assertEqual((started[0], started[2], completed[2]), (tid, "started", "completed"))
+            self.assertEqual(started[:2], completed[:2])
+            self.assertIsInstance(started[3], int)
+            self.assertGreaterEqual(completed[3], started[3])
             self.assertTrue(any(not p["tools"] for p in calls))
             _migrate(home, tid, [PDF_TOOL], state / "operator-backups/pdf-pages-v1", "pdf-pages")
             upgraded = [old, PDF_TOOL, *HISTORY_TOOLS]
@@ -150,3 +233,8 @@ class CompactionRegistryTests(unittest.TestCase):
             self.assertEqual(run([revised], tid).thread_id, tid)
             self.assertEqual([(t["name"], t["parameters"]) for t in calls[-1]["tools"]],
                              [("chess_analyze", revised["inputSchema"])])
+            self.assertEqual(len(compactions), 2)  # Resuming does not replay previous completions.
+            fail_compaction = True
+            with patch.object(_Peer, "finish_turn", compact), self.assertRaises(CodexError):
+                run([revised], tid)
+            self.assertEqual([event[2] for event in compactions], ["started", "completed", "started"])

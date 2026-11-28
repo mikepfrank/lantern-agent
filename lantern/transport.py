@@ -232,7 +232,7 @@ def _handoff_event(prepared, handoff_due):
     return None
 
 
-def _with_request_context(items, offered_tools):
+def _with_request_context(items, offered_tools, compaction_event=None):
     """Add current host metadata beside the latest input, leaving stored history and its cacheable prefix intact."""
     if isinstance(items, str):
         items = [{"role": "user", "content": items}]
@@ -241,6 +241,8 @@ def _with_request_context(items, offered_tools):
         f"Current time for the operator (US Central): {central_time()}. "
         "Use this local date and time for greetings and calendar references. "
         "Codex environment timestamps describe the server.")
+    if compaction_event is not None:
+        text += f"\nLatest context compaction (Service, room:{compaction_event.id}): {compaction_event.text}"
     if offered_tools:
         text += "\nCallable tools for this request: " + ", ".join(offered_tools) + "."
         text += " This live list supersedes earlier descriptions of your capabilities."
@@ -545,7 +547,7 @@ class OpenRouterGateway:
     def __init__(self, api_key, *, route, tools, reserve, settle, observe, unregistered, resuming=False,
                  operator_context="", finish=None, handoff_due=None, image_loader=None, page_image_loader=None,
                  managed_registry=False, reviewed_calls=None, image_by_digest=None, route_source=None,
-                 on_response_messages=None):
+                 on_response_messages=None, latest_compaction=None):
         if route not in ROUTES or not api_key:
             raise ValueError("a valid route and OpenRouter key are required")
         self.route = route
@@ -558,6 +560,7 @@ class OpenRouterGateway:
         self.unregistered = unregistered
         self.operator_context = operator_context
         self.handoff_due = handoff_due
+        self.latest_compaction = latest_compaction
         self.image_loader = image_loader
         self.image_by_digest = image_by_digest
         self.page_image_loader = page_image_loader
@@ -720,8 +723,9 @@ class OpenRouterGateway:
                         callable_now = [choice["name"]]
                     else:
                         callable_now = offered
+                    compacted = gateway.latest_compaction() if offered and gateway.latest_compaction else None
                     prepared["input"] = _with_request_context(prepared["input"],
-                                                              callable_now if gateway.managed_registry else [])
+                                                              callable_now if gateway.managed_registry else [], compacted)
                     evidence["offered_tools"] = offered
                     evidence["tool_choice"] = choice
                     body = json.dumps(prepared, allow_nan=False, separators=(",", ":")).encode()

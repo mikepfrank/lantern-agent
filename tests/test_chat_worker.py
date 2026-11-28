@@ -115,7 +115,7 @@ class ChatWorkerTests(unittest.TestCase):
 
         second = self.start_worker(block=False)
         self.wait_for_message(second, "Answered the new input")
-        self.assertEqual({"active_batch": None, "queued": 0, "thread_id": "test-native-thread"},
+        self.assertEqual({"active_batch": None, "queued": 0, "thread_id": "test-native-thread", "compacting": False},
                          self.store.status())
         calls = (self.state / "model-calls.jsonl").read_text(encoding="utf-8").splitlines()
         self.assertEqual([["First input", "fastest", None], ["New input", "fastest", "test-native-thread"]],

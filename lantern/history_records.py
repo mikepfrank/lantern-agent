@@ -62,13 +62,14 @@ def _refresh_calls(db, state, thread):
 _ROOM = """SELECT 'room:' || e.id AS ref, stamp(e.at) AS at,
     CASE WHEN e.role='system' THEN 'service' ELSE e.role END AS source,
     CASE WHEN e.role='system' THEN 'service' ELSE e.role END AS author, NULL AS tool, e.text AS text,
-    COALESCE(i.batch_id,b.id,rb.batch_id,n.batch_id) AS turn,
+    COALESCE(i.batch_id,b.id,rb.batch_id,n.batch_id,compact.batch_id) AS turn,
     n.call_id AS call_id, 0 AS kind, e.id AS seq,
     release.concern_id AS release_id, release.released_at AS release_at
     FROM chat.events e LEFT JOIN chat.inbox i ON i.event_id=e.id
     LEFT JOIN chat.batches b ON b.outcome=e.id
     LEFT JOIN chat.reply_blocks rb ON rb.event_id=e.id
     LEFT JOIN chat.notifications n ON n.event_id=e.id
+    LEFT JOIN room_compactions compact ON compact.event_id=e.id
     LEFT JOIN chat.operator_concern_releases release ON
         (release.command_event_id=e.id OR release.receipt_event_id=e.id) AND
         release.thread=(SELECT thread_id FROM chat.room WHERE id=1)
@@ -126,6 +127,13 @@ def history_records(state, thread, index_dir=None):
         db.execute("BEGIN")
         if db.execute("SELECT thread_id FROM chat.room WHERE id=1").fetchone()[0] != thread:
             raise ValueError("The private room changed during lookup. Retry in the current room.")
+        # Allow exact lookup on read-only room snapshots from before Service recorded compactions.
+        has_compactions = db.execute("SELECT 1 FROM chat.sqlite_master WHERE type='table' AND name='compaction_items'").fetchone()
+        if has_compactions:
+            db.execute("""CREATE TEMP VIEW room_compactions AS SELECT event_id,batch_id FROM chat.compaction_items
+                WHERE thread_id=(SELECT thread_id FROM chat.room WHERE id=1) AND event_id IS NOT NULL""")
+        else:
+            db.execute("CREATE TEMP VIEW room_compactions(event_id,batch_id) AS SELECT NULL,NULL WHERE 0")
         links = ["SELECT call_id,batch_id FROM chat.notifications"]
         if (state / "supervision.sqlite").is_file():
             _attach(db, state / "supervision.sqlite", "supervision")

@@ -541,8 +541,10 @@ async def main(args):
             return for_tool(name, cid, supervisor.dispatch, cid, name, arguments, partial(execute, cid))
 
         delivery = RoomReplyDelivery(on_message) if on_message is not None else None
+        in_room = store is not None and batch_id is not None
         gateway = OpenRouterGateway(key, route=route, route_source=route_source, tools=tools, reserve=reserve,
                                     on_response_messages=delivery.confirm if delivery else None,
+                                    latest_compaction=(lambda: store.latest_compaction(supervisor.thread)) if in_room else None,
                                     image_by_digest=store.image_data_by_digest if store is not None else None,
                                     page_image_loader=(lambda image_id, cid: store.page_image_data(
                                         image_id, cid, thread_id=supervisor.thread)) if store is not None else None,
@@ -569,6 +571,7 @@ async def main(args):
                     thread_id=thread,
                     on_thread=record_thread, take_input=take_input, return_input=return_input,
                     on_message=delivery.receive if delivery else None,
+                    on_compaction=partial(store.record_compaction, batch_id) if in_room else None,
                     capture_steer=gateway.capture_steer, on_steer_sent=gateway.begin_steer,
                     confirm_steer=gateway.confirm_steer,
                     env={"LANTERN_GATEWAY_TOKEN": gateway.token},

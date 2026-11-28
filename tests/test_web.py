@@ -11,6 +11,7 @@ import subprocess
 from tempfile import TemporaryDirectory
 import threading
 import unittest
+from unittest.mock import patch
 import uuid
 
 from lantern import concerns
@@ -249,6 +250,26 @@ class WebRoomTests(unittest.TestCase):
         self.assertEqual([final], [e["id"] for e in page["events"]])
         self.assertFalse(page["status"]["working"])
         self.assertEqual(cli_event, self.store.read_cursor())
+
+    def test_compaction_is_visible_on_empty_polls_until_completion(self):
+        last_event = self.store.submit("Hello from the browser")
+        batch = self.store.claim()
+        self.store.bind_thread(batch.id, "room-thread")
+        self.store.record_compaction(batch.id, "room-thread", "compact-1", "started")
+        path = f"/api/room?after={last_event}"
+        with patch("lantern.web.worker_online", return_value=False):
+            self.assertFalse(self.request("GET", path)[2]["status"]["compacting"])
+        with patch("lantern.web.worker_online", return_value=True):
+            status, _, page = self.request("GET", path)
+            self.assertEqual(200, status)
+            self.assertTrue(page["status"]["compacting"])
+            self.assertEqual([], page["events"])
+            event_id = self.store.record_compaction(batch.id, "room-thread", "compact-1", "completed")
+            page = self.request("GET", path)[2]
+            self.assertFalse(page["status"]["compacting"])
+            finished, = page["events"]
+            self.assertEqual((event_id, "system"), (finished["id"], finished["role"]))
+            self.assertIn("Context compaction completed", finished["text"])
 
     def test_private_image_message_history_preview_and_receipts(self):
         png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMwLNoFAAI1AV5D0BXUAAAAAElFTkSuQmCC"

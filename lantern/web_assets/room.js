@@ -164,6 +164,7 @@ function controls() {
 
 function locked() {
   authenticated = false;
+  showCompaction(false);
   closeExport();
   importsDialog.close();
   importsForm.reset();
@@ -368,6 +369,15 @@ async function addImages(files) {
   }
 }
 
+function showCompaction(active) {
+  const node = byId("compaction-status");
+  const text = active ? "Lantern’s agent harness is compacting the context…" : "";
+  if (node.textContent === text) return;
+  node.textContent = text;
+  if (follow) latest();
+  else syncJump();
+}
+
 function updateWorker(status) {
   const node = byId("worker");
   let label = "Worker offline";
@@ -375,6 +385,7 @@ function updateWorker(status) {
   if (status.queued) label += " · " + status.queued + " queued";
   node.dataset.state = status.working ? "working" : "idle";
   if (node.textContent !== label) node.textContent = label;
+  showCompaction(status.compacting);
 }
 
 function expandConcerns(expanded) {
@@ -1150,6 +1161,7 @@ async function poll() {
     if (authenticated) {
       connection("offline", "Reconnecting");
       byId("worker").textContent = "";
+      showCompaction(false);
       if (!initialized) byId("empty").textContent = cookieRoom ? "Waiting for Lantern…" : "Waiting for the SSH connection…";
       delay = 3500;
     }

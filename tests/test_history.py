@@ -68,6 +68,20 @@ class HistoryTests(unittest.TestCase):
         for args in ({"query": "x", "since": "yesterday"}, {"query": "x", "limit": True}, {"cutoff": "2099"}):
             self.assertIn("error", history_tool(self.state, self.thread, "history_search", args))
 
+    def test_compaction_service_event_is_discoverable_by_its_room_turn(self):
+        self.store.submit("Continue.")
+        batch = self.store.claim()
+        self.store.record_compaction(batch.id, self.thread, "compact-1", "started")
+        self.assertFalse(self.tool("history_search", {"source": "service", "turn": batch.id})["matches"])
+        event_id = self.store.record_compaction(batch.id, self.thread, "compact-1", "completed")
+        match, = self.tool("history_search", {"query": "compaction", "source": "service", "turn": batch.id})["matches"]
+        self.assertEqual(match["ref"], f"room:{event_id}")
+        item = self.tool("history_open", {"ref": match["ref"]})["item"]
+        event = self.store.latest_compaction(self.thread)
+        self.assertEqual((item["text"], item["author"]), (event.text, "service"))
+        self.assertEqual(datetime.fromisoformat(item["at"]), datetime.fromisoformat(event.at))
+        self.assertEqual(self.store.status()["queued"], 0)
+
     def test_native_records_pair_and_survive_compaction_concurrent_reads_and_restart(self):
         with self.rollout.open("ab") as file:
             file.write(record("event_msg", {"type": "task_started", "turn_id": "native-id"}))

@@ -161,6 +161,8 @@ h1 { margin: 0; font: normal clamp(1.6rem, 4vw, 2rem)/1.2 "Hedvig Letters Serif"
 #review-submit:disabled { color: #b8b0a3; background: #514b40; }
 .history { flex: 1; min-height: 0; overflow: auto; scrollbar-color: #595b57 transparent; scrollbar-width: thin; padding: 1.2rem .7rem 1rem .15rem; overflow-anchor: none; }
 .empty { margin: 3rem auto; text-align: center; color: var(--muted); }
+#compaction-status { flex: none; margin: 0; color: var(--amber); font-size: .85rem; }
+#compaction-status:not(:empty) { padding: .35rem .15rem; }
 .older, #jump {
   display: block;
   color: var(--amber);

@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import multiprocessing
 from pathlib import Path
 import sqlite3
@@ -8,6 +8,7 @@ import unittest
 
 from lantern.attachments import parse_image
 from lantern.chat_store import ChatStore
+from lantern.scheduler import DailyBudgetHold
 from test_attachments import png, upload
 
 
@@ -15,6 +16,61 @@ class ChatStoreTests(unittest.TestCase):
     def setUp(self):
         self.state = Path(self.enterContext(TemporaryDirectory()))
         self.store = ChatStore(self.state)
+
+    def test_compaction_notice_is_durable_timestamped_and_idempotent(self):
+        start = self.store.submit("Time test")
+        batch = self.store.claim().id
+        self.store.bind_thread(batch, "native")
+        with self.store._connect(write=True) as db:
+            db.execute("DROP TABLE compaction_items")  # Current room predates compaction notices.
+        peer = ChatStore(self.state)
+        self.assertIsNone(peer.latest_compaction("native"))
+        self.assertIsNone(peer.record_compaction(batch, "native", "first", "started"))
+        self.assertIs(self.store.status()["compacting"], True)
+        self.assertEqual([], self.store.events(after=start))
+        completed = datetime(2026, 11, 27, 17, 18, 7, 682000, tzinfo=timezone.utc)
+        timestamp = int(completed.timestamp() * 1000)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            receipts = list(pool.map(lambda _: peer.record_compaction(batch, "native", "first", "completed", timestamp), range(6)))
+        self.assertEqual(len(set(receipts)), 1)
+        event, = self.store.events(after=start)
+        self.assertEqual((event.id, event.role, event.at), (receipts[0], "system", completed.isoformat()))
+        self.assertIn("2026-11-27 11:18:07 AM CST", event.text)
+        self.assertEqual(peer.latest_compaction("native"), event)
+        self.assertIsNone(peer.latest_compaction("unrelated"))
+        self.assertIsNone(peer.record_compaction(batch, "native", "first", "started"))
+        self.assertIs(peer.status()["compacting"], False)
+        self.assertEqual(peer.status()["queued"], 0)
+        self.assertEqual(peer.claim_steer(batch), ())
+        self.store.complete(batch, "Done.")
+        self.assertIsNone(self.store.claim())
+        self.assertEqual(ChatStore(self.state).record_compaction(batch, "native", "first", "completed"), event.id)
+
+    def test_compaction_scope_recovery_and_missing_start(self):
+        self.store.submit("First")
+        first = self.store.claim().id
+        self.store.bind_thread(first, "room")
+        self.assertIsNone(self.store.record_compaction(first, "wrong-room", "item", "started"))
+        self.assertIs(self.store.status()["compacting"], False)
+        self.store.record_compaction(first, "room", "item", "started")
+        self.assertEqual(self.store.recover(), 1)
+        self.assertIs(self.store.status()["compacting"], False)
+        self.store.submit("Next")
+        second = self.store.claim().id
+        self.assertIsNone(self.store.record_compaction(first, "room", "item", "completed"))
+        self.assertIsNone(self.store.record_compaction(second, "wrong-room", "item", "completed"))
+        self.assertIsNone(self.store.latest_compaction("room"))
+        now = datetime(2026, 6, 1, 12, tzinfo=timezone.utc)
+        self.store.clock = lambda: now
+        event = self.store.record_compaction(second, "room", "item", "completed", 10**99)
+        self.assertEqual(self.store.latest_compaction("room").id, event)
+        self.assertEqual(self.store.latest_compaction("room").at, now.isoformat())
+        self.assertIn("07:00:00 AM CDT", self.store.latest_compaction("room").text)
+        self.store.record_compaction(second, "room", "another", "started")
+        self.assertIs(self.store.status()["compacting"], True)
+        self.store.defer_for_budget(second, DailyBudgetHold(dispatched=False))
+        self.assertIs(self.store.status()["compacting"], False)
+        self.assertEqual(self.store.latest_compaction("room").id, event)
 
     def test_routing_uses_startup_default_until_chosen_and_survives_replay(self):
         for default in ("fastest", "cheapest", "default"):

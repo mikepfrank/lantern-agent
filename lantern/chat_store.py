@@ -113,6 +113,10 @@ class ChatStore:
                     batch_id INTEGER NOT NULL REFERENCES batches(id), item_id TEXT NOT NULL,
                     event_id INTEGER UNIQUE NOT NULL REFERENCES events(id),
                     PRIMARY KEY(batch_id, item_id));
+                CREATE TABLE IF NOT EXISTS compaction_items (
+                    batch_id INTEGER NOT NULL REFERENCES batches(id), thread_id TEXT NOT NULL,
+                    item_id TEXT NOT NULL, event_id INTEGER UNIQUE REFERENCES events(id),
+                    PRIMARY KEY(batch_id, item_id));
             """ + SCHEMA + operator_release.SCHEMA)
             # Another process can open the room during an upgrade.
             db.execute("BEGIN IMMEDIATE")
@@ -128,8 +132,8 @@ class ChatStore:
                 db.execute("BEGIN IMMEDIATE")
             yield db
 
-    def _append(self, db, role, text, client_id=None):
-        now = self.clock().isoformat()
+    def _append(self, db, role, text, client_id=None, *, at=None):
+        now = (at if at is not None else self.clock()).isoformat()
         return db.execute("INSERT INTO events(role,text,at,client_id) VALUES(?,?,?,?)",
                           (role, text, now, client_id)).lastrowid
 
@@ -256,9 +260,48 @@ class ChatStore:
         with self._connect() as db:
             row = db.execute("""SELECT thread_id,
                 (SELECT id FROM batches WHERE status='active') AS active_batch,
+                EXISTS(SELECT 1 FROM batches b JOIN compaction_items c ON c.batch_id=b.id
+                    WHERE b.status='active' AND c.thread_id=room.thread_id AND c.event_id IS NULL) AS compacting,
                 (SELECT COUNT(*) FROM inbox WHERE batch_id IS NULL) AS queued
                 FROM room WHERE id=1""").fetchone()
-            return dict(row)
+            return {**dict(row), "compacting": bool(row["compacting"])}
+
+    def record_compaction(self, batch_id, thread_id, item_id, phase, at_ms=None) -> int | None:
+        """Track native work in progress; publish each confirmed completion once."""
+        if phase not in ("started", "completed") or not isinstance(item_id, str) or not item_id.strip():
+            raise ValueError("A compaction notification needs a native item ID and lifecycle phase.")
+        with self._connect(write=True) as db:
+            row = db.execute("""SELECT b.status,c.event_id FROM batches b JOIN room r ON r.id=1
+                LEFT JOIN compaction_items c ON c.batch_id=b.id AND c.item_id=? AND c.thread_id=r.thread_id
+                WHERE b.id=? AND r.thread_id=?""", (item_id, batch_id, thread_id)).fetchone()
+            if row is None or row["status"] != "active" or row["event_id"] is not None:
+                return row["event_id"] if row is not None and phase == "completed" else None
+            db.execute("""INSERT INTO compaction_items(batch_id,thread_id,item_id) VALUES(?,?,?)
+                ON CONFLICT(batch_id,item_id) DO NOTHING""", (batch_id, thread_id, item_id))
+            if phase == "started":
+                return None
+            instant = None
+            if type(at_ms) is int and at_ms > 0:
+                try:
+                    instant = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=at_ms)
+                except OverflowError:
+                    pass
+            if instant is None:
+                instant = self.clock()
+            text = f"Context compaction completed at {central_time(instant)}."
+            event_id = self._append(db, "system", text, at=instant)
+            db.execute("UPDATE compaction_items SET event_id=? WHERE batch_id=? AND item_id=?",
+                       (event_id, batch_id, item_id))
+            return event_id
+
+    def latest_compaction(self, thread_id) -> Event | None:
+        """Return the latest recorded completion for the currently bound room."""
+        with self._connect() as db:
+            row = db.execute("""SELECT e.id,e.role,e.text,e.at FROM compaction_items c
+                JOIN room r ON r.id=1 AND r.thread_id=c.thread_id
+                JOIN events e ON e.id=c.event_id WHERE c.thread_id=? ORDER BY e.id DESC LIMIT 1""",
+                             (thread_id,)).fetchone()
+            return Event(**dict(row)) if row is not None else None
 
     def provider_route(self, default: str) -> str:
         """Use the worker startup preference until Lantern makes its first choice."""

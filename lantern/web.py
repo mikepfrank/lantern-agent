@@ -271,7 +271,9 @@ class RoomHandler(BaseHTTPRequestHandler):
                 rows = store.recent(limit=PAGE_SIZE + 1, before=cursor)
                 events = rows[-PAGE_SIZE:]
             state = store.status()
-            status = {"online": worker_online(self.server.state), "working": state["active_batch"] is not None,
+            online = worker_online(self.server.state)
+            status = {"online": online, "working": state["active_batch"] is not None,
+                      "compacting": online and state["compacting"],
                       "queued": state["queued"]}
         except (OSError, sqlite3.Error):
             self._json(503, {"error": "The conversation store is temporarily unavailable."})

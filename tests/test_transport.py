@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 from lantern.transport import MODEL, OpenRouterGateway, UpstreamStreamEnded, _open_upstream
 from lantern.image_ref import image_reference
+from lantern.chat_store import Event as RoomEvent
 from lantern.independent_tools import PROVIDER_STATS_TOOL
 from lantern.routing import ROUTE_TOOL
 
@@ -265,6 +266,20 @@ class TransportTests(unittest.TestCase):
                 self.assertIn("notes/handoff.md", send(declared, {"type": "function", "name": tool["name"]}))
             due.return_value = False
             self.assertNotIn("notes/handoff.md", send(declared))
+
+    def test_completed_compaction_is_visible_to_the_model_at_its_room_reference(self):
+        text = "The agent harness compacted the context at 2026-11-27 11:18:07 AM CST."
+        latest = Mock(return_value=None)
+        with self.gateway("fastest", latest_compaction=latest) as gate:
+            self.assertEqual(200, self.request(gate)[0])
+            self.assertNotIn("Latest context compaction", str(self.wire[-1][0]["input"]))
+            latest.return_value = RoomEvent(12, "system", text, "2026-11-27T17:18:07Z")
+            self.assertEqual(200, self.request(gate)[0])
+            marker, operator = self.wire[-1][0]["input"]
+            self.assertEqual(marker["role"], "developer")
+            self.assertIn("Service, room:12", marker["content"][0]["text"])
+            self.assertIn(text, marker["content"][0]["text"])
+            self.assertEqual(operator, {"role": "user", "content": "A move?"})
 
     def test_single_durable_observation_per_dispatch(self):
         finish = Mock()
