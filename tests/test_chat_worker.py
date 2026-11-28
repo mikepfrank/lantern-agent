@@ -10,6 +10,7 @@ import unittest
 from lantern.chat_store import ChatStore
 from lantern.chat_worker import RoomReplyDelivery, WorkerBusy, process_batch, serve, worker_lock, worker_online
 from lantern.codex_session import CodexError
+from lantern.file_grants import FileGrants
 
 
 def run_worker(state, block):
@@ -72,6 +73,33 @@ class ChatWorkerTests(unittest.TestCase):
     def setUp(self):
         self.state = Path(self.enterContext(TemporaryDirectory()))
         self.store = ChatStore(self.state)
+
+    def test_sidebar_approval_wakes_separate_turn_without_heartbeat(self):
+        self.store.submit("Working on something else")
+        active = self.store.claim()
+        self.store.bind_thread(active.id, "native-thread")
+        grants = FileGrants(self.state)
+        request = grants.propose("Research", "Observations", [
+            {"filename": "data.csv", "url": "https://example.org/data.csv"}])
+        grants.decide(request["id"], "allow_once", room=self.store)
+        notice = self.store.recent(1)[0]
+        self.assertEqual("system", notice.role)
+        self.assertEqual((), self.store.claim_steer(active.id))
+        self.assertIsNone(self.store.claim(include_scheduled=False))
+        self.store.complete(active.id, "Original work is done")
+
+        worker = ChatStore(self.state)
+        batch = worker.claim(include_scheduled=False)
+        self.assertEqual((notice,), batch.messages)
+
+        async def answer(prompt, route, thread, *, trigger, scheduled=False, **kwargs):
+            self.assertEqual(("native-thread", notice.text, "import_approval"), (thread, prompt, trigger))
+            self.assertFalse(scheduled)
+            return SimpleNamespace(text="Thanks for approving the import."), []
+
+        asyncio.run(process_batch(worker, batch, answer, "fastest"))
+        self.assertEqual("Thanks for approving the import.", worker.recent(1)[0].text)
+        self.assertIsNone(worker.claim(include_scheduled=False))
 
     def start_worker(self, *, block):
         proc = multiprocessing.get_context("spawn").Process(target=run_worker, args=(self.state, block))

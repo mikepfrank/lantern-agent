@@ -8,6 +8,7 @@ import unittest
 
 from lantern.attachments import parse_image
 from lantern.chat_store import ChatStore
+from lantern.file_grants import FileGrants
 from lantern.scheduler import DailyBudgetHold
 from test_attachments import png, upload
 
@@ -16,6 +17,35 @@ class ChatStoreTests(unittest.TestCase):
     def setUp(self):
         self.state = Path(self.enterContext(TemporaryDirectory()))
         self.store = ChatStore(self.state)
+
+    def test_approval_is_queued_behind_operator_and_obeys_budget(self):
+        # A pending scheduled input can predate the approval if the operator disabled scheduling.
+        with self.store._connect(write=True) as db:
+            reminder = self.store._append(db, "system", "A pending continuation")
+            db.execute("INSERT INTO inbox(event_id) VALUES(?)", (reminder,))
+        grants = FileGrants(self.state)
+        request = grants.propose("Science", "Spectra", [
+            {"filename": "table.csv", "url": "https://example.org/table.csv"}])
+        grants.decide(request["id"], "allow_standing", room=self.store)
+        approval = self.store.recent(1)[0]
+        human = self.store.submit(approval.text)  # The text alone confers no Service provenance.
+        batch = self.store.claim(include_scheduled=False)
+        self.assertEqual([human], [e.id for e in batch.messages])
+        self.assertFalse(batch.import_approval)
+        self.store.complete(batch.id, "Responded to the operator")
+
+        now = datetime(2026, 11, 28, 12, tzinfo=timezone.utc)
+        self.store.clock = lambda: now
+        self.assertIsNone(self.store.claim(budget_check=lambda: False, include_scheduled=False))
+        now += timedelta(days=1)
+        approved = self.store.claim(budget_check=lambda: True, include_scheduled=False)
+        self.assertEqual((approval,), approved.messages)
+        self.assertTrue(approved.import_approval)
+        self.store.complete(approved.id, "Got the grant")
+        self.assertIsNone(self.store.claim(include_scheduled=False))
+        previous = self.store.claim()
+        self.assertEqual([reminder], [e.id for e in previous.messages])
+        self.assertFalse(previous.import_approval)
 
     def test_compaction_notice_is_durable_timestamped_and_idempotent(self):
         start = self.store.submit("Time test")

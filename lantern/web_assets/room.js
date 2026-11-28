@@ -695,6 +695,7 @@ async function changeGrant(panel, path, body, fromForm = false) {
   try {
     await request(path, body);
     if (fromForm) importsDialog.close();
+    if (body.decision === "allow_once" || body.decision === "allow_standing") void poll();
   } catch (error) {
     if (authenticated) feedback.textContent = error.message || "Update unconfirmed. Check the list before retrying.";
   } finally {

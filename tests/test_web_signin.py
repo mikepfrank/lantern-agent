@@ -1,10 +1,11 @@
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from hashlib import sha256
 from http.client import HTTPConnection
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Thread
+from threading import Barrier, Thread
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -155,6 +156,11 @@ class WebSignInTests(unittest.TestCase):
             reopened, = overview()["requests"]
             self.assertEqual(200, post(f"{route}/{reopened['id']}/decide", {"decision": "deny"}))
             self.assertFalse(overview()["grants"])
+            notice, = request(server, "GET", "/api/room", headers=cookie)[2]["events"]
+            self.assertEqual("system", notice["role"])
+            for expected in (f"#{approved['id']}", "counts.csv", "sky.txt", "repeat import", "import_file"):
+                self.assertIn(expected, notice["text"])
+            self.assertEqual(1, server.store.status()["queued"])
 
     def test_agent_pdf_request_can_be_approved_imported_and_viewed(self):
         source = "https://example.org/papers/handout.pdf"
@@ -193,7 +199,20 @@ class WebSignInTests(unittest.TestCase):
             self.assertEqual(401, request(server, "POST", decide, body=decision)[0])
             server.auth.set_password(PASSWORD)
             cookie = self.sign_in(server)
-            self.assertEqual(200, request(server, "POST", decide, headers=cookie, body=decision)[0])
+            ready = Barrier(2)
+            def approve():
+                ready.wait(timeout=5)
+                return request(server, "POST", decide, headers=cookie, body=decision)[0]
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                clicks = [pool.submit(approve) for _ in range(2)]
+                self.assertEqual([200, 200], [click.result() for click in clicks])
+            notice, = request(server, "GET", "/api/room", headers=cookie)[2]["events"]
+            self.assertEqual("system", notice["role"])
+            self.assertIn(spec["filename"], notice["text"])
+            self.assertIn("import_file", notice["text"])
+            self.assertIn("one delivery", notice["text"])
+            wake, = server.store.claim().messages
+            self.assertEqual((notice["id"], notice["text"]), (wake.id, wake.text))
             receipt = call("import_file", args, "approved")
             self.assertEqual((receipt["status"], receipt["path"], receipt["size_bytes"], receipt["sha256"]),
                              ("imported", target, len(document), digest))
@@ -242,6 +261,47 @@ class WebSignInTests(unittest.TestCase):
             again, = overview()["requests"]
             self.assertEqual(200, post(f"{route}/{again['id']}/decide", {"decision": "allow_once"}))
             self.assertEqual("once", overview()["grants"][0]["mode"])
+            first, last = request(server, "GET", "/api/room", headers=cookie)[2]["events"]
+            for event, grant_id, scope in ((first, proposal["id"], "future updates"),
+                                            (last, again["id"], "this commit only")):
+                self.assertEqual("system", event["role"])
+                for expected in (f"#{grant_id}", "example/science", "research", remote["commit"], scope,
+                                 "clone_repository"):
+                    self.assertIn(expected, event["text"])
+            self.assertEqual(2, server.store.status()["queued"])
+
+    def test_failed_notice_rolls_back_the_grant_and_retry_survives_restart(self):
+        with listening(self.state) as server:
+            server.auth.set_password(PASSWORD)
+            cookie = self.sign_in(server)
+            file = server.file_grants.propose("Weather", "Station", [
+                {"filename": "wind.csv", "url": "https://example.org/wind.csv"}])
+            remote = {"repository_id": 11, "branch": "weather", "commit": "ac" * 20}
+            with patch("lantern.clone_grants.resolve_branch", return_value=remote):
+                repo = server.clone_grants.propose("example/weather", "Read station data.")
+            self.assertEqual(file["id"], repo["id"])  # The two grant ledgers allocate IDs independently.
+            paths = [f"/api/file-imports/{file['id']}/decide", f"/api/repository-clones/{repo['id']}/decide"]
+            allow = {"decision": "allow_once"}
+            with server.store._connect(write=True) as db:
+                db.execute("""CREATE TRIGGER refuse_notice BEFORE INSERT ON inbox BEGIN
+                              SELECT RAISE(ABORT, 'synthetic queue failure'); END""")
+            for path in paths:
+                self.assertEqual(503, request(server, "POST", path, body=allow, headers=cookie)[0])
+            self.assertEqual([], server.store.events())
+            self.assertEqual("pending", server.file_grants.status(file["id"])["status"])
+            self.assertEqual("pending", server.clone_grants.status(repo["id"])["status"])
+            with server.store._connect(write=True) as db:
+                db.execute("DROP TRIGGER refuse_notice")
+            for path in paths:
+                self.assertEqual(200, request(server, "POST", path, body=allow, headers=cookie)[0])
+
+        with listening(self.state) as restarted:
+            for path in paths:
+                self.assertEqual(200, request(restarted, "POST", path, body=allow, headers=cookie)[0])
+            file_event, repo_event = request(restarted, "GET", "/api/room", headers=cookie)[2]["events"]
+            self.assertIn("wind.csv", file_event["text"])
+            self.assertIn("example/weather", repo_event["text"])
+            self.assertEqual(2, restarted.store.status()["queued"])
 
     def test_sessions_survive_restart_and_approve_a_review_once(self):
         with listening(self.state) as first:

@@ -114,20 +114,26 @@ class FileGrants:
                                    VALUES(?,?,?,?)""", (project, collection, encoded, _now())).lastrowid
             return self._entry(db.execute("SELECT * FROM grants WHERE id=?", (number,)).fetchone())
 
-    def decide(self, request_id, decision):
+    def decide(self, request_id, decision, *, room=None):
         choices = {"allow_once": ("approved", "once"), "allow_standing": ("approved", "standing"),
                    "deny": ("denied", None)}
         if not isinstance(decision, str) or decision not in choices:
             raise ValueError("Choose allow_once, allow_standing, or deny.")
         status, mode = choices[decision]
         with self.connect(write=True) as db:
-            row = db.execute("SELECT status,mode FROM grants WHERE id=?", (_id(request_id),)).fetchone()
+            row = db.execute("SELECT status,mode,files FROM grants WHERE id=?", (_id(request_id),)).fetchone()
             if row is None:
                 raise ValueError("Unknown file import request.")
             if row["status"] == "pending":
                 db.execute("UPDATE grants SET status=?,mode=?,decided_at=? WHERE id=?",
                            (status, mode, _now(), request_id))
-            elif tuple(row) != (status, mode):
+                if room is not None and status == "approved":
+                    names = ", ".join(file["filename"] for file in json.loads(row["files"]))
+                    scope = "one delivery of each listed file" if mode == "once" else "standing permission for repeat imports"
+                    text = (f"The operator approved file import grant #{request_id} ({scope}). "
+                            f"Files: {names}. Use import_file with grant_id {request_id} and the filename.")
+                    room.record_import_approval(db, "file", request_id, mode, text)
+            elif (row["status"], row["mode"]) != (status, mode):
                 raise ValueError("This request already has a different decision. Refresh the room.")
             return {"id": request_id, "status": status, "mode": mode}
 

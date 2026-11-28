@@ -105,7 +105,7 @@ def _record(kind, row):
     for name, allowed in [
         ("tool", TOOLS), ("model", {"luna", "opus", "qwen", "claude-sonnet-4-6"}),
         ("purpose", {"tool", "spot", "consult", "escalation", "context_review", "shadow_review"}),
-        ("trigger", {"operator", "heartbeat", "alarm", "continuation", "turn", "worker"}),
+        ("trigger", {"operator", "import_approval", "heartbeat", "alarm", "continuation", "turn", "worker"}),
         ("charge_source", {"openrouter", "router_no_eligible_endpoint"}), ("route", ROUTES),
         ("request_outcome", REQUEST_OUTCOMES),
         ("flag_kind", {"tool", "context", "unregistered_tool"}),

@@ -151,11 +151,14 @@ async def process_batch(store, batch, turn, route):
         return {"event_id": store.notify(batch.id, text, call_id), "delivered_to": "operator chat"}
 
     prompt = "\n\n".join(event.text for event in batch.messages)
-    source = {"scheduled": True} if batch.messages[0].role == "system" else {}
+    source = {}
     if parts := _message_parts(batch.messages):
         source["input_parts"] = parts
     trigger = "operator"
-    if source.get("scheduled"):
+    if batch.import_approval:
+        trigger = "import_approval"
+    elif batch.messages[0].role == "system":
+        source["scheduled"] = True
         first = batch.messages[0].text
         if first.startswith("Scheduled heartbeat."):
             trigger = "heartbeat"

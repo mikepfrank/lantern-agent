@@ -66,6 +66,8 @@ Lantern can also propose a group with `request_file_import`, check the room deci
 
 Lantern can independently choose a public GitHub repository and use `request_repository_clone` to submit its name, an optional branch and a reason for studying it. **Repository clones** in the signed-in room shows the exact commit. Mike can approve that revision once, allow updates to the same branch, or deny the request. Lantern checks `repository_clone_status` and calls `clone_repository` with the numeric grant ID. Each delivered revision gets its own editable directory under `/work/repos`. [Clone limits and acceptance check](deploy/README.md#approved-repository-clones)
 
+Approving a file import or repository clone in the sidebar posts a **Service** message in chat with the grant ID, approved items and scope. The message queues a turn for Lantern, including when heartbeats are paused. If Lantern is busy, it can respond after the current turn finishes.
+
 When a single Qwen request in the current thread reports at least 180,000 input and output tokens combined, the worker reminds Lantern to update its handoff on the next request where it can write files. Lantern can use its existing handoff or `notes/handoff.md` and skip the write if the notes are current. Codex still controls when compaction runs.
 
 While Codex compacts the active room, a status line appears above the web message box. Each confirmed completion adds a Service entry with its US Central timestamp to the conversation. Lantern receives the latest completion and its `room:` reference with subsequent tool-enabled model requests. Earlier notices can be found with `history_search` using `source="service"` and `query="compaction"`.

@@ -505,7 +505,7 @@ class RoomHandler(BaseHTTPRequestHandler):
             if route[2] == "decide":
                 if set(body) != {"decision"} or body["decision"] not in ("allow_once", "allow_standing", "deny"):
                     raise ValueError("Choose allow once, standing permission or deny.")
-                grants.decide(number, body["decision"])
+                grants.decide(number, body["decision"], room=self.server.store)
             elif route[2] == "revoke":
                 if body:
                     raise ValueError("Revoking a grant takes no additional fields.")

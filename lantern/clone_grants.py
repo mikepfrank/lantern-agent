@@ -2,6 +2,7 @@
 
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
+import json
 import re
 import sqlite3
 
@@ -102,18 +103,25 @@ class CloneGrants:
         return self._request(row["repository"], row["repository_id"], row["branch"], row["commit"],
                              row["purpose"], reopen=True)
 
-    def decide(self, request_id, decision):
+    def decide(self, request_id, decision, *, room=None):
         modes = {"allow_once": "once", "allow_standing": "standing", "deny": None}
         if not isinstance(decision, str) or decision not in modes:
             raise ValueError("Choose allow once, allow branch updates, or deny.")
         status, mode = ("denied" if decision == "deny" else "approved"), modes[decision]
         with self.connect(write=True) as db:
-            row = db.execute("SELECT status,mode FROM grants WHERE id=?", (_id(request_id),)).fetchone()
+            row = db.execute("SELECT status,mode,repository,branch,tip FROM grants WHERE id=?",
+                             (_id(request_id),)).fetchone()
             if not row:
                 raise ValueError("Unknown repository request.")
             if row["status"] == "pending":
                 db.execute("UPDATE grants SET status=?,mode=?,decided_at=? WHERE id=?",
                            (status, mode, _now(), request_id))
+                if room is not None and status == "approved":
+                    branch = json.dumps(row["branch"], ensure_ascii=False)
+                    scope = "this commit only" if mode == "once" else "standing permission for future updates on this branch"
+                    text = (f"The operator approved repository clone grant #{request_id} for {row['repository']} "
+                            f"on branch {branch} at {row['tip']} ({scope}). Use clone_repository with grant_id {request_id}.")
+                    room.record_import_approval(db, "repository", request_id, mode, text)
             elif (row["status"], row["mode"]) != (status, mode):
                 raise ValueError("This request already has a decision. Refresh the room.")
             return {"id": request_id, "status": status, "mode": mode}

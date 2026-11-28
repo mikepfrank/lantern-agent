@@ -58,6 +58,7 @@ class Batch:
     id: int
     thread_id: str | None
     messages: tuple[Event, ...]
+    import_approval: bool = False
 
 
 class ChatStore:
@@ -81,6 +82,11 @@ class ChatStore:
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY, role TEXT NOT NULL, text TEXT NOT NULL,
                     at TEXT NOT NULL, client_id TEXT UNIQUE);
+                CREATE TABLE IF NOT EXISTS import_approval_events (
+                    event_id INTEGER PRIMARY KEY REFERENCES events(id),
+                    grant_type TEXT NOT NULL CHECK(grant_type IN ('file','repository')),
+                    grant_id INTEGER NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('once','standing')),
+                    UNIQUE(grant_type,grant_id));
                 CREATE TABLE IF NOT EXISTS message_images (
                     event_id INTEGER PRIMARY KEY REFERENCES events(id), width INTEGER NOT NULL,
                     height INTEGER NOT NULL, sha256 TEXT NOT NULL, data BLOB NOT NULL);
@@ -136,6 +142,15 @@ class ChatStore:
         now = (at if at is not None else self.clock()).isoformat()
         return db.execute("INSERT INTO events(role,text,at,client_id) VALUES(?,?,?,?)",
                           (role, text, now, client_id)).lastrowid
+
+    def record_import_approval(self, grant_db, grant_type, grant_id, mode, text):
+        """Commit approval, Service event and wake together in the grant ledger's transaction."""
+        grant_db.execute("ATTACH DATABASE ? AS chat", (str(self.path),))
+        event_id = grant_db.execute("INSERT INTO chat.events(role,text,at) VALUES('system',?,?)",
+                                    (text, self.clock().isoformat())).lastrowid
+        grant_db.execute("""INSERT INTO chat.import_approval_events(event_id,grant_type,grant_id,mode)
+            VALUES(?,?,?,?)""", (event_id, grant_type, grant_id, mode))
+        grant_db.execute("INSERT INTO chat.inbox(event_id) VALUES(?)", (event_id,))
 
     def submit(self, text: str, client_id: str | None = None, *, image: ImageAttachment | None = None,
                images: tuple[ImageAttachment, ...] | list[ImageAttachment] = ()) -> int:
@@ -324,10 +339,11 @@ class ChatStore:
         return {"route": route, "sort": ROUTES[route]}
 
     @staticmethod
-    def _pending(db, limit, role="operator", *, image_slots=MAX_TURN_IMAGES):
+    def _pending(db, limit, role="operator", *, image_slots=MAX_TURN_IMAGES, approvals_only=False):
         if limit < 1:
             raise ValueError("Batch size must be positive")
-        rows = db.execute(EVENT_SELECT + """JOIN inbox i ON e.id=i.event_id
+        approval_join = " JOIN import_approval_events a ON a.event_id=e.id " if approvals_only else ""
+        rows = db.execute(EVENT_SELECT + approval_join + """JOIN inbox i ON e.id=i.event_id
             WHERE i.batch_id IS NULL AND e.role=? ORDER BY i.event_id LIMIT ?""", (role, limit))
         messages = []
         for row in rows:
@@ -441,7 +457,7 @@ class ChatStore:
             raise ValueError("Chat turn is no longer active")
 
     def claim(self, limit: int = 16, *, budget_check=None, include_scheduled=True) -> Batch | None:
-        """Admit human input first, then a deferred continuation, due alarm, or one idle heartbeat."""
+        """Admit human input first, then queued Service wakes, due alarms or an idle heartbeat."""
         with self._connect(write=True) as db:
             operator_release.process_commands(self, db)
             if db.execute("SELECT 1 FROM batches WHERE status='active'").fetchone():
@@ -452,9 +468,10 @@ class ChatStore:
             if (schedule["budget_until"] or "") > stamp:
                 return None
             messages = self._pending(db, limit)
+            if not messages:
+                messages = self._pending(db, 1, "system", approvals_only=not include_scheduled)
             if not messages and not include_scheduled:
                 return None
-            messages = messages or self._pending(db, 1, "system")
             alarm = None
             if not messages:
                 alarm = db.execute("""SELECT id,at_utc,note FROM alarms WHERE status='pending'
@@ -482,7 +499,9 @@ class ChatStore:
             batch_id = db.execute("INSERT INTO batches(status) VALUES('active')").lastrowid
             self._assign(db, messages, batch_id, False)
             thread_id = db.execute("SELECT thread_id FROM room WHERE id=1").fetchone()[0]
-            return Batch(batch_id, thread_id, messages)
+            approval = messages[0].role == "system" and db.execute(
+                "SELECT 1 FROM import_approval_events WHERE event_id=?", (messages[0].id,)).fetchone() is not None
+            return Batch(batch_id, thread_id, messages, import_approval=approval)
 
     def defer_for_budget(self, batch_id, hold):
         """A local cap can block the first call or interrupt a turn after effects are possible."""
